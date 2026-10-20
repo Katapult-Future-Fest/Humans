@@ -57,76 +57,6 @@ public sealed class RoleAssignmentServiceTests : AuthTestHarness
     }
 
     [HumansFact]
-    public async Task HasOverlappingAssignmentAsync_NoAssignments_ReturnsFalse()
-    {
-        var userId = Guid.NewGuid();
-
-        var result = await _service.HasOverlappingAssignmentAsync(userId, "Board", Clock.GetCurrentInstant(), cancellationToken: TestContext.Current.CancellationToken);
-
-        result.Should().BeFalse();
-    }
-
-    [HumansFact]
-    public async Task HasOverlappingAssignmentAsync_PastEndedWindow_ReturnsFalse()
-    {
-        var userId = Guid.NewGuid();
-        await AddAssignmentAsync(
-            userId,
-            "Board",
-            Clock.GetCurrentInstant() - Duration.FromDays(20),
-            Clock.GetCurrentInstant() - Duration.FromDays(10));
-
-        var result = await _service.HasOverlappingAssignmentAsync(userId, "Board", Clock.GetCurrentInstant(), cancellationToken: TestContext.Current.CancellationToken);
-
-        result.Should().BeFalse();
-    }
-
-    [HumansFact]
-    public async Task HasOverlappingAssignmentAsync_OpenEndedActiveWindow_ReturnsTrue()
-    {
-        var userId = Guid.NewGuid();
-        await AddAssignmentAsync(
-            userId,
-            "Board",
-            Clock.GetCurrentInstant() - Duration.FromDays(5),
-            null);
-
-        var result = await _service.HasOverlappingAssignmentAsync(userId, "Board", Clock.GetCurrentInstant(), cancellationToken: TestContext.Current.CancellationToken);
-
-        result.Should().BeTrue();
-    }
-
-    [HumansFact]
-    public async Task HasOverlappingAssignmentAsync_FutureWindow_ReturnsTrue()
-    {
-        var userId = Guid.NewGuid();
-        await AddAssignmentAsync(
-            userId,
-            "Board",
-            Clock.GetCurrentInstant() + Duration.FromDays(10),
-            null);
-
-        var result = await _service.HasOverlappingAssignmentAsync(userId, "Board", Clock.GetCurrentInstant(), cancellationToken: TestContext.Current.CancellationToken);
-
-        result.Should().BeTrue();
-    }
-
-    [HumansFact]
-    public async Task HasOverlappingAssignmentAsync_DifferentRole_ReturnsFalse()
-    {
-        var userId = Guid.NewGuid();
-        await AddAssignmentAsync(
-            userId,
-            "Lead",
-            Clock.GetCurrentInstant() - Duration.FromDays(5),
-            null);
-
-        var result = await _service.HasOverlappingAssignmentAsync(userId, "Board", Clock.GetCurrentInstant(), cancellationToken: TestContext.Current.CancellationToken);
-
-        result.Should().BeFalse();
-    }
-
-    [HumansFact]
     public async Task AssignRoleAsync_InvalidatesCachedClaimsForUser()
     {
         var userId = Guid.NewGuid();
@@ -302,6 +232,56 @@ public sealed class RoleAssignmentServiceTests : AuthTestHarness
             .Where(ra => ra.UserId == userId)
             .ToListAsync(TestContext.Current.CancellationToken);
         rows.Should().ContainSingle();
+    }
+
+    [HumansFact]
+    public async Task EndRoleAsync_NotificationThrows_StillSucceeds()
+    {
+        var userId = Guid.NewGuid();
+        var enderId = Guid.NewGuid();
+        await SeedUserAsync(userId, "Target");
+        await SeedUserAsync(enderId, "Admin");
+        var assignment = await AddAssignmentAsync(
+            userId, RoleNames.Board, Clock.GetCurrentInstant() - Duration.FromDays(1), null);
+        Notifier
+            .SendAsync(
+                Arg.Any<NotificationSource>(), Arg.Any<NotificationClass>(),
+                Arg.Any<NotificationPriority>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<Guid>>(),
+                Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<string?>(),
+                Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
+            .ThrowsAsync(new InvalidOperationException("notifications down"));
+
+        var result = await _service.EndRoleAsync(
+            assignment.Id, enderId, null, TestContext.Current.CancellationToken);
+
+        result.Success.Should().BeTrue();
+        var row = await AuthDb.RoleAssignments.AsNoTracking()
+            .SingleAsync(ra => ra.Id == assignment.Id, TestContext.Current.CancellationToken);
+        row.ValidTo.Should().NotBeNull();
+    }
+
+    [HumansFact]
+    public async Task AssignRoleAsync_AfterEnd_WritesANewRow_AndLeavesTheEndedOneEnded()
+    {
+        var userId = Guid.NewGuid();
+        var adminId = Guid.NewGuid();
+        await SeedUserAsync(userId, "Target");
+        await SeedUserAsync(adminId, "Admin");
+        var first = await AddAssignmentAsync(
+            userId, RoleNames.Board, Clock.GetCurrentInstant() - Duration.FromDays(10), null);
+        (await _service.EndRoleAsync(first.Id, adminId, null, TestContext.Current.CancellationToken))
+            .Success.Should().BeTrue();
+
+        var result = await _service.AssignRoleAsync(
+            userId, RoleNames.Board, adminId, null, TestContext.Current.CancellationToken);
+
+        result.Success.Should().BeTrue();
+        var rows = await AuthDb.RoleAssignments.AsNoTracking()
+            .Where(ra => ra.UserId == userId)
+            .ToListAsync(TestContext.Current.CancellationToken);
+        rows.Should().HaveCount(2);
+        rows.Single(ra => ra.Id == first.Id).ValidTo.Should().NotBeNull();
+        rows.Single(ra => ra.Id != first.Id).ValidTo.Should().BeNull();
     }
 
     [HumansFact]

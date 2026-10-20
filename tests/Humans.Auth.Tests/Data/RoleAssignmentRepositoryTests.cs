@@ -92,12 +92,6 @@ public sealed class RoleAssignmentRepositoryTests : IDisposable
 
         result.Should().NotBeNull();
         result.Id.Should().Be(assignment.Id);
-        // Cross-domain navs must NOT be populated by the repository.
-#pragma warning disable CS0618
-        // Use property presence only (in-memory EF in tests may auto-fix the back-ref
-        // to a seeded User graph; what matters is the repository does not .Include it
-        // explicitly). No assertion needed for in-memory here beyond the positive path.
-#pragma warning restore CS0618
     }
 
     [HumansFact]
@@ -164,6 +158,46 @@ public sealed class RoleAssignmentRepositoryTests : IDisposable
 
         before.Should().BeFalse();
         after.Should().BeFalse();
+    }
+
+    [HumansFact]
+    public async Task HasOverlappingAssignmentAsync_EndedRow_DoesNotOverlapOpenEndedRangeFromNow()
+    {
+        var userId = Guid.NewGuid();
+        var now = _clock.GetCurrentInstant();
+        await SeedAssignmentAsync(userId, RoleNames.Board,
+            now - Duration.FromDays(20), now - Duration.FromDays(10));
+
+        var hasOverlap = await _repo.HasOverlappingAssignmentAsync(
+            userId, RoleNames.Board, now, validTo: null, ct: Xunit.TestContext.Current.CancellationToken);
+
+        hasOverlap.Should().BeFalse();
+    }
+
+    [HumansFact]
+    public async Task HasOverlappingAssignmentAsync_NotYetStarted_OverlapsOpenEndedRangeFromNow()
+    {
+        var userId = Guid.NewGuid();
+        var now = _clock.GetCurrentInstant();
+        await SeedAssignmentAsync(userId, RoleNames.Board, now + Duration.FromDays(10), null);
+
+        var hasOverlap = await _repo.HasOverlappingAssignmentAsync(
+            userId, RoleNames.Board, now, validTo: null, ct: Xunit.TestContext.Current.CancellationToken);
+
+        hasOverlap.Should().BeTrue();
+    }
+
+    [HumansFact]
+    public async Task HasOverlappingAssignmentAsync_OtherRole_DoesNotOverlap()
+    {
+        var userId = Guid.NewGuid();
+        var now = _clock.GetCurrentInstant();
+        await SeedAssignmentAsync(userId, RoleNames.Admin, now - Duration.FromDays(5), null);
+
+        var hasOverlap = await _repo.HasOverlappingAssignmentAsync(
+            userId, RoleNames.Board, now, validTo: null, ct: Xunit.TestContext.Current.CancellationToken);
+
+        hasOverlap.Should().BeFalse();
     }
 
     [HumansFact]
