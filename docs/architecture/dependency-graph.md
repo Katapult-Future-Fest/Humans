@@ -196,6 +196,7 @@ graph LR
     ExpenseReport[ExpenseReportService]:::expenses
     ExpensePublisher[ExpenseHoldedPublisher]:::expenses
     ExpenseBgProc[ExpenseReportBackgroundProcessor]:::expenses
+    ExpenseBookings[ExpenseHoldedBookingService]:::expenses
 
     Container[ContainerService]:::containers
 
@@ -489,6 +490,11 @@ graph LR
     Finance --> User
     Finance --> UEmail
     Finance --> Email
+    Finance --> ExpenseBookings
+    %% Finance -> Expenses is the section project (IExpenseHoldedBookingService, read-only);
+    %% Expenses -> Finance is the Finance.Contracts leaf, so the project graph stays acyclic.
+    %% ExpenseBookings is not ExpenseReport: ExpenseReport -> Finance, so Finance -> ExpenseReport
+    %% was a DI cycle that hung every request (peterdrier/Humans#2034).
 
     %% Calendar
     Cal --> Audit
@@ -569,6 +575,7 @@ graph LR
     ExpenseBgProc --> Holded
     ExpenseBgProc --> Finance
     ExpenseBgProc --> Audit
+    ExpenseBookings --> User
 
     %% Containers
     Container --> Camp
