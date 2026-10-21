@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using AwesomeAssertions;
 using Humans.AuditLog.Contracts;
+using Humans.Base.Authorization;
 using Humans.Base.Constants;
 using Humans.Camps.Contracts;
 using Humans.CityPlanning.Contracts;
@@ -12,6 +13,7 @@ using Humans.Containers.Contracts;
 using Microsoft.Extensions.Localization;
 using Humans.Teams.Contracts;
 using Humans.Users.Contracts;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.ViewFeatures;
@@ -84,9 +86,17 @@ public sealed class CityPlanningControllerSettingsRedirectTests : CityPlanningTe
     }
 
     [HumansFact]
-    public async Task UpdatePlacementDates_RedirectsToTheSettingsPageCityPlanningTab()
+    public async Task FollowPlacementSchedule_RedirectsToTheSettingsPageCityPlanningTab()
     {
-        var result = await _controller.UpdatePlacementDates(null, null, TestContext.Current.CancellationToken);
+        var result = await _controller.FollowPlacementSchedule(TestContext.Current.CancellationToken);
+
+        result.Should().BeOfType<RedirectResult>().Which.Url.Should().Be("/Settings#city-planning");
+    }
+
+    [HumansFact]
+    public async Task UpdatePlacementSchedule_RedirectsToTheSettingsPageCityPlanningTab()
+    {
+        var result = await _controller.UpdatePlacementSchedule(-30, -10, -5, TestContext.Current.CancellationToken);
 
         result.Should().BeOfType<RedirectResult>().Which.Url.Should().Be("/Settings#city-planning");
     }
@@ -98,6 +108,18 @@ public sealed class CityPlanningControllerSettingsRedirectTests : CityPlanningTe
 
         result.Should().BeOfType<RedirectResult>().Which.Url.Should().Be("/Settings#city-planning");
         (await _service.GetRegistrationInfoAsync(TestContext.Current.CancellationToken)).Should().Be("Bring water.");
+    }
+
+    [HumansTheory]
+    [InlineData(nameof(CityPlanningController.FollowPlacementSchedule))]
+    [InlineData(nameof(CityPlanningController.UpdatePlacementSchedule))]
+    public void PlacementScheduleActions_DeclareTheMapAdminPolicy(string action)
+    {
+        var policies = typeof(CityPlanningController).GetMethod(action)!
+            .GetCustomAttributes(typeof(AuthorizeAttribute), inherit: false)
+            .Cast<AuthorizeAttribute>().Select(a => a.Policy);
+
+        policies.Should().Contain(PolicyNames.CityPlanningMapAdmin);
     }
 
     [HumansTheory]
