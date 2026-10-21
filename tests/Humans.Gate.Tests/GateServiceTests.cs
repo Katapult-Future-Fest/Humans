@@ -80,7 +80,7 @@ public class GateServiceTests
     private readonly ITicketService _tickets = Substitute.For<ITicketService>();
     private readonly IEarlyEntryService _earlyEntry = Substitute.For<IEarlyEntryService>();
     private readonly ISettingsService _burn = Substitute.For<ISettingsService>();
-    private readonly IShiftManagementService _shifts = Substitute.For<IShiftManagementService>();
+    private readonly IShiftService _shifts = Substitute.For<IShiftService>();
     private readonly IRoleAssignmentService _roles = Substitute.For<IRoleAssignmentService>();
     private readonly IPasswordHasher<GateStaffPin> _pinHasher = new PasswordHasher<GateStaffPin>();
     private readonly IAuditLogService _auditLog = Substitute.For<IAuditLogService>();
@@ -258,7 +258,7 @@ public class GateServiceTests
         r.Verdict.Should().Be(GateVerdict.Admitted);
         // CancellationToken.None pinned: the admit is durable, so a kiosk disconnect
         // (aborted request token) must not skip the projection.
-        await _users.Received(1).SetParticipationFromTicketSyncAsync(
+        await _users.Received(1).RecordParticipationAsync(
             GuestId, 2026, ParticipationStatus.Attended,
             Clock.GetCurrentInstant(), CancellationToken.None);
     }
@@ -270,7 +270,7 @@ public class GateServiceTests
         // failure must never turn an already-recorded admit into an error response.
         StubTicket(matchedUserId: GuestId);
         StubActiveEvent();
-        _users.SetParticipationFromTicketSyncAsync(
+        _users.RecordParticipationAsync(
                 default, default, default, default)
             .ThrowsAsyncForAnyArgs(new InvalidOperationException("unique index collision"));
 
@@ -286,7 +286,7 @@ public class GateServiceTests
         (await RecordAsync(idConfirmed: false)).Verdict.Should().Be(GateVerdict.RejectedNameMismatch);
 
         await _users.DidNotReceiveWithAnyArgs()
-            .SetParticipationFromTicketSyncAsync(default, default, default, default);
+            .RecordParticipationAsync(default, default, default, default);
     }
 
     [HumansFact]
@@ -299,7 +299,7 @@ public class GateServiceTests
         (await RecordAsync(idConfirmed: true)).Verdict.Should().Be(GateVerdict.Admitted);
 
         await _users.DidNotReceiveWithAnyArgs()
-            .SetParticipationFromTicketSyncAsync(default, default, default, default);
+            .RecordParticipationAsync(default, default, default, default);
     }
 
     [HumansFact]
@@ -311,7 +311,7 @@ public class GateServiceTests
         (await RecordAsync(idConfirmed: true)).Verdict.Should().Be(GateVerdict.Admitted);
 
         await _users.DidNotReceiveWithAnyArgs()
-            .SetParticipationFromTicketSyncAsync(default, default, default, default);
+            .RecordParticipationAsync(default, default, default, default);
     }
 
     [HumansFact]
