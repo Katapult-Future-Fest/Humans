@@ -102,11 +102,45 @@
                 var l = row.Line;
                 <tr>
                     <td class="text-nowrap">@l.Date.InZone(madrid).ToDateTimeUnspecified().ToInvariantDate()</td>
-                    <td>@l.Description</td>
+                    <td>@row.Description</td>
                     <td class="text-muted small">@l.Type</td>
                     <td class="text-end">@(l.Credit > 0 ? l.Credit.ToEuro() : "")</td>
                     <td class="text-end">@(l.Debit > 0 ? l.Debit.ToEuro() : "")</td>
                     <td class="text-end @(row.RunningBalance > 0 ? "finance-positive" : row.RunningBalance < 0 ? "finance-negative" : "")">@row.RunningBalance.ToEuro()</td>
+                </tr>
+            }
+            </tbody>
+        </table>
+    }
+</div>
+
+<div class="card mt-4">
+    <div class="card-header">Expense reports booked to this account (submitted and later; approved reports are the ones pushed to Holded)</div>
+    @if (Model.ExpenseReports.Count == 0)
+    {
+        <div class="card-body text-muted text-center py-4">No expense reports are booked to this account.</div>
+    }
+    else
+    {
+        <table class="table table-sm table-hover mb-0 align-middle">
+            <thead><tr>
+                <th>Report</th>
+                <th>Status</th>
+                <th>Subject</th>
+                <th>Approved</th>
+                <th class="text-end">Holded documents</th>
+                <th class="text-end">Payable</th>
+            </tr></thead>
+            <tbody>
+            @foreach (var r in Model.ExpenseReports)
+            {
+                <tr>
+                    <td class="text-nowrap"><a href="/Expenses/@r.Id">@r.Id.ToString()[..8]…</a></td>
+                    <td class="text-nowrap">@r.Status</td>
+                    <td>@r.Note</td>
+                    <td class="text-nowrap">@(r.ApprovedAt?.InZone(madrid).Date.ToInvariantDate())</td>
+                    <td class="text-end">@r.HoldedDocIds.Count</td>
+                    <td class="text-end">@r.Payable.ToEuro()</td>
                 </tr>
             }
             </tbody>
