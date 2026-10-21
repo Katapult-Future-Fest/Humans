@@ -310,6 +310,7 @@ The table-owning sections are listed below. The other section projects own no ta
 | **Survey** | `SurveyService` (`Humans.Surveys`) | `surveys`, `survey_questions`, `survey_question_options`, `survey_invitations`, `survey_responses`, `survey_answers` |
 | **Workgroups** | `WorkgroupService` (`Humans.Workgroups`; section-internal, cached by `CachingWorkgroupService`) | `workgroups`, `workgroup_members`, `workgroup_meetings`, `workgroup_documents`, `workgroup_document_comments`, `workgroup_log_entries`, `workgroups_settings` |
 | **Preapprovals** | `PreapprovalService` (`Humans.Preapprovals`; `IPreapprovalService` / `IPreapprovalWrite` public from its `Contracts/` folder, consumed by Expenses; `IPreapprovalManagement` section-internal) | `pre_programs`, `pre_program_managers`, `pre_grants`, `pre_reminders_sent` |
+| **Grants** | `GrantService` (`Humans.Grants`; `IGrantWrite` public from its `Contracts/` folder for source sections such as Low Income; `IGrantManagement` section-internal) | `grant_programs`, `grant_program_managers`, `grants` |
 
 **`system_settings` and `settings_event` are owned by the Settings section** (`Humans.Settings`; its internal `Service` / `Repository`) and exposed cross-section via `ISettingsService` — one interface, no `Read` suffix. Consuming sections read/write their keys through it rather than touching the tables directly. Currently-tracked keys (`SettingKeys`): `IsEmailSendingPaused` (Email's send-pause flag), `DriveActivityMonitor:LastRunAt` (Monitor's drive-monitor last-run), `Workgroups:RootDriveFolderId` (legacy read fallback only — Workgroups now owns its Drive root in `workgroups_settings`); these belong in their own sections' settings eventually, so the shared key/value store is not where new per-section state goes.
 
@@ -521,6 +522,7 @@ await _budgetService.DeleteLineItemAsync(id);
 | `SurveyAuthorizationHandler` (`Humans.Surveys.Authorization`) | `SurveyOperationRequirement` | `SurveyDetail` | Owner / Board / Admin checks by survey status |
 | `WorkgroupAuthorizationHandler` (`Humans.Workgroups.Authorization`) | `WorkgroupOperationRequirement` | `WorkgroupInfo` | Member / Board / Admin checks |
 | `ProgramAuthorizationHandler` (`Humans.Preapprovals.Authorization`) | `ProgramOperationRequirement` | `ProgramInfo` | Program manager (Manage) / Board, FinanceAdmin, Admin (Administer) checks |
+| `ProgramAuthorizationHandler` (`Humans.Grants.Authorization`) | `ProgramOperationRequirement` | `ProgramInfo` | Program manager (Manage) / Board, Admin (Administer) checks |
 | `OrderAuthorizationHandler` (`Humans.Store.Authorization`) | `OrderOperationRequirement` | `OrderDto` / `OrderCreateContext` / `OrderLineContext` | Camp-lead, coordinator, and store-admin checks (implements `IAuthorizationHandler` directly to span the three resource shapes) |
 | `AgentRateLimitHandler` (`Humans.Agent.Authorization`) | `AgentRateLimitRequirement` | `Guid` (user id) | Per-user agent message rate limit |
 
