@@ -2295,9 +2295,9 @@ public sealed class IssuesServiceTests
         var deleted = await _service.PurgeExpiredAsync(TestContext.Current.CancellationToken);
 
         deleted.Should().Be(3);
-        _issuesDb.Issues.Any(i => i.Id == toPurge).Should().BeFalse();
-        _issuesDb.Issues.Any(i => i.Id == alsoPurgeWontFix).Should().BeFalse();
-        _issuesDb.Issues.Any(i => i.Id == alsoPurgeDuplicate).Should().BeFalse();
+        (await _issuesDb.Issues.AnyAsync(i => i.Id == toPurge, Xunit.TestContext.Current.CancellationToken)).Should().BeFalse();
+        (await _issuesDb.Issues.AnyAsync(i => i.Id == alsoPurgeWontFix, Xunit.TestContext.Current.CancellationToken)).Should().BeFalse();
+        (await _issuesDb.Issues.AnyAsync(i => i.Id == alsoPurgeDuplicate, Xunit.TestContext.Current.CancellationToken)).Should().BeFalse();
     }
 
     [HumansFact]
@@ -2311,7 +2311,7 @@ public sealed class IssuesServiceTests
         var deleted = await _service.PurgeExpiredAsync(TestContext.Current.CancellationToken);
 
         deleted.Should().Be(0);
-        _issuesDb.Issues.Any(i => i.Id == keep).Should().BeTrue();
+        (await _issuesDb.Issues.AnyAsync(i => i.Id == keep, Xunit.TestContext.Current.CancellationToken)).Should().BeTrue();
     }
 
     [HumansFact]
@@ -2326,9 +2326,9 @@ public sealed class IssuesServiceTests
         var deleted = await _service.PurgeExpiredAsync(TestContext.Current.CancellationToken);
 
         deleted.Should().Be(0);
-        _issuesDb.Issues.Any(i => i.Id == keepOpen).Should().BeTrue();
-        _issuesDb.Issues.Any(i => i.Id == keepInProgress).Should().BeTrue();
-        _issuesDb.Issues.Any(i => i.Id == keepTriage).Should().BeTrue();
+        (await _issuesDb.Issues.AnyAsync(i => i.Id == keepOpen, Xunit.TestContext.Current.CancellationToken)).Should().BeTrue();
+        (await _issuesDb.Issues.AnyAsync(i => i.Id == keepInProgress, Xunit.TestContext.Current.CancellationToken)).Should().BeTrue();
+        (await _issuesDb.Issues.AnyAsync(i => i.Id == keepTriage, Xunit.TestContext.Current.CancellationToken)).Should().BeTrue();
     }
 
     [HumansFact]
@@ -2391,7 +2391,7 @@ public sealed class IssuesServiceTests
         var deleted = await _service.PurgeExpiredAsync(TestContext.Current.CancellationToken);
 
         deleted.Should().Be(1);
-        _issuesDb.Issues.Any(i => i.Id == issueId).Should().BeFalse();
+        (await _issuesDb.Issues.AnyAsync(i => i.Id == issueId, Xunit.TestContext.Current.CancellationToken)).Should().BeFalse();
     }
 
     // ==========================================================================
