@@ -61,11 +61,9 @@ public class AttendeeContactImportServiceApplyTests
             .UpsertAttendeesAsync(Arg.Is<IReadOnlyList<TicketAttendee>>(
                 l => l.Count == 1 && l[0].Id == attendeeId), Arg.Any<CancellationToken>());
 
-        await harness.UsersWrite.Received(1).SetParticipationFromTicketSyncAsync(
+        await harness.UsersWrite.Received(1).RecordParticipationAsync(
             targetUserId, 2026, scanned ? ParticipationStatus.Attended : ParticipationStatus.Ticketed,
             scanned ? scan : null, Arg.Any<CancellationToken>());
-
-        harness.TicketCacheInvalidator.Received(1).InvalidateAfterContactImport();
 
         await harness.Audit.Received(1).LogAsync(
             AuditAction.TicketContactsImported,
@@ -92,8 +90,7 @@ public class AttendeeContactImportServiceApplyTests
         harness.WithActiveYear(2026);
         harness.Provisioning.FindOrCreateUserByEmailAsync(
                 "fresh@x.com", "Fresh Face", ContactSource.TicketTailor, Arg.Any<CancellationToken>())
-            .Returns(new AccountProvisioningResult(
-                new User { Id = newUserId }, Created: true));
+            .Returns(new AccountProvisioningResult(newUserId, Created: true));
 
         var plan = new AttendeeImportPlan([
                 new AttendeeImportDecision(
@@ -111,7 +108,7 @@ public class AttendeeContactImportServiceApplyTests
         await harness.Provisioning.Received(1).FindOrCreateUserByEmailAsync(
             "fresh@x.com", "Fresh Face", ContactSource.TicketTailor, Arg.Any<CancellationToken>());
 
-        await harness.UsersWrite.Received(1).SetParticipationFromTicketSyncAsync(
+        await harness.UsersWrite.Received(1).RecordParticipationAsync(
             newUserId, 2026, ParticipationStatus.Ticketed,
             null, Arg.Any<CancellationToken>());
     }
@@ -136,7 +133,7 @@ public class AttendeeContactImportServiceApplyTests
         harness.WithActiveYear(2026);
         harness.Provisioning.ReplaceUnverifiedEmailAndProvisionAsync(
                 squatterId, squatterEmailId, "victim@x.com", "Victim", ContactSource.TicketTailor, Arg.Any<CancellationToken>())
-            .Returns(new AccountProvisioningResult(new User { Id = newUserId }, true));
+            .Returns(new AccountProvisioningResult(newUserId, true));
 
         var plan = new AttendeeImportPlan([
                 new AttendeeImportDecision(
@@ -157,7 +154,7 @@ public class AttendeeContactImportServiceApplyTests
 
         await harness.Provisioning.Received(1).ReplaceUnverifiedEmailAndProvisionAsync(
             squatterId, squatterEmailId, "victim@x.com", "Victim", ContactSource.TicketTailor, Arg.Any<CancellationToken>());
-        await harness.UserEmails.DidNotReceiveWithAnyArgs().DeleteEmailAsync(default, default, default);
+        await harness.UserEmails.DidNotReceiveWithAnyArgs().DeleteEmailAsync(default, default);
     }
 
     [HumansFact]
@@ -187,7 +184,7 @@ public class AttendeeContactImportServiceApplyTests
         harness.WithActiveYear(2026);
         harness.Provisioning.FindOrCreateUserByEmailAsync(
                 Arg.Any<string>(), Arg.Any<string?>(), ContactSource.TicketTailor, Arg.Any<CancellationToken>())
-            .Returns(_ => new AccountProvisioningResult(new User { Id = Guid.NewGuid() }, true));
+            .Returns(_ => new AccountProvisioningResult(Guid.NewGuid(), true));
 
         var plan = new AttendeeImportPlan([
             new AttendeeImportDecision(pickedId, "p@x.com", "P", "tkt_p",
@@ -232,7 +229,7 @@ public class AttendeeContactImportServiceApplyTests
         harness.WithActiveYear(2026);
         harness.Provisioning.FindOrCreateUserByEmailAsync(
                 "buyer@x.com", "Sara Smith", ContactSource.TicketTailor, Arg.Any<CancellationToken>())
-            .Returns(new AccountProvisioningResult(new User { Id = newUserId }, true));
+            .Returns(new AccountProvisioningResult(newUserId, true));
 
         var plan = new AttendeeImportPlan([
             new AttendeeImportDecision(
@@ -316,7 +313,7 @@ public class AttendeeContactImportServiceApplyTests
         extra.MatchedUserId.Should().Be(targetUserId);
 
         // Participation flips once for the single user, not twice.
-        await harness.UsersWrite.Received(1).SetParticipationFromTicketSyncAsync(
+        await harness.UsersWrite.Received(1).RecordParticipationAsync(
             targetUserId, 2026, scanned ? ParticipationStatus.Attended : ParticipationStatus.Ticketed,
             scanned ? scan - Duration.FromHours(1) : null, Arg.Any<CancellationToken>());
     }
@@ -349,7 +346,7 @@ public class AttendeeContactImportServiceApplyTests
         harness.WithActiveYear(2026);
         harness.Provisioning.FindOrCreateUserByEmailAsync(
                 "buyer@x.com", Arg.Any<string?>(), ContactSource.TicketTailor, Arg.Any<CancellationToken>())
-            .Returns(new AccountProvisioningResult(new User { Id = newUserId }, true));
+            .Returns(new AccountProvisioningResult(newUserId, true));
 
         var plan = new AttendeeImportPlan([
             new AttendeeImportDecision(
@@ -421,7 +418,7 @@ public class AttendeeContactImportServiceApplyTests
             .ThrowsAsync(new InvalidOperationException("boom"));
         harness.Provisioning.FindOrCreateUserByEmailAsync(
                 "o@x.com", Arg.Any<string?>(), ContactSource.TicketTailor, Arg.Any<CancellationToken>())
-            .Returns(new AccountProvisioningResult(new User { Id = Guid.NewGuid() }, true));
+            .Returns(new AccountProvisioningResult(Guid.NewGuid(), true));
 
         var plan = new AttendeeImportPlan([
             new AttendeeImportDecision(failId, "f@x.com", "F", "tkt_f",
@@ -443,9 +440,8 @@ internal sealed class ApplyHarness
     public IUserEmailService UserEmails { get; } = Substitute.For<IUserEmailService>();
     public IAccountProvisioningService Provisioning { get; } = Substitute.For<IAccountProvisioningService>();
     public IUserService Users { get; } = Substitute.For<IUserService>();
-    public IUserWrite UsersWrite { get; } = Substitute.For<IUserWrite>();
+    public IEventParticipationManagement UsersWrite { get; } = Substitute.For<IEventParticipationManagement>();
     public ISettingsService Shifts { get; } = Substitute.For<ISettingsService>();
-    public ITicketCacheInvalidator TicketCacheInvalidator { get; } = Substitute.For<ITicketCacheInvalidator>();
     public IAuditLogService Audit { get; } = Substitute.For<IAuditLogService>();
     public FakeClock Clock { get; } = new(Instant.FromUtc(2026, 5, 13, 12, 0));
 
@@ -468,6 +464,6 @@ internal sealed class ApplyHarness
     }
 
     public AttendeeContactImportService Service => new(
-        TicketRepo, UserEmails, Provisioning, Users, UsersWrite, Shifts, TicketCacheInvalidator, Audit, Clock,
+        TicketRepo, UserEmails, Provisioning, Users, UsersWrite, Shifts, Audit, Clock,
         NullLogger<AttendeeContactImportService>.Instance);
 }

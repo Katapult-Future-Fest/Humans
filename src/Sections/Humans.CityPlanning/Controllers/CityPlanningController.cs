@@ -43,6 +43,7 @@ internal sealed class CityPlanningController(
         if (error != null) return error;
 
         var settings = await cityPlanningService.GetSettingsAsync(cancellationToken);
+        if (settings is null) return NotFound(); // no active event
         var isMapAdmin = await IsMapAdminAsync();
         var userSeasonId = await FindUserLeadSeasonIdAsync(user.Id, settings.Year, cancellationToken);
 
@@ -51,7 +52,7 @@ internal sealed class CityPlanningController(
             Year = settings.Year,
             IsMapAdmin = isMapAdmin,
             IsBarrioLead = userSeasonId.HasValue,
-            IsPlacementOpen = settings.IsPlacementOpen,
+            PlacementState = settings.PlacementState,
             IsContainerPlacementOpen = settings.IsContainerPlacementOpen,
         });
     }
@@ -63,6 +64,7 @@ internal sealed class CityPlanningController(
         if (error != null) return error;
 
         var settings = await cityPlanningService.GetSettingsAsync(cancellationToken);
+        if (settings is null) return NotFound(); // no active event
         var isMapAdmin = await IsMapAdminAsync();
         var userSeasonId = await FindUserLeadSeasonIdAsync(user.Id, settings.Year, cancellationToken);
         var seasonsWithout = await cityPlanningService.GetCampSeasonsWithoutCampPolygonAsync(settings.Year, cancellationToken);
@@ -70,13 +72,12 @@ internal sealed class CityPlanningController(
         return View(new CityPlanningBarrioMapViewModel
         {
             Year = settings.Year,
-            IsPlacementOpen = settings.IsPlacementOpen,
+            PlacementState = settings.PlacementState,
             IsMapAdmin = isMapAdmin,
             UserCampSeasonId = userSeasonId?.ToString() ?? string.Empty,
             CurrentUserId = user.Id,
             SeasonsWithoutCampPolygon = seasonsWithout.ToList(),
-            PlacementOpensAt = settings.PlacementOpensAt,
-            PlacementClosesAt = settings.PlacementClosesAt,
+            PlacementSchedule = (settings.PlacementOpensOn, settings.PlacementClosesOn, settings.PlacementChangeableUntilOn),
         });
     }
 
@@ -86,7 +87,9 @@ internal sealed class CityPlanningController(
         var (error, _) = await RequireMapAdminAsync(cancellationToken);
         if (error is not null) return error;
 
-        ViewBag.Settings = await cityPlanningService.GetSettingsAsync(cancellationToken);
+        var settings = await cityPlanningService.GetSettingsAsync(cancellationToken);
+        if (settings is null) return NotFound(); // no active event
+        ViewBag.Settings = settings;
         return View();
     }
 
@@ -98,7 +101,7 @@ internal sealed class CityPlanningController(
         if (error is not null) return error;
 
         await cityPlanningService.OpenPlacementAsync(user!.Id, cancellationToken);
-        SetSuccess("Placement phase opened.");
+        SetSuccess("Placement forced open — the schedule is overridden until you follow it again.");
         return Redirect("/Settings#city-planning");
     }
 
@@ -110,7 +113,20 @@ internal sealed class CityPlanningController(
         if (error is not null) return error;
 
         await cityPlanningService.ClosePlacementAsync(user!.Id, cancellationToken);
-        SetSuccess("Placement phase closed.");
+        SetSuccess("Placement forced closed — the schedule is overridden until you follow it again.");
+        return Redirect("/Settings#city-planning");
+    }
+
+    [HttpPost("BarrioMap/Admin/FollowPlacementSchedule")]
+    [ValidateAntiForgeryToken]
+    [Authorize(Policy = PolicyNames.CityPlanningMapAdmin)]
+    public async Task<IActionResult> FollowPlacementSchedule(CancellationToken cancellationToken)
+    {
+        var (error, user) = await RequireMapAdminAsync(cancellationToken);
+        if (error is not null) return error;
+
+        await cityPlanningService.ClearPlacementOverrideAsync(user!.Id, cancellationToken);
+        SetSuccess("Placement now follows the schedule.");
         return Redirect("/Settings#city-planning");
     }
 
@@ -122,6 +138,7 @@ internal sealed class CityPlanningController(
         if (error is not null) return error;
 
         var settings = await cityPlanningService.GetSettingsAsync(cancellationToken);
+        if (settings is null) return NotFound(); // no active event
         await cityPlanningService.OpenContainerPlacementAsync(user!.Id, cancellationToken);
         SetSuccess("Container placement phase opened.");
         return RedirectToAction(nameof(Containers), new { year = settings.Year });
@@ -135,6 +152,7 @@ internal sealed class CityPlanningController(
         if (error is not null) return error;
 
         var settings = await cityPlanningService.GetSettingsAsync(cancellationToken);
+        if (settings is null) return NotFound(); // no active event
         await cityPlanningService.CloseContainerPlacementAsync(user!.Id, cancellationToken);
         SetSuccess("Container placement phase closed.");
         return RedirectToAction(nameof(Containers), new { year = settings.Year });
@@ -170,21 +188,31 @@ internal sealed class CityPlanningController(
     public Task<IActionResult> DeleteOfficialZones(CancellationToken cancellationToken) =>
         DeleteAdminResourceAsync("Official zones", cityPlanningService.DeleteOfficialZonesAsync, cancellationToken);
 
-    [HttpPost("BarrioMap/Admin/UpdatePlacementDates")]
+    [HttpPost("BarrioMap/Admin/UpdatePlacementSchedule")]
     [ValidateAntiForgeryToken]
-    public async Task<IActionResult> UpdatePlacementDates(string? opensAt, string? closesAt, CancellationToken cancellationToken)
+    [Authorize(Policy = PolicyNames.CityPlanningMapAdmin)]
+    public async Task<IActionResult> UpdatePlacementSchedule(
+        int? opensOffset, int? closesOffset, int? changeableUntilOffset, CancellationToken cancellationToken)
     {
-        var (error, _) = await RequireMapAdminAsync(cancellationToken);
+        var (error, user) = await RequireMapAdminAsync(cancellationToken);
         if (error is not null) return error;
 
-        var result = await cityPlanningService.UpdatePlacementDatesAsync(opensAt, closesAt, cancellationToken);
-        if (!result.Success)
+        // A non-numeric field binds as null; refuse it rather than silently clearing that day.
+        if (!ModelState.IsValid)
         {
-            SetError(PlacementDateErrorMessage(result.ErrorKey));
+            SetError("Schedule days must be whole numbers.");
             return Redirect("/Settings#city-planning");
         }
 
-        SetSuccess("Placement dates updated.");
+        var result = await cityPlanningService.UpdatePlacementScheduleAsync(
+            opensOffset, closesOffset, changeableUntilOffset, user!.Id, cancellationToken);
+        if (!result.Success)
+        {
+            SetError(PlacementScheduleErrorMessage(result.ErrorKey));
+            return Redirect("/Settings#city-planning");
+        }
+
+        SetSuccess("Placement schedule updated.");
         return Redirect("/Settings#city-planning");
     }
 
@@ -192,19 +220,21 @@ internal sealed class CityPlanningController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> UpdateRegistrationInfo(string? registrationInfo, CancellationToken cancellationToken)
     {
-        var (error, _) = await RequireMapAdminAsync(cancellationToken);
+        var (error, user) = await RequireMapAdminAsync(cancellationToken);
         if (error is not null) return error;
 
-        await cityPlanningService.UpdateRegistrationInfoAsync(registrationInfo, cancellationToken);
+        await cityPlanningService.UpdateRegistrationInfoAsync(registrationInfo, user!.Id, cancellationToken);
         SetSuccess("Registration info updated.");
         return Redirect("/Settings#city-planning");
     }
 
-    private static string PlacementDateErrorMessage(string? errorKey) => errorKey switch
+    private static string PlacementScheduleErrorMessage(string? errorKey) => errorKey switch
     {
-        "InvalidOpensAt" => "Invalid opens-at date format.",
-        "InvalidClosesAt" => "Invalid closes-at date format.",
-        _ => "Invalid placement date format.",
+        "OutOfRange" => $"Schedule days must be within {CityPlanningService.MaxPlacementOffsetDays} days of gate opening.",
+        "ClosesBeforeOpens" => "The closing day must not come before the opening day.",
+        "ChangeableWithoutClose" => "Set a closing day before a changeable-until day.",
+        "ChangeableBeforeCloses" => "The changeable-until day must not come before the closing day.",
+        _ => "Invalid placement schedule.",
     };
 
     /// <summary>Shared GeoJSON upload (LimitZone / OfficialZones); callers differ only by label and service method.
@@ -245,6 +275,7 @@ internal sealed class CityPlanningController(
         if (error is not null) return error;
 
         var settings = await cityPlanningService.GetSettingsAsync(ct);
+        if (settings is null) return NotFound(); // no active event
         var content = selector(settings);
         if (content is null) return NotFound();
 
@@ -273,11 +304,16 @@ internal sealed class CityPlanningController(
         var (error, user) = await RequireCurrentUserAsync(cancellationToken);
         if (error != null) return error;
 
+        // The map's base layers come from the state API, which is keyed to the active event.
+        if (await cityPlanningService.GetSettingsAsync(cancellationToken) is null) return NotFound(); // no active event
+
         var isMapAdmin = await IsMapAdminAsync();
         var userCamp = await FindUserLeadCampAsync(user.Id, year, cancellationToken);
-        var settings = await cityPlanningService.GetSettingsAsync(cancellationToken);
 
-        if (!isMapAdmin && (!settings.IsContainerPlacementOpen || userCamp is null))
+        // A lead may open the map for their camp under the same Place rule the placement writes enforce.
+        if (!isMapAdmin &&
+            (userCamp is null || !(await authorizationService.AuthorizeAsync(
+                User, new ContainerAuthorizationTarget(userCamp.Id) { Year = year }, ContainerOperationRequirement.Place)).Succeeded))
         {
             return Forbid();
         }
@@ -329,7 +365,7 @@ internal sealed class CityPlanningController(
         var vm = new OrgContainerIndexViewModel
         {
             Year = year,
-            IsContainerPlacementOpen = settings.IsContainerPlacementOpen,
+            IsContainerPlacementOpen = settings?.IsContainerPlacementOpen ?? false,
             BarrioGroups = overview.CampGroups
                 .OrderBy(g => g.CampName, StringComparer.OrdinalIgnoreCase)
                 .Select(g => new BarrioContainerGroup
@@ -346,23 +382,21 @@ internal sealed class CityPlanningController(
         return View(vm);
     }
 
-    [HttpPost("BarrioMap/Admin/Containers/Barrios/{campId}/Create")]
+    [HttpPost("BarrioMap/Admin/Containers/{year:int}/Barrios/{campId}/Create")]
     [ValidateAntiForgeryToken]
     [RequestSizeLimit(55 * 1024 * 1024)] // 5 images × 10 MB plus multipart overhead; service enforces the per-image cap
-    public async Task<IActionResult> CreateBarrioContainer(Guid campId, ContainerFormModel model, CancellationToken cancellationToken)
+    public async Task<IActionResult> CreateBarrioContainer(int year, Guid campId, ContainerFormModel model, CancellationToken cancellationToken)
     {
         var (error, user) = await RequireMapAdminAsync(cancellationToken);
         if (error is not null) return error;
 
-        var settings = await cityPlanningService.GetSettingsAsync(cancellationToken);
-
         if (!ModelState.IsValid)
         {
             SetError("Please correct the validation errors.");
-            return RedirectToAction(nameof(Containers), new { year = settings.Year });
+            return RedirectToAction(nameof(Containers), new { year });
         }
 
-        return await TryCreateContainerAsync(model, campId, settings.Year, user!.Id, cancellationToken);
+        return await TryCreateContainerAsync(model, campId, year, user!.Id, cancellationToken);
     }
 
     private async Task<IActionResult> TryCreateContainerAsync(
@@ -380,10 +414,10 @@ internal sealed class CityPlanningController(
         return RedirectToAction(nameof(Containers), new { year });
     }
 
-    [HttpPost("BarrioMap/Admin/Containers/{id}/Edit")]
+    [HttpPost("BarrioMap/Admin/Containers/{year:int}/{id}/Edit")]
     [ValidateAntiForgeryToken]
     [RequestSizeLimit(55 * 1024 * 1024)] // 5 images × 10 MB plus multipart overhead; service enforces the per-image cap
-    public async Task<IActionResult> EditContainer(Guid id, ContainerFormModel model, CancellationToken cancellationToken)
+    public async Task<IActionResult> EditContainer(int year, Guid id, ContainerFormModel model, CancellationToken cancellationToken)
     {
         var (error, user) = await RequireMapAdminAsync(cancellationToken);
         if (error is not null) return error;
@@ -391,15 +425,13 @@ internal sealed class CityPlanningController(
         var container = await containerService.GetByIdAsync(id, cancellationToken);
         if (container is null) return NotFound();
 
-        var settings = await cityPlanningService.GetSettingsAsync(cancellationToken);
-
         if (!ModelState.IsValid)
         {
             SetError("Please correct the validation errors.");
-            return RedirectToAction(nameof(Containers), new { year = settings.Year });
+            return RedirectToAction(nameof(Containers), new { year });
         }
 
-        return await TryUpdateContainerAsync(id, model, container.CampId, settings.Year, user!.Id, cancellationToken);
+        return await TryUpdateContainerAsync(id, model, container.CampId, year, user!.Id, cancellationToken);
     }
 
     private async Task<IActionResult> TryUpdateContainerAsync(
@@ -417,9 +449,9 @@ internal sealed class CityPlanningController(
         return RedirectToAction(nameof(Containers), new { year });
     }
 
-    [HttpPost("BarrioMap/Admin/Containers/{id}/Delete")]
+    [HttpPost("BarrioMap/Admin/Containers/{year:int}/{id}/Delete")]
     [ValidateAntiForgeryToken]
-    public async Task<IActionResult> DeleteContainer(Guid id, CancellationToken cancellationToken)
+    public async Task<IActionResult> DeleteContainer(int year, Guid id, CancellationToken cancellationToken)
     {
         var (error, user) = await RequireMapAdminAsync(cancellationToken);
         if (error is not null) return error;
@@ -427,9 +459,8 @@ internal sealed class CityPlanningController(
         var container = await containerService.GetByIdAsync(id, cancellationToken);
         if (container is null) return NotFound();
 
-        var settings = await cityPlanningService.GetSettingsAsync(cancellationToken);
         await containerService.DeleteAsync(id, user!.Id, cancellationToken);
         SetSuccess("Container deleted.");
-        return RedirectToAction(nameof(Containers), new { year = settings.Year });
+        return RedirectToAction(nameof(Containers), new { year });
     }
 }

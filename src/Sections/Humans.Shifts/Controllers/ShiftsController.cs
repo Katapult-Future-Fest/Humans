@@ -1,7 +1,5 @@
 using Humans.Base.Controllers;
 using System.Globalization;
-using System.Text.Json;
-using AngleSharp.Dom;
 using Humans.Base.Extensions;
 using Humans.AuditLog.Contracts;
 using Humans.Shifts.Services;
@@ -15,7 +13,6 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Localization;
 using NodaTime;
-using NodaTime.Text;
 using Humans.Users.Contracts;
 
 namespace Humans.Shifts.Controllers;
@@ -32,7 +29,7 @@ internal sealed class ShiftsController(
     IAuditLogService auditLogService,
     IUserService userService,
     IStringLocalizer<ShiftsResource> localizer,
-    // The name-gate message is Onboarding's copy, rendered from here (design §15 step 3b).
+    // The name-gate message is Onboarding's copy, rendered from here.
     IStringLocalizer<OnboardingResource> onboardingLocalizer,
     IClock clock,
     ShiftBrowsePageBuilder browsePageBuilder,
@@ -84,10 +81,7 @@ internal sealed class ShiftsController(
             isPrivileged),
             HttpContext.RequestAborted);
 
-        // Dietary-prompt tightening: lock the rota Sign-Up buttons + show the banner
-        // when this human has a qualifying signup but no dietary preference on file.
         model.UserId = user.Id;
-        model.SignupsBlockedByMissingDietary = await ComputeSignupsBlockedByMissingDietaryAsync(user, HttpContext.RequestAborted);
         model.EarlyEntrySignupsClosed = es.IsEarlyEntrySignupsClosedFor(isPrivileged, clock.GetCurrentInstant());
 
         return View(model);
@@ -163,7 +157,7 @@ internal sealed class ShiftsController(
     // AJAX per-day toggle: signs up or bails a single shift for the current user
     // and returns the re-rendered row partial. Signup/bail outcome and the new
     // active-signup count travel back as response headers (X-Signed-Up,
-    // X-My-Signup-Count, X-Toast-*); the name/dietary gates short-circuit to a
+    // X-My-Signup-Count, X-Toast-*); the name gate short-circuits to a
     // 204 with X-Redirect so the client navigates instead of swapping a row.
     [HttpPost("ToggleDay")]
     [ValidateAntiForgeryToken]
@@ -185,18 +179,9 @@ internal sealed class ShiftsController(
         // so a department coordinator's row for an admin-only/hidden shift still renders
         // instead of falling out of the browse set and 500-ing after the write committed.
         var privileged = ShiftRoleChecks.IsPrivilegedSignupApprover(User);
-        var hasDietaryPreference = !string.IsNullOrEmpty(user.Profile?.DietaryPreference);
-        var outcome = await signupService.ToggleDayAsync(
-            user.Id, shiftId, es.Id, privileged, hasDietaryPreference, ct);
+        var outcome = await signupService.ToggleDayAsync(user.Id, shiftId, es.Id, privileged, ct);
 
-        if (outcome.NeedsDietaryFirst)
-        {
-            SetInfo(localizer["Shifts_DietaryRequiredBeforeSignup"].Value);
-            return RedirectHeader(Url.Action(
-                "DietaryMedical", "Profile", new { returnAction = "signup", shiftId }));
-        }
-
-        var result = outcome.Result!;
+        var result = outcome.Result;
         var row = await browsePageBuilder.BuildRowAsync(shiftId, outcome.SignupsAfter, outcome.CanViewRestricted, ct);
         // Rare race (shift just closed/deleted between write and re-read): resync the
         // whole page rather than swap a missing row.
@@ -204,12 +189,9 @@ internal sealed class ShiftsController(
             return RedirectHeader(Url.Action(nameof(Index)));
 
         var value = row.Value;
-        var blocked = await ComputeSignupsBlockedByMissingDietaryAsync(user, ct);
 
         Response.Headers["X-Signed-Up"] = outcome.SignedUp ? "true" : "false";
-        Response.Headers["X-My-Signup-Count"] = outcome.SignupsAfter
-            .Count(s => s.Status is SignupStatus.Confirmed or SignupStatus.Pending)
-            .ToString(CultureInfo.InvariantCulture);
+        Response.Headers["X-My-Signup-Count"] = outcome.ActiveSignupCount.ToString(CultureInfo.InvariantCulture);
 
         if (!result.Success && result.Error is not null)
             SetToastHeader("warning", result.Error);
@@ -229,7 +211,6 @@ internal sealed class ShiftsController(
                 Es = es,
                 IsSignedUp = value.IsSignedUp,
                 SignupStatus = value.Status,
-                SignupsBlockedByMissingDietary = blocked,
                 EarlyEntrySignupsClosed = es.IsEarlyEntrySignupsClosedFor(outcome.CanViewRestricted, clock.GetCurrentInstant()),
                 Interaction = ShiftSignupInteraction.InstantToggle
             });
@@ -240,7 +221,6 @@ internal sealed class ShiftsController(
             Es = es,
             IsSignedUp = value.IsSignedUp,
             SignupStatus = value.Status,
-            SignupsBlockedByMissingDietary = blocked,
             EarlyEntrySignupsClosed = es.IsEarlyEntrySignupsClosedFor(outcome.CanViewRestricted, clock.GetCurrentInstant()),
             Interaction = ShiftSignupInteraction.InstantToggle
         });
@@ -258,18 +238,6 @@ internal sealed class ShiftsController(
     {
         Response.Headers["X-Toast-Type"] = type;
         Response.Headers["X-Toast-Msg"] = Uri.EscapeDataString(message);
-    }
-
-    // Lockout flag shared by the dietary banner and the rota-table Sign-Up
-    // buttons: true when the user has a qualifying cantina signup but no
-    // recorded DietaryPreference. Computed once per request on the top-level
-    // VM (Index/Mine); the views propagate it to each rota-partial. Mirrors
-    // the banner's own self-check and the SignUp gate's condition. Medical
-    // conditions are intentionally excluded (only DietaryPreference blocks).
-    private async Task<bool> ComputeSignupsBlockedByMissingDietaryAsync(UserInfo user, CancellationToken ct = default)
-    {
-        if (!await shiftMgmt.HasQualifyingCantinaSignupAsync(user.Id, ct)) return false;
-        return string.IsNullOrEmpty(user.Profile?.DietaryPreference);
     }
 
     [HttpPost("BailRange")]
@@ -338,7 +306,6 @@ internal sealed class ShiftsController(
         {
             EventSettings = es,
             UserId = user.Id,
-            SignupsBlockedByMissingDietary = await ComputeSignupsBlockedByMissingDietaryAsync(user, HttpContext.RequestAborted),
         };
 
         var teamIds = ShiftSignupBucketer.GetTeamIds(signups);
@@ -472,12 +439,11 @@ internal sealed class ShiftsController(
     {
         var ct = HttpContext.RequestAborted;
         var active = (await signupService.GetByUserAsync(userId, ct: ct))
-            .Where(s => s.Status is SignupStatus.Pending or SignupStatus.Confirmed)
-            .Where(s => s.Shift?.Rota is not null)
+            .Where(s => s.IsActive)
             .ToList();
 
         var burns = new Dictionary<Guid, BurnSettingsInfo>();
-        foreach (var burnId in active.Select(s => s.Shift.Rota.EventSettingsId).Distinct())
+        foreach (var burnId in active.Select(s => s.EventSettingsId).Distinct())
         {
             if (await burnSettings.GetByIdAsync(burnId, ct) is { } burn)
                 burns[burnId] = burn;
@@ -488,17 +454,17 @@ internal sealed class ShiftsController(
         {
             // Unresolvable burn → skip, matching the old "no EventSettings on the
             // graph → drop the row" guard rather than rendering a bogus time.
-            if (!burns.TryGetValue(s.Shift.Rota.EventSettingsId, out var sEs))
+            if (!burns.TryGetValue(s.EventSettingsId, out var sEs))
                 continue;
 
-            var absStart = s.Shift.GetAbsoluteStart(sEs);
-            var absEnd = s.Shift.GetAbsoluteEnd(sEs);
+            var absStart = s.AbsoluteStart;
+            var absEnd = s.AbsoluteEnd;
             var tz = DateTimeZoneProviders.Tzdb[sEs.TimeZoneId];
             var localStart = absStart.InZone(tz).LocalDateTime;
             var localEnd = absEnd.InZone(tz).LocalDateTime;
             items.Add(new UserSignupConflictItem(
                 Date: localStart.Date,
-                RotaName: s.Shift.Rota.Name,
+                RotaName: s.RotaName,
                 AbsoluteStart: absStart,
                 AbsoluteEnd: absEnd,
                 DisplayStart: DateFormattingExtensions.TimeOfDayPattern.Format(localStart.TimeOfDay),

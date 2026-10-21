@@ -1,4 +1,5 @@
-using Humans.Users.Contracts;
+using Humans.Consent.Contracts;
+using Humans.Governance.Contracts;
 
 namespace Humans.Onboarding.Models;
 

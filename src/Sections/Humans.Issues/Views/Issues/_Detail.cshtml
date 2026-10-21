@@ -85,7 +85,7 @@
             {
                 <form asp-action="PostComment" asp-route-id="@Model.Id" method="post" class="mt-3">
                     @Html.AntiForgeryToken()
-                    @await Html.PartialAsync("_EmailComposer", new Humans.Base.Models.EmailComposerViewModel
+                    @await Html.PartialAsync("_EmailComposer", new EmailComposerViewModel
                     {
                         BodyName = "Content",
                         BodyLabel = Localizer["Issue_ComposerPlaceholder"].Value,
@@ -93,7 +93,7 @@
                         BodyPlaceholder = Localizer["Issue_ComposerPlaceholder"].Value,
                         BodyRows = 3,
                         BodyMaxLength = 5000,
-                        Category = nameof(Humans.Users.Contracts.MessageCategory.System),
+                        Category = nameof(Humans.Email.Contracts.MessageCategory.System),
                         // A handler's comment emails the reporter; a reporter's comment only
                         // notifies the issue's handlers in-app (IssuesService.DispatchCommentNotificationsAsync).
                         RecipientCount = Model.IsReporter ? null : 1,

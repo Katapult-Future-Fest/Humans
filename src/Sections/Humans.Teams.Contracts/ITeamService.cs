@@ -1,4 +1,3 @@
-using Humans.Users.Contracts;
 using Humans.Base.Interfaces;
 using Humans.Base.Constants;
 using Humans.Base.Enums;
@@ -44,12 +43,17 @@ public record TeamInfo(
         GoogleGroupPrefix is null
             ? null
             : $"{GoogleGroupPrefix}@{DomainConstants.GoogleGroupDomain}";
+
+    /// <summary>
+    /// Whether the team may have a public page: only departments (non-system,
+    /// top-level teams). Mirrors the rule the team-page save enforces.
+    /// </summary>
+    public bool CanBePublic => !IsSystemTeam && ParentTeamId is null;
 }
 
 public record TeamMemberInfo(
     Guid TeamMemberId, Guid UserId, string DisplayName,
-    string? Email, string? ProfilePictureUrl, TeamMemberRole Role, Instant JoinedAt,
-    GoogleEmailStatus GoogleEmailStatus = GoogleEmailStatus.Unknown);
+    string? Email, string? ProfilePictureUrl, TeamMemberRole Role, Instant JoinedAt);
 
 public record TeamCoordinatorRef(Guid TeamId, Guid UserId);
 
@@ -68,7 +72,6 @@ public record TeamActiveMemberSnapshot(
     string DisplayName,
     string? Email,
     string? ProfilePictureUrl,
-    GoogleEmailStatus GoogleEmailStatus,
     TeamMemberRole Role,
     Instant JoinedAt);
 

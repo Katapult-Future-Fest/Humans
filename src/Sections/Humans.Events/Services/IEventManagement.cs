@@ -54,37 +54,40 @@ internal interface IEventManagement : IApplicationService, IEventService
 
     // ── Submissions ───────────────────────────────────────────────────────
     Task<IReadOnlyList<EventInfo>> GetUserSubmissionsAsync(Guid userId, CancellationToken ct = default);
-    // Read-then-mutate-then-write round trip: result is mutated and passed to a write
-    // method (WithdrawEventAsync / UpdateAndResubmitAsync), so it returns the entity.
-    Task<Event?> GetUserEventAsync(Guid eventId, Guid userId, CancellationToken ct = default);
+    Task<EventInfo?> GetUserEventAsync(Guid eventId, Guid userId, CancellationToken ct = default);
     Task<IReadOnlyList<EventInfo>> GetCampSubmissionsAsync(Guid campId, CancellationToken ct = default);
-    // Read-then-mutate-then-write round trip (see GetUserEventAsync).
-    Task<Event?> GetCampEventAsync(Guid eventId, Guid campId, CancellationToken ct = default);
+    Task<EventInfo?> GetCampEventAsync(Guid eventId, Guid campId, CancellationToken ct = default);
     // Status-bucketed + sorted view of a camp's submissions for the submitter's
     // "My Submissions" barrio block.
     Task<CampSubmissionsSummary> GetCampSubmissionsSummaryAsync(Guid campId, CancellationToken ct = default);
     // Persists a new submission and emails the submitter their confirmation (part of
     // the submit workflow). Null lifecycleActionUrl opts out (bulk import).
     Task SubmitEventAsync(Event guideEvent, string? lifecycleActionUrl = null, CancellationToken ct = default);
-    Task UpdateAndResubmitAsync(Event guideEvent, CancellationToken ct = default);
-    Task WithdrawEventAsync(Event guideEvent, CancellationToken ct = default);
+    /// <summary>
+    /// Submitter edit: applies <paramref name="edit"/> (camp or individual field set,
+    /// chosen by the event's own <c>CampId</c>) and re-queues for moderation.
+    /// </summary>
+    Task UpdateAndResubmitAsync(Guid eventId, EventEdit edit, CancellationToken ct = default);
+    Task WithdrawEventAsync(Guid eventId, CancellationToken ct = default);
 
     /// <summary>
     /// Moderator withdrawal: withdraws the event and appends a
     /// <see cref="EventModerationActionType.Withdrawn"/> history row naming the moderator.
+    /// Allowed whenever the submitter could withdraw (<c>Event.CanBeWithdrawnBySubmitter</c>);
+    /// otherwise returns <c>false</c> and writes nothing.
     /// </summary>
-    Task ModeratorWithdrawAsync(Event guideEvent, Guid actorUserId, CancellationToken ct = default);
+    Task<bool> ModeratorWithdrawAsync(Guid eventId, Guid actorUserId, CancellationToken ct = default);
 
     /// <summary>
-    /// Admin / moderator in-place edit of a mutated event. Persists the field
-    /// changes and bumps <see cref="Event.LastUpdatedAt"/> but leaves
+    /// Admin / moderator in-place edit. Applies <paramref name="edit"/> (camp or
+    /// individual field set, chosen by the event's own <c>CampId</c>) and bumps <see cref="Event.LastUpdatedAt"/> but leaves
     /// <see cref="Event.Status"/> untouched (an Approved event stays Approved /
     /// published — no re-queue), appending an <see cref="EventModerationActionType.Edited"/>
     /// history record by <paramref name="actorUserId"/> with the optional
     /// <paramref name="note"/> as its reason. The authoritative "edit in a pinch"
     /// path; distinct from <see cref="UpdateAndResubmitAsync"/>, which re-queues to Pending.
     /// </summary>
-    Task AdminUpdateAsync(Event guideEvent, Guid actorUserId, string? note, CancellationToken ct = default);
+    Task AdminUpdateAsync(Guid eventId, EventEdit edit, Guid actorUserId, string? note, CancellationToken ct = default);
 
     /// <summary>
     /// All-or-nothing barrio bulk import: validates every parsed row first and,
@@ -123,13 +126,13 @@ internal interface IEventManagement : IApplicationService, IEventService
     // ── Moderation ────────────────────────────────────────────────────────
     Task<Dictionary<EventStatus, int>> GetEventStatusCountsAsync(CancellationToken ct = default);
     Task<IReadOnlyList<EventInfo>> GetEventsByStatusAsync(EventStatus status, CancellationToken ct = default);
-    // Read-then-mutate-then-write round trip (see GetUserEventAsync).
-    Task<Event?> GetEventForModerationAsync(Guid eventId, CancellationToken ct = default);
+    Task<EventInfo?> GetEventForModerationAsync(Guid eventId, CancellationToken ct = default);
     Task<IReadOnlyList<CampEventOverlap>> GetCampEventsForOverlapAsync(CancellationToken ct = default);
     // Applies the decision, records history, and emails the submitter the outcome
     // (part of the moderation workflow). submitterEditUrl is the caller's routing
-    // concern; null opts out of the notification.
-    Task ApplyModerationAsync(Guid eventId, Guid actorUserId, EventModerationActionType actionType, string? reason, string? submitterEditUrl = null, CancellationToken ct = default);
+    // concern; null opts out of the notification. Returns the refusal when a
+    // reason is missing or the event is not pending.
+    Task<ModerationOutcome> ApplyModerationAsync(Guid eventId, Guid actorUserId, EventModerationActionType actionType, string? reason, string? submitterEditUrl = null, CancellationToken ct = default);
 
     // ── GDPR ──────────────────────────────────────────────────────────────
     // IUserDataContributor is carried by CachingEventService (erasure edits cached
@@ -137,6 +140,11 @@ internal interface IEventManagement : IApplicationService, IEventService
     // than only on the concrete type.
     Task<IReadOnlyList<UserDataSlice>> ContributeForUserAsync(Guid userId, CancellationToken ct);
     Task EraseForUserAsync(Guid userId, CancellationToken ct);
+
+    // ── Account merge ─────────────────────────────────────────────────────
+    // IUserMerge is carried by CachingEventService (the fold re-points cached
+    // submitter ids); this is how it reaches the inner service.
+    Task ReassignAsync(Guid mergedFromUserId, Guid mergedToUserId, Guid actorUserId, Instant now, CancellationToken ct);
 
     // ── Dashboard / Export ────────────────────────────────────────────────
     Task<IReadOnlyList<EventInfo>> GetAllEventsForDashboardAsync(CancellationToken ct = default);

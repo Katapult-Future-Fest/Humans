@@ -1,11 +1,10 @@
+using Humans.Gdpr.Contracts;
 using Humans.GoogleIntegration.Contracts;
 using AwesomeAssertions;
 using Microsoft.Extensions.Configuration;
 using Humans.Base.Caching;
 using Humans.Base.Enums;
-using Humans.Settings.Contracts;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging;
 using NodaTime;
 using NSubstitute;
 using CampRoleService = Humans.Camps.Services.CampRoleService;
@@ -31,11 +30,14 @@ public class CampsArchitectureTests
     }
 
     [HumansFact]
-    public void CachingCampService_ImplementsICampInfoInvalidator()
+    public void CachingCampService_CarriesTheWritesThatReshapeItsProjection()
     {
-        typeof(ICampInfoInvalidator).IsAssignableFrom(typeof(CachingCampService))
+        typeof(ICampRoleService).IsAssignableFrom(typeof(CachingCampService))
             .Should().BeTrue(
-                because: "the decorator is the cache and the signaller — every mutating method invalidates the affected camp inline after the inner write (§15e)");
+                because: "role writes reshape the cached role projection, so the cache owner carries them and evicts after the inner write");
+        typeof(IUserDataContributor).IsAssignableFrom(typeof(CachingCampService))
+            .Should().BeTrue(
+                because: "GDPR erasure empties rosters the projection serves, so the cache owner carries it and evicts after the inner erase");
     }
 
     [HumansFact]

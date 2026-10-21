@@ -101,14 +101,13 @@ Human management is now on `UsersAdminController` under `/Users/Admin`, accessib
 |-------|--------|-------|
 | `/Users/Admin` | AdminList | HumanAdmin, Board, Admin — member list |
 | `/Users/Admin/{id}` | AdminDetail | HumanAdmin, Board, Admin — member detail |
-| `/Users/Admin/{id}/Outbox` | AdminOutbox | HumanAdmin, Board, Admin — view email outbox |
+| `/Email/Admin/{id}/Outbox` | MemberOutbox.AdminOutbox (Email) | HumanAdmin, Board, Admin — view email outbox |
 | `/Users/Admin/{id}/Suspend` | SuspendHuman | POST: HumanAdmin, Board, Admin |
 | `/Users/Admin/{id}/Unsuspend` | UnsuspendHuman | POST: HumanAdmin, Board, Admin |
 | `/Users/Admin/{id}/Reject` | RejectSignup | POST: HumanAdmin, Board, Admin |
-| `/Users/Admin/{id}/Roles/Add` | AddRole | GET/POST: HumanAdmin, Board, Admin |
-| `/Users/Admin/{id}/Roles/{roleId}/End` | EndRole | POST: HumanAdmin, Board, Admin |
-| `/Users/Admin/Roles` | Roles | HumanAdmin, Board, Admin — role assignments across members |
-| `/Users/Admin/{id}/RevealIban` | RevealIban | POST: Admin only |
+| `/Auth/Admin/{id}/Roles/Add` | AddRole (Auth's `RoleAssignmentsController`) | GET/POST: HumanAdmin, Board, Admin |
+| `/Auth/Admin/{id}/Roles/{roleId}/End` | EndRole (Auth's `RoleAssignmentsController`) | POST: HumanAdmin, Board, Admin |
+| `/Auth/Admin/Roles` | Roles (Auth's `RoleAssignmentsController`) | HumanAdmin, Board, Admin — role assignments across members |
 | `/Users/Admin/Audience` | Audience | Admin only — audience segmentation (accounts with a ticket / a profile / both / neither) for a year |
 
 ### GoogleController (`/Google/`) — Admin (mostly)
@@ -192,7 +191,7 @@ Each active section implementing `ISectionAdminTiles` contributes `AdminTile`s (
 | `users.total` | Total users | Users | — | `IUserService` snapshot count |
 | `users.profiles` | Active (has profile) | Users | — | Snapshot count where `IsActive` |
 | `users.tickets` | Ticket holders | Users | — | Snapshot count with a ticket for the active event year; 0 with no active event |
-| `shifts.coverage` | Shifts staffed | Shifts | — | `IShiftManagementService.GetOverallCoverageAsync` |
+| `shifts.coverage` | Shifts staffed | Shifts | — | `IShiftService.GetOverallCoverageAsync` |
 | `feedback.open` | Open feedback | Feedback | AdminOnly | `FeedbackService.GetActionableCountAsync` (section-internal) — Board/domain admins don't see it (nobodies-collective/Humans#977) |
 | `shell.online.now` | Online now | Shell | — | `IUserActivityTracker`, 5-minute window |
 | `shell.online.hour` | Active (1h) | Shell | — | `IUserActivityTracker`, 1-hour window |
@@ -370,7 +369,7 @@ The app uses both role-based `[Authorize(Roles = "...")]` attributes (on control
 Role claims are synced from the `RoleAssignment` table to Identity claims via `RoleAssignmentClaimsTransformation` (an `IClaimsTransformation`). This makes `User.IsInRole()` and `[Authorize(Roles = "...")]` work correctly based on temporal role assignments.
 
 ### Role Assignment Authorization
-Resource-based: `UsersAdminController.AddRole`/`EndRole` call `IAuthorizationService.AuthorizeAsync(User, roleName, PolicyNames.RoleAssignmentManage)`, evaluated by `RoleAssignmentAuthorizationHandler` (`Humans.Auth`) against the target role name (the resource):
+Resource-based: `RoleAssignmentsController.AddRole`/`EndRole` (`Humans.Auth`) call `IAuthorizationService.AuthorizeAsync(User, roleName, PolicyNames.RoleAssignmentManage)`, evaluated by `RoleAssignmentAuthorizationHandler` (`Humans.Auth`) against the target role name (the resource):
 - **Admin** can assign/end any role
 - **Board** or **HumanAdmin** can assign/end any role in `RoleNames.BoardManageableRoles` — Board, HumanAdmin, TeamsAdmin, CampAdmin, TicketAdmin, NoInfoAdmin, FeedbackAdmin, FinanceAdmin, EventsAdmin, StoreAdmin, CantinaAdmin, EETeamAdmin, RideshareAdmin, ConsentCoordinator, VolunteerCoordinator (not Admin)
 - Everyone else is denied

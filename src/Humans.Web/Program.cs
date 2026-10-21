@@ -25,7 +25,6 @@ using Humans.Base.Interfaces;
 using Humans.Web.Extensions;
 using Microsoft.Extensions.Caching.Memory;
 using Humans.Base.Data;
-using Humans.Base.Hosting;
 using Humans.Web.Services;
 using Humans.Web.Authorization;
 using Humans.Web.Health;
@@ -38,7 +37,6 @@ using Serilog;
 using Serilog.Events;
 using Humans.Web.Hosting;
 using Humans.Web.ModelBinders;
-using Humans.Web.Data;
 using Humans.Users.Contracts;
 using Humans.Web.Localization;
 
@@ -609,8 +607,8 @@ CurrentUserEnricher.StaticAccessor = app.Services.GetRequiredService<IHttpContex
     }
 }
 
-// Same check for every section's own resource set (nobodies-collective/Humans#866
-// design §3). A section's .resx manifest name derives from the adjacent .cs file's
+// Same check for every section's own resource set (nobodies-collective/Humans#866).
+// A section's .resx manifest name derives from the adjacent .cs file's
 // namespace, not its folder path, and getting that wrong is silent — every string in
 // the set renders as its raw key. Checking that the manifest the localizer will look
 // for is actually embedded needs no key-name convention and no culture, so a new
@@ -644,7 +642,7 @@ foreach (var resourceType in SectionDiscoveryExtensions.SectionResourceTypes())
     var policyNames = typeof(Humans.Base.Authorization.PolicyNames)
         .GetFields(BindingFlags.Public | BindingFlags.Static)
         .Where(f => f.IsLiteral && f.FieldType == typeof(string))
-        .Select(f => (Name: f.Name, Value: (string)f.GetRawConstantValue()!));
+        .Select(f => (f.Name, Value: (string)f.GetRawConstantValue()!));
 
     foreach (var (name, value) in policyNames)
     {
@@ -695,7 +693,7 @@ app.UseMiddleware<PrivateUploadMiddleware>();
 // canonicalizes the subpath, so alternate spellings like /uploads//issues/ cannot bypass the gate.
 app.UseStaticFiles(new StaticFileOptions
 {
-    FileProvider = new Humans.Web.Hosting.GatedUploadsFileProvider(app.Environment.WebRootFileProvider),
+    FileProvider = new GatedUploadsFileProvider(app.Environment.WebRootFileProvider),
     OnPrepareResponse = ctx =>
     {
         if (!ctx.Context.Response.Headers.ContainsKey("Cache-Control"))
@@ -767,7 +765,7 @@ app.Use(async (context, next) =>
     if (context.User.Identity?.IsAuthenticated == true
         && context.User.HasClaim(
             ClaimTypes.NameIdentifier,
-            Humans.Base.Constants.SystemUserIds.GateTerminal.ToString()))
+            SystemUserIds.GateTerminal.ToString()))
     {
         var path = context.Request.Path;
         var allowed =
@@ -788,7 +786,7 @@ app.UseRequestLocalization();
 
 app.MapHealthChecks("/health", new HealthCheckOptions
 {
-    ResponseWriter = WriteDetailedHealthResponse
+    ResponseWriter = WriteDetailedHealthResponseAsync
 });
 
 app.MapHealthChecks("/health/live", new HealthCheckOptions
@@ -818,9 +816,9 @@ app.MapPost("/api/client-metrics", (
 
 app.MapGet("/api/version", () =>
 {
-    var assembly = System.Reflection.Assembly.GetEntryAssembly()!;
-    var attr = (System.Reflection.AssemblyInformationalVersionAttribute?)
-        Attribute.GetCustomAttribute(assembly, typeof(System.Reflection.AssemblyInformationalVersionAttribute));
+    var assembly = Assembly.GetEntryAssembly()!;
+    var attr = (AssemblyInformationalVersionAttribute?)
+        Attribute.GetCustomAttribute(assembly, typeof(AssemblyInformationalVersionAttribute));
     var informationalVersion = attr?.InformationalVersion ?? "";
     var plusIndex = informationalVersion.IndexOf('+', StringComparison.Ordinal);
     var version = plusIndex >= 0 ? informationalVersion[..plusIndex] : informationalVersion;
@@ -927,7 +925,7 @@ static T? FindException<T>(Exception? ex) where T : Exception
     return null;
 }
 
-static async Task WriteDetailedHealthResponse(HttpContext context, HealthReport report)
+static async Task WriteDetailedHealthResponseAsync(HttpContext context, HealthReport report)
 {
     context.Response.ContentType = "application/json";
 

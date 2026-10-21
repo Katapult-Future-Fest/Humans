@@ -62,7 +62,11 @@ internal sealed class TicketingBudgetService(
                                 a.Status == TicketAttendeeStatus.CheckedIn)),
                             Revenue: g.Sum(o => o.TotalAmount),
                             StripeFees: g.Sum(o => o.StripeFee ?? 0m),
-                            TicketTailorFees: g.Sum(o => o.ApplicationFee ?? 0m));
+                            TicketTailorFees: g.Sum(o => o.ApplicationFee ?? 0m),
+                            StripeFeeTax: g.Sum(o => o.FeeTax ?? 0m),
+                            // Null FeeTax = enriched before Stripe's tax bucket was captured: unknown, not zero.
+                            StripeFeesTaxUnknown: g.Where(o => o.FeeTax is null).Sum(o => o.StripeFee ?? 0m),
+                            StripeFeesUntaxed: g.Where(o => o.FeeTax == 0m).Sum(o => o.StripeFee ?? 0m));
                     })
                     .ToList();
             }
@@ -119,15 +123,6 @@ internal sealed class TicketingBudgetService(
 
         return await RefreshProjectionsAsync(command.BudgetYearId, actorUserId, ct);
     }
-
-    /// <summary>
-    /// Gross revenue of the year's paid ticket orders, by the same event rule as the actuals
-    /// sync; seeds the cash-flow runway.
-    /// </summary>
-    public async Task<decimal> GetGrossTicketRevenueAsync(BudgetYearDetail year, CancellationToken ct = default) =>
-        (await ticketService.GetTicketOrdersAsync(ct))
-            .Where(o => o.PaymentStatus == TicketPaymentStatus.Paid && IsYearTicketOrder(year, o))
-            .Sum(o => o.TotalAmount);
 
     /// <summary>
     /// The one event rule: a year with a configured <c>VendorEventId</c> counts only that

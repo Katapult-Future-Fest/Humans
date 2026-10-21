@@ -47,8 +47,6 @@ public sealed class Section : ISection, IIssueQueueOwner
             sp.GetRequiredService<CachingLegalDocumentSyncService>());
         services.AddSingleton<ILegalDocumentSyncService>(sp =>
             sp.GetRequiredService<CachingLegalDocumentSyncService>());
-        services.AddSingleton<ILegalDocumentCacheInvalidator>(sp =>
-            sp.GetRequiredService<CachingLegalDocumentSyncService>());
         services.AddSingleton<ICacheStats>(sp =>
             sp.GetRequiredService<CachingLegalDocumentSyncService>());
 
@@ -58,7 +56,7 @@ public sealed class Section : ISection, IIssueQueueOwner
         services.AddScoped<ILegalDocumentService, LegalDocumentService>();
 
         // Runner holds the sync + fan-out body; the job keeps only the schedule/metric/failure
-        // boundary (design §15 step 6b).
+        // boundary.
         services.AddScoped<ILegalDocumentSyncRunner, LegalDocumentSyncRunner>();
 
         // ConsentService. consent_records is append-only (design-rules §12).
@@ -80,13 +78,24 @@ public sealed class Section : ISection, IIssueQueueOwner
             sp.GetRequiredService<CachingConsentService>());
         services.AddSingleton<IConsentSubmission>(sp =>
             sp.GetRequiredService<CachingConsentService>());
-        services.AddSingleton<IConsentCacheInvalidator>(sp =>
-            sp.GetRequiredService<CachingConsentService>());
         services.AddSingleton<ICacheStats>(sp =>
             sp.GetRequiredService<CachingConsentService>());
 
         // Hosted for symmetry; warmOnStartup: false so StartAsync is a no-op.
         services.AddHostedService(sp => sp.GetRequiredService<CachingConsentService>());
+
+        // Consent Coordinator review (consent_reviews): reads ride IConsentService through
+        // ConsentService; IConsentWrite carries the annotations; export/erase slice.
+        services.AddSingleton<IConsentReviewRepository, ConsentReviewRepository>();
+        services.AddScoped<ConsentReviewService>();
+        services.AddScoped<IConsentWrite>(sp => sp.GetRequiredService<ConsentReviewService>());
+        services.AddScoped<IUserDataContributor>(sp => sp.GetRequiredService<ConsentReviewService>());
+
+        // Re-consent reminder cooldown stamps (consent_reminders): the reminder job's read and
+        // write, the consent.reminder-stamps copy and the export/erase slice.
+        services.AddSingleton<IConsentReminderRepository, ConsentReminderRepository>();
+        services.AddScoped<ConsentReminderService>();
+        services.AddScoped<IUserDataContributor>(sp => sp.GetRequiredService<ConsentReminderService>());
 
         services.AddScoped<SyncLegalDocumentsJob>();
         services.AddScoped<SendReConsentReminderJob>();

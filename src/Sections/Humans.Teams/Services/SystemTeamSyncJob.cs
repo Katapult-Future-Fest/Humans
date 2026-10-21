@@ -1,3 +1,4 @@
+using Humans.Consent.Contracts;
 using Humans.Base.Extensions;
 using Humans.GoogleIntegration.Contracts;
 using Humans.Auth.Contracts;
@@ -6,7 +7,6 @@ using Microsoft.Extensions.DependencyInjection;
 using NodaTime;
 using Humans.Base.Interfaces;
 using Humans.AuditLog.Contracts;
-using Humans.Base.Interfaces.Caching;
 using Humans.Email.Contracts;
 using Humans.Governance.Contracts;
 using Humans.Teams.Contracts;
@@ -28,7 +28,6 @@ namespace Humans.Teams.Services;
 internal sealed class SystemTeamSyncJob(
     ITeamManagementService teamService,
     IUserService userService,
-    IUserWrite userWrite,
     ICampLeadDirectory campLeadDirectory,
     IServiceProvider serviceProvider,
     IGoogleSyncWrite googleSyncService,
@@ -37,7 +36,6 @@ internal sealed class SystemTeamSyncJob(
     IAuditLogService auditLogService,
     IEmailService emailService,
     TeamsEmails emailMessages,
-    IRoleAssignmentClaimsCacheInvalidator roleAssignmentClaimsInvalidator,
     IHumansMetrics metrics,
     ILogger<SystemTeamSyncJob> logger,
     IClock clock) : ISystemTeamSync
@@ -55,6 +53,9 @@ internal sealed class SystemTeamSyncJob(
 
     private IMembershipCalculator MembershipCalculator =>
         serviceProvider.GetRequiredService<IMembershipCalculator>();
+
+    private IConsentService ConsentService =>
+        serviceProvider.GetRequiredService<IConsentService>();
 
     /// <summary>
     /// Executes the system team sync job and returns a report of what changed.
@@ -187,12 +188,13 @@ internal sealed class SystemTeamSyncJob(
         }
 
         // Name-only access switch: Volunteers admission is name + consents. The Flagged consent-check
-        // is an audit annotation that no longer gates admission; Suspended + RejectedAt remain the
-        // CC's kick-out levers. Profile.IsApproved is not consulted.
+        // is an audit annotation that no longer gates admission; Suspended + a recorded rejection
+        // remain the CC's kick-out levers. The review's IsApproved is not consulted.
+        var reviews = await ConsentService.GetConsentReviewsAsync(cancellationToken);
         var candidateIds = (await userService.GetAllUserInfosAsync(cancellationToken).ConfigureAwait(false))
             .Where(u => u.HasRequiredNameFields
                 && !u.IsSuspended
-                && u.Profile!.RejectedAt is null)
+                && !(reviews.TryGetValue(u.Id, out var review) && review.IsRejected))
             .Select(u => u.Id)
             .ToList();
 
@@ -305,31 +307,6 @@ internal sealed class SystemTeamSyncJob(
             userIds, teamId, cancellationToken);
         var eligibleUserIds = eligibleSet.ToList();
 
-        // Downgrade tier for users whose approved application expired; honor a still-active other-tier application.
-        var todayInstant = clock.GetCurrentInstant();
-        var otherTierByUser = await ApplicationDecisionService
-            .GetOtherActiveTierAssignmentsAsync(tier, today, cancellationToken);
-
-        var downgrades = await userWrite.DowngradeMembershipTierForExpiredAsync(
-            tier, applicationUserIds, otherTierByUser, todayInstant, cancellationToken);
-
-        if (downgrades.Count > 0)
-        {
-            var downgradeUserIds = downgrades.Select(d => d.UserId).ToList();
-            var downgradeUsersById = await userService.GetUserInfosAsync(downgradeUserIds, cancellationToken);
-
-            foreach (var (downgradeUserId, newTier) in downgrades)
-            {
-                var displayName = downgradeUsersById.TryGetValue(downgradeUserId, out var u)
-                    ? u.BurnerName : "Unknown";
-                await auditLogService.LogAsync(
-                    AuditAction.TierDowngraded, "Profile", downgradeUserId,
-                    $"Membership tier changed to {newTier} for {displayName} due to {tier} term expiry",
-                    nameof(SystemTeamSyncJob),
-                    relatedEntityId: downgradeUserId, relatedEntityType: nameof(User));
-            }
-        }
-
         await SyncTeamMembershipAsync(team, eligibleUserIds, cancellationToken, step: step);
         report?.Steps.Add(step);
     }
@@ -361,7 +338,7 @@ internal sealed class SystemTeamSyncJob(
 
     /// <summary>Volunteers membership for one user: in when the required name fields are filled and the
     /// required consents are signed, and the user is neither suspended nor rejected. Coordinator review
-    /// (<c>Profile.IsApproved</c>) annotates, it does not gate.</summary>
+    /// (<c>ConsentReviewInfo.IsApproved</c>) annotates, it does not gate.</summary>
     private async Task SyncVolunteersMembershipForUserAsync(Guid userId, CancellationToken cancellationToken = default)
     {
         var team = await GetSystemTeamSnapshotAsync(SystemTeamType.Volunteers, cancellationToken);
@@ -377,7 +354,7 @@ internal sealed class SystemTeamSyncJob(
 
         // Name-only access switch: admission is name + consents — see SyncVolunteersTeamAsync.
         var isEligible = info is { HasRequiredNameFields: true, IsSuspended: false }
-            && info.Profile!.RejectedAt is null
+            && !(await ConsentService.GetConsentReviewAsync(userId, cancellationToken)).IsRejected
             && await MembershipCalculator.HasAllRequiredConsentsForTeamAsync(userId, SystemTeamIds.Volunteers, cancellationToken);
 
         var eligibleUserIds = isEligible ? [userId] : new List<Guid>();
@@ -427,7 +404,8 @@ internal sealed class SystemTeamSyncJob(
             .HasActiveApprovedTierAsync(userId, tier, today, cancellationToken);
 
         var isEligible = hasApprovedApp
-            && info is { Profile.IsApproved: true, IsSuspended: false }
+            && info is { Profile: not null, IsSuspended: false }
+            && (await ConsentService.GetConsentReviewAsync(userId, cancellationToken)).IsApproved
             && await MembershipCalculator.HasAllRequiredConsentsForTeamAsync(userId, teamId, cancellationToken);
 
         var eligibleUserIds = isEligible ? [userId] : new List<Guid>();
@@ -564,9 +542,6 @@ internal sealed class SystemTeamSyncJob(
                 relatedEntityId: auditUserId, relatedEntityType: nameof(User));
         }
 
-        // Refresh sidebar claims for Volunteers churn before the 60s TTL.
-        InvalidateUserCachesForSystemTeamMembershipChanges(team.SystemTeamType, affectedUserIds);
-
         logger.LogInformation(
             "Synced {TeamName} team: added {AddCount}, removed {RemoveCount}",
             team.Name, toAdd.Count, toRemove.Count);
@@ -599,21 +574,6 @@ internal sealed class SystemTeamSyncJob(
                         user.Id, team.Id);
                 }
             }
-        }
-    }
-
-    private void InvalidateUserCachesForSystemTeamMembershipChanges(
-        SystemTeamType systemTeamType,
-        IEnumerable<Guid> userIds)
-    {
-        if (systemTeamType != SystemTeamType.Volunteers)
-        {
-            return;
-        }
-
-        foreach (var userId in userIds)
-        {
-            roleAssignmentClaimsInvalidator.Invalidate(userId);
         }
     }
 }

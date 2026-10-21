@@ -182,7 +182,8 @@ Every source today, and what it becomes. Audience is who the entry is published 
 | Camp-lead meter | Camps | one per pending requester on a season you lead | `CampLeads:<seasonId>` | request decided or season closed |
 | Shift-info things-to-do | Shifts | one while a signed-up volunteer's shift profile is empty | `User` | profile filled |
 | Profile things-to-do | Users | one while profile completion is below the contributor's 80% threshold | `User` | threshold reached |
-| Dietary/medical things-to-do | Users | one while `DietaryPreference` is empty; text varies by whether a qualifying cantina signup exists, as today | `User` | preference set |
+| Dietary things-to-do | Cantina | one while the dietary preference is empty; text varies by whether a qualifying cantina signup exists, as today | `User` | preference set |
+| Medical things-to-do | Users | one while medical conditions are empty and the dietary preference is still open | `User` | medical saved or preference set |
 | RideshareInterestReceived | Rideshare | one per pending interest awaiting your decision on your trip or request | `User` | accepted, declined, or withdrawn |
 | AssemblyVoteOpened | Governance | one per open assembly vote you are on the roster for | `User` | the vote closes or is cancelled (retracting one voter's entry on cast needs a user+key resolve `INotificationAutoResolve` does not have — in the central debt ledger) |
 
@@ -215,7 +216,7 @@ Every value of `NotificationSource` at the time of writing appears in exactly on
 - `INotificationEmitter`, `INotificationService`, `INotificationAutoResolve`, `INotificationRetention`, `NotificationSource`, `NotificationClass`, `NotificationPriority`, `NotificationSourceMapping`.
 - `NotificationService`, `NotificationEmitter`, `NotificationInboxService`, `NotificationMeterProvider`, `NotificationRepository`, `CleanupNotificationsJob`, the `IUserMerge` and `IUserDataContributor` participation (the board holds nothing to export; a merged or deleted user's entries go with the owning section's state and the next reconcile).
 - Controller routes Resolve, Dismiss, MarkRead, MarkAllRead, BulkResolve, BulkDismiss, ClickThrough, and the inbox views behind them.
-- `INotificationMeterCacheInvalidator` and its two call sites; `CacheKeys.NotificationBadgeCounts`, `NotificationMeters`, `CampLeadJoinRequestsBadge`.
+- `CacheKeys.NotificationBadgeCounts`, `NotificationMeterProvider.CountsCacheKey`.
 - The 35 emitting call sites across Teams, Shifts, Issues, Camps, Auth, Governance, Feedback, Onboarding, Users, Campaigns, GoogleIntegration, Consent, Rideshare; the three auto-resolve call sites.
 - `ISectionThingsToDo` and its three implementations, `ThingsToDoViewComponent` in Base.
 - Users' `CommunicationPreference.InboxEnabled`: property override first, column drop in the same drop PR as the tables, per [`no-column-drops-for-decoupling`](../../../../../memory/architecture/no-column-drops-for-decoupling.md).

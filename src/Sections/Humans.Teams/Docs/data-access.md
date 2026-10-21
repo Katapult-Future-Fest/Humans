@@ -32,8 +32,7 @@ reconciliation the hourly job runs). The leaf also
 carries `ITeamSeeding` (implemented explicitly by `TeamService` /
 `CachingTeamService`) for the dev fixture seeders in `Humans.Development`
 and `Humans.Budget`, `ISystemTeamSync` (the reconciler's contract, registered
-in `Section.cs`) and `IActiveTeamsCacheInvalidator` (registered in `Section.cs`;
-Users evicts through it).
+in `Section.cs`).
 
 The section exposes no entity-returning reads — external consumers call
 `GetTeamAsync` / `GetTeamBySlugAsync` (`TeamInfo`), `GetUserTeamMembershipsAsync`
@@ -48,7 +47,7 @@ cantina-style). `ITeamRepository` has an EE-grant surface
 `FindEarlyEntryGrantForMutationAsync`, `Add/Update/RemoveEarlyEntryGrantAsync`,
 `ReassignEarlyEntryGrantsAsync`, `RemoveEarlyEntryGrantsForUserAsync`),
 backed by the `team_early_entry_grants` table that `TeamRepository` owns.
-`TeamService` injects `IEarlyEntryInvalidator` and contributes a GDPR slice
+`TeamService` contributes a GDPR slice
 under the export key declared as `TeamService.TeamEarlyEntry`; the
 `IUserMerge` path reassigns grants across the merge.
 
@@ -78,21 +77,13 @@ Repository: `ITeamRepository`.
 | TeamEarlyEntryGrants | R/W |
 | GoogleSyncOutboxEvents | W via `IGoogleSyncOutboxService` (not the Teams repo) |
 
-| Cache (via invalidators) | Invalidate |
-|-------------------------|------------|
-| `NotificationMeters` (`INotificationMeterCacheInvalidator`) | yes |
-| `shift-auth:{userId}` (`IShiftAuthorizationInvalidator`) | yes |
-| `EarlyEntry.UserEarlyEntry` TrackedCache (`IEarlyEntryInvalidator`) | yes (per-user on grant writes / merge; `InvalidateAll` on team EE-flag flip) |
-
 Cross-section calls via `IAuditLogService`, `INotificationEmitter`,
-`IShiftManagementService`, `IAdminAuthorizationService`,
-`IEarlyEntryInvalidator`, `IShiftAuthorizationInvalidator`,
-`INotificationMeterCacheInvalidator`; lazy-resolved via `IServiceProvider` for
+`IShiftService`, `IAdminAuthorizationService`; lazy-resolved via `IServiceProvider` for
 cycle-breaking: `IGoogleSyncOutboxService` (transactional outbox appends),
 `IGoogleSyncWrite`, `ITeamResourceService`, `IRoleAssignmentService`,
 `IEmailService`, `IUserService`, `ISystemTeamSync`. Implements `ITeamManagementService`
 (internal, `: ITeamManagement`), `ITeamSeeding`,
-`IGoogleGroupMembershipSource`, `IUserDataContributor`, `IUserMerge`,
+`IGoogleGroupMembershipSource`, `IUserMerge`,
 `IEarlyEntryProvider` (role-gated team early entry).
 
 ### TeamDriveAccessSource (Scoped)
@@ -106,13 +97,21 @@ Implements `IGoogleDriveAccessSource` over the existing `ITeamService` and `ITea
 `TransactionScope` so the team mutation and the outbox append commit
 atomically — a cross-section call through the service interface.
 
+### TeamMessageOptionsProvider (Scoped, internal)
+
+No repository, no cache. `ITeamMessageOptionsProvider`: the teams a viewer may send a
+facilitated message as — active teams the viewer coordinates whose linked Google Group is
+synced. Reads `ITeamService.GetTeamsAsync` and GoogleIntegration's
+`ITeamResourceService.GetResourcesByTeamIdsAsync`. Callers: `TeamMessageController` and
+`TeamMessageButtonsViewComponent`.
+
 ### CachingTeamService (Singleton, `Humans.Teams.Services`)
 
 | Cache | Type | Read | Write | Invalidate |
 |-------|------|------|-------|------------|
-| `TrackedCache<Guid, TeamInfo>` (`Team.TeamInfo`, in-process, no `IMemoryCache`) | Per-Entity (warmed on startup) | yes | yes | yes (via `IActiveTeamsCacheInvalidator`, called from `IUserMerge` flows and direct mutation paths) |
+| `TrackedCache<Guid, TeamInfo>` (`Team.TeamInfo`, in-process, no `IMemoryCache`) | Per-Entity (warmed on startup) | yes | yes | yes (own writes, `IUserMerge.ReassignAsync` and GDPR erasure; `ITeamWrite.InvalidateActiveTeamsCache` from Users' merge tail) |
 
-Implements `ITeamManagementService`, `ITeamSeeding`, `IUserMerge`. The
+Implements `ITeamManagementService`, `ITeamSeeding`, `IUserMerge`, `IUserDataContributor` (owns the erasure table, forwards to the inner `TeamService`, evicts after erasure). The
 `TeamInfo` `TrackedCache` is the canonical source — no `ActiveTeams`
 `IMemoryCache` entry. `SearchAsync` is served from the cached `TeamInfo`
 snapshot, never the DB. Surfaced on `/Debug/CacheStats`.
@@ -121,7 +120,7 @@ snapshot, never the DB. Surfaced on `/Debug/CacheStats`.
 
 Read-only assemblers — no repository, no cache. `TeamPageService` fans out
 over `ITeamManagementService`, `ITeamResourceService`,
-`IShiftManagementService`, `ISettingsService`, `IUserService` and Auth’s
+`IShiftService`, `ISettingsService`, `IUserService` and Auth’s
 `IRoleAssignmentService`. It owns detail-page visibility, viewer affordances and
 member/child projections over the cached `TeamInfo` snapshot, with live
 pending-request reads through `ITeamManagementService`. The My Teams projection

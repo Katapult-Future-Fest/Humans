@@ -99,10 +99,10 @@ internal partial interface IUserRepository
     ///   <item>existing rows whose Id is absent from the incoming set are
     ///     deleted.</item>
     /// </list>
-    /// These changes and a supplied legacy display name share the profile field save.
+    /// These changes share the profile field save.
     /// </summary>
     Task UpdateAsync(
-        Profile profile, CancellationToken ct = default, IReadOnlyList<CVEntry>? volunteerHistory = null, string? displayName = null);
+        Profile profile, CancellationToken ct = default, IReadOnlyList<CVEntry>? volunteerHistory = null);
 
     /// <summary>
     /// Clears identifying profile fields, labels the profile "Deleted User", and
@@ -132,24 +132,6 @@ internal partial interface IUserRepository
     Task<IReadOnlySet<Guid>> SuspendManyAsync(
         IReadOnlyCollection<Guid> userIds,
         CancellationToken ct = default);
-
-    /// <summary>
-    /// For every profile whose <see cref="Profile.MembershipTier"/> equals
-    /// <paramref name="currentTier"/> and whose <c>UserId</c> is NOT in
-    /// <paramref name="userIdsToKeep"/>, downgrades the tier to the value
-    /// supplied by <paramref name="fallbackTierByUser"/> (defaulting to
-    /// <see cref="MembershipTier.Volunteer"/> when the user is absent).
-    /// Stamps <see cref="Profile.UpdatedAt"/> and persists. Returns a list
-    /// of (UserId, NewTier) tuples for audit logging. Used by the system
-    /// team sync's tier-downgrade pass.
-    /// </summary>
-    Task<IReadOnlyList<(Guid UserId, MembershipTier NewTier)>>
-        DowngradeTierForExpiredAsync(
-            MembershipTier currentTier,
-            IReadOnlyCollection<Guid> userIdsToKeep,
-            IReadOnlyDictionary<Guid, MembershipTier> fallbackTierByUser,
-            Instant now,
-            CancellationToken ct = default);
 
     /// <summary>
     /// Account-merge fold: bulk-moves the source profile's

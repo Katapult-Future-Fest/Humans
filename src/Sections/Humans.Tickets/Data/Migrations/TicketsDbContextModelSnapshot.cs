@@ -23,6 +23,41 @@ namespace Humans.Tickets.Data.Migrations
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
+            modelBuilder.Entity("Humans.Tickets.Domain.EventParticipation", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Instant?>("CheckedInAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Instant?>("DeclaredAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Source")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
+                    b.Property<string>("Status")
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("Year")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("UserId", "Year")
+                        .IsUnique();
+
+                    b.ToTable("tickets_event_participations", (string)null);
+                });
+
             modelBuilder.Entity("Humans.Tickets.Domain.TicketAttendee", b =>
                 {
                     b.Property<Guid>("Id")
@@ -134,6 +169,10 @@ namespace Humans.Tickets.Data.Migrations
                         .HasPrecision(10, 2)
                         .HasColumnType("numeric(10,2)");
 
+                    b.Property<decimal?>("FeeTax")
+                        .HasPrecision(10, 2)
+                        .HasColumnType("numeric(10,2)");
+
                     b.Property<Guid?>("MatchedUserId")
                         .HasColumnType("uuid");
 
@@ -188,6 +227,10 @@ namespace Humans.Tickets.Data.Migrations
                         .IsRequired()
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
+
+                    b.Property<decimal?>("WithheldTax")
+                        .HasPrecision(10, 2)
+                        .HasColumnType("numeric(10,2)");
 
                     b.HasKey("Id");
 

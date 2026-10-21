@@ -17,8 +17,8 @@ namespace Humans.Consent.Services;
 /// and invalidated wholesale after any persisted write to
 /// <c>legal_documents</c> or <c>document_versions</c> — the inner
 /// <c>LegalDocumentSyncService</c> is the sole writer for those tables and calls
-/// <see cref="ILegalDocumentCacheInvalidator.InvalidateAll"/> directly after each
-/// successful write (nobodies-collective/Humans#751).
+/// <see cref="InvalidateAll"/> directly after each successful write
+/// (nobodies-collective/Humans#751).
 /// </summary>
 /// <remarks>
 /// <para>
@@ -33,7 +33,7 @@ namespace Humans.Consent.Services;
 /// <see cref="SyncDocumentAsync"/> / <see cref="SyncAllDocumentsAsync"/>)
 /// pass through to the inner service via a freshly resolved scope. The inner
 /// service invalidates directly after each successful write; the decorator
-/// does not call <see cref="ILegalDocumentCacheInvalidator.InvalidateAll"/> itself.
+/// does not call <see cref="InvalidateAll"/> itself.
 /// </para>
 /// </remarks>
 internal sealed class CachingLegalDocumentSyncService(
@@ -41,7 +41,7 @@ internal sealed class CachingLegalDocumentSyncService(
     IClock clock,
     ILogger<CachingLegalDocumentSyncService> logger)
     : TrackedCache<Guid, LegalDocumentInfo>("Legal.LegalDocumentInfo", warmOnStartup: true, logger),
-        ILegalDocumentSyncManagement, ILegalDocumentCacheInvalidator
+        ILegalDocumentSyncManagement
 {
     /// <summary>
     /// DI service key under which the undecorated (inner)
@@ -139,7 +139,7 @@ internal sealed class CachingLegalDocumentSyncService(
         // holds only active+required). Fall through to the inner service so
         // those callers — admin version-summary edits, sync-job lookups — are
         // still served correctly.
-        return await WithInner(inner => inner.GetVersionByIdAsync(versionId, cancellationToken));
+        return await WithInnerAsync(inner => inner.GetVersionByIdAsync(versionId, cancellationToken));
     }
 
     // ==========================================================================
@@ -150,7 +150,7 @@ internal sealed class CachingLegalDocumentSyncService(
         CancellationToken cancellationToken = default) =>
         // Admin list surface. Includes non-required docs and does not benefit
         // from caching at the same shape as the consent-banner read.
-        WithInner(inner => inner.GetActiveDocumentsAsync(cancellationToken));
+        WithInnerAsync(inner => inner.GetActiveDocumentsAsync(cancellationToken));
 
     // ==========================================================================
     // Writes — passed through; the inner service invalidates directly
@@ -158,16 +158,22 @@ internal sealed class CachingLegalDocumentSyncService(
 
     public Task<IReadOnlyList<LegalDocument>> SyncAllDocumentsAsync(
         CancellationToken cancellationToken = default) =>
-        WithInner(inner => inner.SyncAllDocumentsAsync(cancellationToken));
+        WithInnerAsync(inner => inner.SyncAllDocumentsAsync(cancellationToken));
 
     public Task<string?> SyncDocumentAsync(
         Guid documentId, CancellationToken cancellationToken = default) =>
-        WithInner(inner => inner.SyncDocumentAsync(documentId, cancellationToken));
+        WithInnerAsync(inner => inner.SyncDocumentAsync(documentId, cancellationToken));
 
     // ==========================================================================
-    // ILegalDocumentCacheInvalidator
+    // Eviction, called by the section's sole writer
     // ==========================================================================
 
+    /// <summary>
+    /// Evict the entire Legal-document cache; the next read re-warms. The cache is
+    /// bag-shaped (whole-set replacement on rebuild), so there is no per-document evict.
+    /// Called only by <c>LegalDocumentSyncService</c>, the sole writer, right after
+    /// each successful repository write.
+    /// </summary>
     public void InvalidateAll()
     {
         // Clear() flips the warmed flag back to false and increments the
@@ -264,7 +270,7 @@ internal sealed class CachingLegalDocumentSyncService(
     // Inner-service resolution
     // ==========================================================================
 
-    private async Task<TResult> WithInner<TResult>(Func<ILegalDocumentSyncManagement, Task<TResult>> action)
+    private async Task<TResult> WithInnerAsync<TResult>(Func<ILegalDocumentSyncManagement, Task<TResult>> action)
     {
         await using var scope = scopeFactory.CreateAsyncScope();
         var inner = scope.ServiceProvider

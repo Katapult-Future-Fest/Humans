@@ -232,6 +232,7 @@
   <data name="Enum_AuditAction_ExpenseHoldedRequeued" xml:space="preserve"><value>Expense holded requeued</value></data>
   <data name="Enum_AuditAction_ExpenseLineDeclined" xml:space="preserve"><value>Expense line declined</value></data>
   <data name="Enum_AuditAction_ExpenseLineDeclineUndone" xml:space="preserve"><value>Expense line decline undone</value></data>
+  <data name="Enum_AuditAction_DataMigrationApplied" xml:space="preserve"><value>Data migration applied</value></data>
   <data name="Enum_AuditAction_HoldedExpenseAccountCreated" xml:space="preserve"><value>Holded expense account created</value></data>
   <data name="Enum_AuditAction_HoldedExpenseAccountLinked" xml:space="preserve"><value>Holded expense account linked</value></data>
   <data name="Enum_AuditAction_HoldedExpenseAccountActiveChanged" xml:space="preserve"><value>Holded expense account active changed</value></data>
@@ -244,12 +245,15 @@
   <data name="Enum_AuditAction_SepaBankLineSkipped" xml:space="preserve"><value>SEPA bank line skipped</value></data>
   <data name="Enum_AuditAction_CityPlanningPlacementOpened" xml:space="preserve"><value>City planning placement opened</value></data>
   <data name="Enum_AuditAction_CityPlanningPlacementClosed" xml:space="preserve"><value>City planning placement closed</value></data>
+  <data name="Enum_AuditAction_CityPlanningPlacementOverrideCleared" xml:space="preserve"><value>City planning placement override cleared</value></data>
   <data name="Enum_AuditAction_CityPlanningContainerPlacementOpened" xml:space="preserve"><value>City planning container placement opened</value></data>
   <data name="Enum_AuditAction_CityPlanningContainerPlacementClosed" xml:space="preserve"><value>City planning container placement closed</value></data>
   <data name="Enum_AuditAction_CityPlanningLimitZoneUpdated" xml:space="preserve"><value>City planning limit zone updated</value></data>
   <data name="Enum_AuditAction_CityPlanningLimitZoneDeleted" xml:space="preserve"><value>City planning limit zone deleted</value></data>
   <data name="Enum_AuditAction_CityPlanningOfficialZonesUpdated" xml:space="preserve"><value>City planning official zones updated</value></data>
   <data name="Enum_AuditAction_CityPlanningOfficialZonesDeleted" xml:space="preserve"><value>City planning official zones deleted</value></data>
+  <data name="Enum_AuditAction_CityPlanningPlacementDatesUpdated" xml:space="preserve"><value>City planning placement dates updated</value></data>
+  <data name="Enum_AuditAction_CityPlanningRegistrationInfoUpdated" xml:space="preserve"><value>City planning registration info updated</value></data>
   <data name="Enum_AuditAction_ExpenseCreatedOnBehalf" xml:space="preserve"><value>Expense created on behalf</value></data>
   <data name="Enum_AuditAction_ExpenseEditedOnBehalf" xml:space="preserve"><value>Expense edited on behalf</value></data>
   <data name="Enum_AuditAction_ExpensePayeeIbanUpdated" xml:space="preserve"><value>Expense payee IBAN updated</value></data>
@@ -294,6 +298,7 @@
   <data name="Enum_AuditAction_StorePaymentMethodBackfilled" xml:space="preserve"><value>Store payment method backfilled</value></data>
   <data name="Enum_AuditAction_HoldedCreditorBound" xml:space="preserve"><value>Holded creditor bound</value></data>
   <data name="Enum_AuditAction_HoldedCreditorUnbound" xml:space="preserve"><value>Holded creditor unbound</value></data>
+  <data name="Enum_AuditAction_HoldedCreditorAccountNumChanged" xml:space="preserve"><value>Holded creditor account changed</value></data>
   <data name="Enum_AuditAction_HoldedCategoryAccountProvisioned" xml:space="preserve"><value>Holded category account provisioned</value></data>
   <data name="Enum_AuditAction_CampaignCreated" xml:space="preserve"><value>Campaign created</value></data>
   <data name="Enum_AuditAction_CampaignUpdated" xml:space="preserve"><value>Campaign updated</value></data>

@@ -301,7 +301,7 @@ public class CalendarControllerICalTests
             .UseInMemoryDatabase(Guid.NewGuid().ToString()).Options;
         var repository = new CalendarRepository(new TestDbContextFactory<CalendarDbContext>(options));
         var audit = Substitute.For<IAuditLogService>();
-        var calendar = new CalendarService(repository, new FakeClock(_now), audit, NullLogger<CalendarService>.Instance);
+        var calendar = new CalendarService(repository, _teams, new FakeClock(_now), audit, NullLogger<CalendarService>.Instance);
         var id = Guid.NewGuid();
         var teamId = Guid.NewGuid();
         await repository.AddAsync(new CalendarEvent
@@ -592,7 +592,7 @@ public class CalendarControllerICalTests
 
         await _calendar.Received(1).OverrideOccurrenceAsync(id, original,
             Arg.Is<OverrideOccurrenceDto>(d => d.OverrideStartUtc == Instant.FromUtc(2026, 6, 3, 10, 0)),
-            _viewer, Arg.Any<CancellationToken>(), null);
+            _viewer, Arg.Any<CancellationToken>());
     }
 
     [HumansTheory]
@@ -617,7 +617,7 @@ public class CalendarControllerICalTests
             id, "Weekly", null, null, null, Guid.NewGuid(), original, original.Plus(Duration.FromHours(1)),
             IsAllDay: false, RecurrenceRule: "FREQ=WEEKLY", RecurrenceTimezone: "Europe/Madrid", _now, _now));
 
-        async Task AssertRejected(OccurrenceOverrideFormViewModel form, string field, string key, params object[] arguments)
+        async Task AssertRejectedAsync(OccurrenceOverrideFormViewModel form, string field, string key, params object[] arguments)
         {
             var controller = CreateController();
             controller.HttpContext.RequestServices = services;
@@ -632,11 +632,11 @@ public class CalendarControllerICalTests
             result.Should().BeOfType<ViewResult>().Which.Model.Should().BeSameAs(form);
         }
 
-        await AssertRejected(new() { OverrideTitle = new string('x', 201) }, "OverrideTitle", "Validation_MaxLength", "", 200);
-        await AssertRejected(new() { OverrideDescription = new string('x', 4001) }, "OverrideDescription", "Validation_MaxLength", "", 4000);
-        await AssertRejected(new() { OverrideLocation = new string('x', 501) }, "OverrideLocation", "Validation_MaxLength", "", 500);
-        await AssertRejected(new() { OverrideLocationUrl = "https://example.com/" + new string('x', 2000) }, "OverrideLocationUrl", "Validation_MaxLength", "", 2000);
-        await AssertRejected(new() { OverrideLocationUrl = "invalid" }, "OverrideLocationUrl", "Validation_InvalidValue");
+        await AssertRejectedAsync(new() { OverrideTitle = new string('x', 201) }, "OverrideTitle", "Validation_MaxLength", "", 200);
+        await AssertRejectedAsync(new() { OverrideDescription = new string('x', 4001) }, "OverrideDescription", "Validation_MaxLength", "", 4000);
+        await AssertRejectedAsync(new() { OverrideLocation = new string('x', 501) }, "OverrideLocation", "Validation_MaxLength", "", 500);
+        await AssertRejectedAsync(new() { OverrideLocationUrl = "https://example.com/" + new string('x', 2000) }, "OverrideLocationUrl", "Validation_MaxLength", "", 2000);
+        await AssertRejectedAsync(new() { OverrideLocationUrl = "invalid" }, "OverrideLocationUrl", "Validation_InvalidValue");
         await _calendar.DidNotReceive().OverrideOccurrenceAsync(Arg.Any<Guid>(), Arg.Any<Instant?>(),
             Arg.Any<OverrideOccurrenceDto>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>(), Arg.Any<LocalDate?>());
 
@@ -659,27 +659,65 @@ public class CalendarControllerICalTests
                 Xunit.TestContext.Current.CancellationToken)).Should().BeOfType<RedirectToActionResult>();
         }
         await _calendar.Received(2).OverrideOccurrenceAsync(id, original,
-            Arg.Any<OverrideOccurrenceDto>(), _viewer, Arg.Any<CancellationToken>(), null);
+            Arg.Any<OverrideOccurrenceDto>(), _viewer, Arg.Any<CancellationToken>());
     }
 
     [HumansFact]
-    public async Task Index_asks_for_the_viewers_token_and_renders_it_as_the_feed_url()
+    public async Task Index_renders_an_existing_token_as_the_feed_url()
     {
         StubViewer();
         var token = Guid.NewGuid();
-        _feedTokens.EnsureAsync(_viewer, Arg.Any<CancellationToken>()).Returns(token);
+        _feedTokens.GetAsync(_viewer, Arg.Any<CancellationToken>()).Returns(token);
 
         var model = await IndexModelAsync();
 
-        await _feedTokens.Received(1).EnsureAsync(_viewer, Arg.Any<CancellationToken>());
         model.ICalUrl.Should().EndWith($"/api/ical/{_viewer}/{token}.ics");
+        model.CanCreateICal.Should().BeFalse();
+        await _feedTokens.DidNotReceive().EnsureAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>());
+    }
+
+    [HumansFact]
+    public async Task Index_never_mints_a_token_and_offers_the_create_button_instead()
+    {
+        StubViewer();
+        _feedTokens.GetAsync(_viewer, Arg.Any<CancellationToken>()).Returns((Guid?)null);
+
+        var model = await IndexModelAsync();
+
+        model.ICalUrl.Should().BeNull();
+        model.CanCreateICal.Should().BeTrue();
+        await _feedTokens.DidNotReceive().EnsureAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>());
+    }
+
+    [HumansFact]
+    public async Task CreateIcal_mints_the_viewers_own_token_and_returns_to_the_grid()
+    {
+        StubViewer();
+
+        var result = await CreateController().CreateIcal(Xunit.TestContext.Current.CancellationToken);
+
+        await _feedTokens.Received(1).EnsureAsync(_viewer, Arg.Any<CancellationToken>());
+        result.Should().BeOfType<RedirectToActionResult>()
+            .Which.ActionName.Should().Be(nameof(CalendarController.Index));
+    }
+
+    [HumansFact]
+    public async Task CreateIcal_challenges_a_viewer_with_no_user_row_and_mints_nothing()
+    {
+        _users.GetUserInfoAsync(_viewer, Arg.Any<CancellationToken>())
+            .Returns(new ValueTask<UserInfo?>((UserInfo?)null));
+
+        var result = await CreateController().CreateIcal(Xunit.TestContext.Current.CancellationToken);
+
+        result.Should().BeOfType<ChallengeResult>();
+        await _feedTokens.DidNotReceive().EnsureAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>());
     }
 
     [HumansFact]
     public async Task Index_never_rotates_the_token_it_renders()
     {
         StubViewer();
-        _feedTokens.EnsureAsync(_viewer, Arg.Any<CancellationToken>()).Returns(Guid.NewGuid());
+        _feedTokens.GetAsync(_viewer, Arg.Any<CancellationToken>()).Returns(Guid.NewGuid());
 
         await IndexModelAsync();
 
@@ -695,6 +733,8 @@ public class CalendarControllerICalTests
         var model = await IndexModelAsync();
 
         model.ICalUrl.Should().BeNull();
+        model.CanCreateICal.Should().BeFalse();
+        await _feedTokens.DidNotReceive().GetAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>());
         await _feedTokens.DidNotReceive().EnsureAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>());
     }
 
@@ -702,7 +742,7 @@ public class CalendarControllerICalTests
     public async Task Index_does_not_load_teams_for_an_unused_month_model_field()
     {
         StubViewer();
-        _feedTokens.EnsureAsync(_viewer, Arg.Any<CancellationToken>()).Returns(Guid.NewGuid());
+        _feedTokens.GetAsync(_viewer, Arg.Any<CancellationToken>()).Returns(Guid.NewGuid());
 
         await IndexModelAsync();
 
@@ -769,7 +809,7 @@ public class CalendarControllerICalTests
             _teams,
             new FakeClock(_now),
             localizer,
-            Microsoft.Extensions.Logging.Abstractions.NullLogger<CalendarController>.Instance)
+            NullLogger<CalendarController>.Instance)
         {
             ControllerContext = new ControllerContext { HttpContext = http },
             TempData = new TempDataDictionary(http, Substitute.For<ITempDataProvider>()),

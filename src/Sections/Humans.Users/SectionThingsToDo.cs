@@ -1,20 +1,21 @@
+using Humans.Consent.Contracts;
 using System.Globalization;
 using System.Security.Claims;
 using Humans.Base;
 using Humans.Base.Interfaces;
+using Humans.Cantina.Contracts;
 using Humans.Governance.Contracts;
 using Humans.Shifts.Contracts;
 using Humans.Users.Contracts;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Localization;
-using Microsoft.Extensions.Logging;
 
 namespace Humans.Users;
 
 /// <summary>
 /// Users' entries on the member dashboard's things-to-do list: profile completion, the
-/// consent-check clearance non-volunteers wait on, and the dietary/medical nudge.
-/// Spec for the last one: Docs/features/dietary-medical-nudge.md (US-35.5).
+/// consent-check clearance non-volunteers wait on, and the optional medical-conditions prompt.
+/// Cantina contributes the dietary nudge the last one pairs with (its Docs/features/dietary-nudge.md).
 /// </summary>
 internal sealed class SectionThingsToDo : ISectionThingsToDo
 {
@@ -36,13 +37,14 @@ internal sealed class SectionThingsToDo : ISectionThingsToDo
 
         if (!isVolunteerMember)
         {
-            entries.Add(ConsentCheckEntry(localizer, profile));
+            var review = await services.GetRequiredService<IConsentService>().GetConsentReviewAsync(userId);
+            entries.Add(ConsentCheckEntry(localizer, profile is not null && review.Status == ConsentCheckStatus.Cleared));
         }
 
-        var dietary = await DietaryEntryAsync(services, localizer, logger, profile, userId);
-        if (dietary is not null)
+        var medical = await MedicalEntryAsync(services, localizer, logger, profile, userId);
+        if (medical is not null)
         {
-            entries.Add(dietary);
+            entries.Add(medical);
         }
 
         return entries;
@@ -75,10 +77,8 @@ internal sealed class SectionThingsToDo : ISectionThingsToDo
         };
     }
 
-    private static ThingsToDoEntry ConsentCheckEntry(IStringLocalizer<SharedResource> localizer, ProfileInfo? profile)
+    private static ThingsToDoEntry ConsentCheckEntry(IStringLocalizer<SharedResource> localizer, bool cleared)
     {
-        var cleared = profile?.ConsentCheckStatus == ConsentCheckStatus.Cleared;
-
         return new ThingsToDoEntry("consent-check", localizer["Todo_ConsentCheck_Title"].Value,
             "fa-solid fa-clipboard-check", Weight: 30)
         {
@@ -90,39 +90,43 @@ internal sealed class SectionThingsToDo : ISectionThingsToDo
     }
 
     /// <summary>
-    /// Fires whenever DietaryPreference is empty. Copy varies by whether the user has an
-    /// active qualifying signup; the entry is the same Key either way.
+    /// Offers the optional medical-conditions form while the member's dietary nudge is open (no
+    /// preference on Cantina's record and not "I don't want to answer") and they have no medical
+    /// conditions on file: the
+    /// window the combined dietary-and-medical form had before commit 10. MedicalConditions has no
+    /// "answered" marker, so tying it to the dietary answer keeps it from nagging members with
+    /// nothing to declare.
     /// </summary>
-    private static async ValueTask<ThingsToDoEntry?> DietaryEntryAsync(
+    private static async ValueTask<ThingsToDoEntry?> MedicalEntryAsync(
         IServiceProvider services,
         IStringLocalizer<SharedResource> localizer,
         ILogger logger,
         ProfileInfo? profile,
         Guid userId)
     {
-        if (!string.IsNullOrEmpty(profile?.DietaryPreference))
+        if (!string.IsNullOrEmpty(profile?.MedicalConditions))
         {
             return null;
         }
 
         try
         {
-            var hasQualifyingSignup = await services.GetRequiredService<IShiftManagementService>()
-                .HasQualifyingCantinaSignupAsync(userId);
-            var descriptionKey = hasQualifyingSignup
-                ? "Todo_DietaryMedical_Pending"
-                : "Todo_DietaryMedical_NoShift_Pending";
-
-            return new ThingsToDoEntry("dietary-medical", localizer["Todo_DietaryMedical_Title"].Value,
-                "fa-solid fa-utensils", Controller: "Profile", Action: "DietaryMedical", Weight: 50)
+            var dietary = await services.GetRequiredService<ICantinaService>().GetDietaryProfileAsync(userId);
+            if (dietary is { HasPreference: true } or { DeclinedToAnswer: true })
             {
-                Description = localizer[descriptionKey].Value,
+                return null;
+            }
+
+            return new ThingsToDoEntry("medical", localizer["Todo_Medical_Title"].Value,
+                "fa-solid fa-notes-medical", Controller: "Profile", Action: "Medical", Weight: 51)
+            {
+                Description = localizer["Todo_Medical_Pending"].Value,
                 ActionText = localizer["Todo_DietaryMedical_Action"].Value,
             };
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Failed to check dietary/medical nudge for user {UserId}", userId);
+            logger.LogError(ex, "Failed to check the medical prompt for user {UserId}", userId);
             return null;
         }
     }

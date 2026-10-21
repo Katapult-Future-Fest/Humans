@@ -35,7 +35,7 @@ structural item below follows from this table.
 | **See the site** | What is placed where, this year? | `GET /CityPlanning/`, `GET /api/city-planning/state`, `GET /api/city-planning/containers/{year}` |
 | **Claim a barrio** | Where is my camp, and what was it before? | `GET /CityPlanning/BarrioMap`, `PUT /api/city-planning/camp-polygons/{campSeasonId}`, `GET …/history`, `POST …/restore/{historyId}` |
 | **Place a container** | Where does this box go, and what should it look like? | `GET /CityPlanning/ContainerMap/{year}`, `PUT/DELETE /api/city-planning/containers/{id}/placement/{year}`, `PUT …/notes` |
-| **Run the phases** | Is placement open, when, and who may act now? | The `/Settings#city-planning` tab (`CityPlanningSettingsTabViewComponent`) posting to `OpenPlacement`, `ClosePlacement`, `UpdatePlacementDates`; container phase posts `OpenContainerPlacement` / `CloseContainerPlacement` from the containers page; `ICityPlanningService.GetSettingsAsync` |
+| **Run the phases** | Is placement open, when, and who may act now? | The `/Settings#city-planning` tab (`CityPlanningSettingsTabViewComponent`) posting to `OpenPlacement`, `ClosePlacement`, `FollowPlacementSchedule` (the override) and `UpdatePlacementSchedule` (the day-offset schedule); container phase posts `OpenContainerPlacement` / `CloseContainerPlacement` from the containers page; `ICityPlanningService.GetSettingsAsync` |
 | **Write the registration blurb** | What do barrio leads read before they register? | `UpdateRegistrationInfo` on the settings tab **and** on Camps' own admin page (`CampAdminController.UpdateRegistrationInfo`), both through `CityPlanningService.UpdateRegistrationInfoAsync` (section-internal); read by `GetRegistrationInfoAsync` |
 | **Publish the ground truth** | What is the boundary and what are the named zones? | `GET /CityPlanning/BarrioMap/Admin`, the upload, download and delete posts for the limit zone and the official zones |
 | **Bulk-load barrios** | Here is the surveyor's file — match it to camps and apply it. | `wwwroot/js/city-planning/barrio-map/admin-import.js` on the admin page: reads `GET …/state`, matches features to camps by name or slug, then `PUT`s each match |
@@ -95,7 +95,7 @@ Stated so a violation is recognisable:
    it never rewinds history. A history id that is not the season's restores nothing and answers
    404 (`Controllers/CityPlanningApiController.cs:126`). The note on an ordinary save is whatever the caller sends,
    falling back to `Saved` (`Controllers/CityPlanningApiController.cs:104`).
-4. A camp lead may edit their own polygon only while `IsPlacementOpen`, and only a season of the
+4. A camp lead may create or edit their own polygon only while placement is Open (only edit an existing one while Changeable — #2102), and only a season of the
    settings year (`Services/CityPlanningService.cs:265`). City-planning team members
    (`Services/CityPlanningService.cs:258`) and `CampAdmin`/`Admin`
    (`Controllers/CityPlanningApiController.cs:91`) are exempt from the phase and the ownership check.
@@ -107,10 +107,11 @@ Stated so a violation is recognisable:
 6. Restore and the polygon export are map-admin only — a lead cannot restore even their own
    camp's polygon (`Controllers/CityPlanningApiController.cs:119`,
    `Controllers/CityPlanningApiController.cs:158`).
-7. The settings row for a year is created on demand, closed (`Data/CityPlanningRepository.cs:181`),
-   keyed to `CampSettings.PublicYear` — **except** `RegistrationInfo`, which is keyed to the
-   highest open season year and falls back to `PublicYear`
-   (`Services/CityPlanningService.cs:469`).
+7. The current year is the active event's (`ISettingsService`); with no active event the pages
+   404 and writes throw. Reads never create the settings row — a missing row reads as closed
+   defaults — and the first admin write creates it (peterdrier/Humans#2102).
+   `RegistrationInfo` is keyed to the highest open season year instead, falling back to the
+   active event's year (`Services/CityPlanningService.cs`).
 8. Every polygon save and restore broadcasts `CampPolygonUpdated` to every connected client; a
    broadcast failure is logged and never fails the save
    (`Controllers/CityPlanningApiController.cs:146`).
@@ -150,7 +151,7 @@ touching these callers are shaped by them.
 - **No caching decorator.** Admin-facing and low-traffic; a decorator would add a cache-key
   surface for a single settings row.
 - **No internal management interface.** The section's own controllers take the concrete
-  service (design §15 step 5); the only seams worth an interface are the cross-section ones.
+  service; the only seams worth an interface are the cross-section ones.
 - **No SignalR and no MapboxDraw on the container map.** Placement is a single-user workflow
   at this scale, and containers use a custom drag-to-move / drag-handle-to-rotate interaction
   rather than a polygon editor.
@@ -174,7 +175,7 @@ touching these callers are shaped by them.
   is a separate, *runtime* cycle — `CampService → ICityPlanningWrite → ICampService`, hit
   on the camp-delete path — and the lazy belongs with the consumer, not the producer.
 - **`RegistrationInfo` is keyed differently from every other settings field** (highest open
-  season, not `PublicYear`) because the Register page it feeds targets the open season.
+  season, not the active event's year) because the Register page it feeds targets the open season.
 - **Out-of-bounds and overlap detection is client-side only.** The server stores whatever
   parses. This is a deliberate scale call, not an oversight.
 - **Bulk import writes through the same PUT the map uses.** `admin-import.js` matches

@@ -1,7 +1,7 @@
+using Humans.Governance.Contracts;
 using AwesomeAssertions;
 using Humans.Base.Enums;
 using Humans.Base.Models.Tables;
-using Humans.Users.Contracts;
 using NSubstitute;
 using Serilog;
 

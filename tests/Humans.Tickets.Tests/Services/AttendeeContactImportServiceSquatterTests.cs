@@ -34,7 +34,7 @@ public class AttendeeContactImportServiceSquatterTests
         var replacement = harness.Provisioning.ReplaceUnverifiedEmailAndProvisionAsync(
             squatterUserId, squatterRowId, "victim@x.com", Arg.Any<string?>(), ContactSource.TicketTailor, Arg.Any<CancellationToken>());
         if (fails) replacement.ThrowsAsync(new InvalidOperationException("Provisioning failed"));
-        else replacement.Returns(new AccountProvisioningResult(new User { Id = newVictimUserId }, Created: true));
+        else replacement.Returns(new AccountProvisioningResult(newVictimUserId, Created: true));
 
         var plan = new AttendeeImportPlan([
             new AttendeeImportDecision(
@@ -52,6 +52,6 @@ public class AttendeeContactImportServiceSquatterTests
         attendee.MatchedUserId.Should().NotBe(squatterUserId);
         await harness.Provisioning.Received(1).ReplaceUnverifiedEmailAndProvisionAsync(
             squatterUserId, squatterRowId, "victim@x.com", "Victim", ContactSource.TicketTailor, Arg.Any<CancellationToken>());
-        await harness.UserEmails.DidNotReceiveWithAnyArgs().DeleteEmailAsync(default, default, default);
+        await harness.UserEmails.DidNotReceiveWithAnyArgs().DeleteEmailAsync(default, default);
     }
 }

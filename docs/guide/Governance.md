@@ -43,8 +43,8 @@ Both tiers run on synchronized 2-year terms that expire on December 31 of the cu
 - `/Governance/Votes/{id}` — the motion, the live participation numbers, and your ballot if you are on the roster.
 - `/Governance/Votes/{id}/Results` — the result, once the vote has closed. `Results.csv` is the same numbers as a download.
 - `/Governance/Votes/Admin` — every vote in every state, including drafts (Board and Admin).
-- `/Users/Admin/Roles` — paginated list of all role assignments, filterable by role (Human Admin, Board or Admin).
-- `/Users/Admin/{id}/Roles/Add` and `/Users/Admin/{id}/Roles/{roleId}/End` — assign and end role assignments on a specific human (Board, HumanAdmin, and Admin).
+- `/Auth/Admin/Roles` — paginated list of all role assignments, filterable by role (Human Admin, Board or Admin).
+- `/Auth/Admin/{id}/Roles/Add` and `/Auth/Admin/{id}/Roles/{roleId}/End` — assign and end role assignments on a specific human (Board, HumanAdmin, and Admin).
 
 ## As a Volunteer
 
@@ -54,7 +54,7 @@ As an active Volunteer you can apply for **Colaborador** (active contributor wit
 
 Go to `/Governance/Applications/Create`, pick the tier, and fill in a **motivation** (required, 50 to 2000 characters) and any **additional info** for the Board (optional, up to 1000). An Asociado application also asks for your most significant contribution and your understanding of the asociado role (both required, up to 2000 characters each). Your current tier and access stay the same while the Board reviews. While one application is pending you cannot submit another, of any tier.
 
-If you applied inline during initial signup, that form was a one-shot. After onboarding, `/Governance/Applications/Create` is the only way to apply.
+`/Governance/Applications/Create` is the only way to apply. During initial signup, profile setup describes the tiers and links there.
 
 ### See your application status
 
@@ -73,7 +73,7 @@ While your application is still **Submitted**, you can withdraw it from the appl
 
 ### Renew your tier
 
-About 90 days before your term expires, a renewal reminder email and in-app notification go out, and a reminder appears on your dashboard. A renewal creates a new application for the same tier and goes through the normal Board vote. Board and Admin see the same upcoming expirations on the Board voting dashboard, so renewals can be prompted or processed proactively. If you do not renew before the term ends, the next hourly system-team sync removes you from the Colaboradors or Asociados system team, so you lose the access tied to that membership. Your profile's tier label is updated at the same time — back to another tier you still hold, or to Volunteer if you hold none. Volunteer access is unaffected.
+About 90 days before your term expires, a renewal reminder email and in-app notification go out, and a reminder appears on your dashboard. A renewal creates a new application for the same tier and goes through the normal Board vote. Board and Admin see the same upcoming expirations on the Board voting dashboard, so renewals can be prompted or processed proactively. If you do not renew before the term ends, the next hourly system-team sync removes you from the Colaboradors or Asociados system team, so you lose the access tied to that membership. A daily job also updates your membership tier, back to another tier you still hold, or to Volunteer if you hold none. Volunteer access is unaffected.
 
 ### Vote in an assembly vote
 
@@ -129,7 +129,7 @@ Either way, finalization immediately **deletes all individual Board vote records
 
 ### Assign and revoke coordinator and admin roles
 
-Role assignments live on each human's detail page under the Admin area (`/Users/Admin/{id}`). Every assignment is temporal — it has a **valid from** date and an optional **valid to** date, and every change is audited. You can also browse all current and historical role assignments at `/Users/Admin/Roles`.
+Role assignments live on each human's detail page under the Admin area (`/Users/Admin/{id}`). Every assignment is temporal — it has a **valid from** date and an optional **valid to** date, and every change is audited. You can also browse all current and historical role assignments at `/Auth/Admin/Roles`.
 
 - **Admin** can assign and revoke any role, including Admin itself.
 - **Board** can assign and revoke any role **except** Admin.

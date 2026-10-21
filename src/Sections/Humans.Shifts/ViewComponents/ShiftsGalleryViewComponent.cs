@@ -17,7 +17,7 @@ namespace Humans.Shifts.ViewComponents;
 /// <remarks>
 /// A view component rather than a partial because a partial needs a model and Debug would have
 /// to be able to name it; these four cards are the only ones in the gallery that construct
-/// section-internal types. Stays <c>internal</c> (design §15 step 6). A chrome-slot contribution
+/// section-internal types. Stays <c>internal</c>. A chrome-slot contribution
 /// takes no arguments (<c>ISectionChrome</c>'s <c>[ViewComponentSlot]</c> declares none), so it
 /// reads the current user from claims rather than a caller-supplied id.
 /// </remarks>
@@ -47,7 +47,7 @@ internal sealed class ShiftsGalleryViewComponent(
             {
                 sampleDeptId = depts[0].TeamId;
                 var rotas = await shiftMgmt.GetRotasByDepartmentAsync(sampleDeptId.Value, es.Id);
-                rota = rotas.Select(ToSampleRotaInfo).FirstOrDefault();
+                rota = rotas.Select(r => r.Rota).FirstOrDefault();
             }
 
             var sampleRotaShifts = new List<ShiftDisplayItem>();
@@ -90,20 +90,6 @@ internal sealed class ShiftsGalleryViewComponent(
             return View(ShiftsGalleryViewModel.Empty with { CurrentUserId = currentUserId });
         }
     }
-
-    private static RotaInfo ToSampleRotaInfo(Rota rota) =>
-        new(
-            rota.Id,
-            rota.EventSettingsId,
-            rota.TeamId,
-            rota.Name,
-            rota.Description,
-            rota.PracticalInfo,
-            rota.Priority,
-            rota.Policy,
-            rota.Period,
-            rota.IsVisibleToVolunteers,
-            rota.Tags.Select(t => new ShiftTagSummary(t.Id, t.Name)).ToList());
 }
 
 internal sealed record ShiftsGalleryViewModel

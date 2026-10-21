@@ -1,10 +1,8 @@
 using System.Net;
 using System.Text.RegularExpressions;
-using System.Text;
 using Humans.Base.Extensions;
 using Humans.Campaigns.Domain;
 using Humans.Email.Contracts;
-using Humans.Users.Contracts;
 
 namespace Humans.Campaigns.Services;
 

@@ -15,7 +15,6 @@ using Humans.Shifts.Domain;
 using Humans.Teams.Data;
 using Humans.Teams.Domain;
 using Humans.Teams.Services;
-using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
@@ -338,7 +337,7 @@ public class GlobalSearchSectionRenderTests(HumansTestDatabase database) : Integ
         // Events has no reload hook of its own — a category save is the section's own signal
         // that every approved-event projection is stale, so drive that.
         sp.GetRequiredService<CachingTeamService>().InvalidateActiveTeamsCache();
-        await sp.GetRequiredService<CachingCampService>().InvalidateAllAsync(ct);
+        sp.GetRequiredService<CachingCampService>().Clear();
         await sp.GetRequiredService<IEventManagement>().UpdateCategoryAsync(category, ct);
 
         return new SeededRows(team.Slug, team.Id, camp.Slug);

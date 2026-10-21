@@ -251,22 +251,29 @@ public enum AuditAction
     // and no matcher pairs it again. Same entity type as the generation entry.
     SepaPayoutTransferWithdrawn,
     // One per Holded purchase document or contact deleted by /Finance/HoldedDuplicates because the
-    // expense push created it twice. Written by Finance; names the member, the amount and the
-    // document that was kept.
+    // expense push created it twice, or by the push itself when it retracts a creditor contact it
+    // minted after a concurrent push bound the member first. Written by Finance; names the member,
+    // the amount and the document or contact that was kept.
     HoldedDuplicateRemoved,
 
     // City Planning settings writes. These decide who may move barrios and containers on the
     // site map and what the published ground truth is, and every one of them is an organiser
     // acting on the members' behalf. The settings row records when a phase changed but not
     // who changed it, so the actor lives here.
+    // Opened/Closed are the admins' manual override of the barrio placement schedule (forced open
+    // or forced closed); OverrideCleared hands placement back to the schedule (peterdrier/Humans#2102).
     CityPlanningPlacementOpened,
     CityPlanningPlacementClosed,
+    CityPlanningPlacementOverrideCleared,
     CityPlanningContainerPlacementOpened,
     CityPlanningContainerPlacementClosed,
     CityPlanningLimitZoneUpdated,
     CityPlanningLimitZoneDeleted,
     CityPlanningOfficialZonesUpdated,
     CityPlanningOfficialZonesDeleted,
+    // The barrio placement schedule (day offsets from gate opening) and the barrio registration page copy.
+    CityPlanningPlacementDatesUpdated,
+    CityPlanningRegistrationInfoUpdated,
 
     // A finance admin filed an expense report for another member. Self-created drafts are not
     // audited — only the on-behalf case, which names the actor and the member.
@@ -367,6 +374,9 @@ public enum AuditAction
     // A Finance admin bound or unbound a member's Holded creditor account, deciding who gets paid.
     HoldedCreditorBound,
     HoldedCreditorUnbound,
+    // The expense push recorded a different 400000xx on a member's creditor binding than it held
+    // (Holded assigned one, or reassigned it). Written by Finance under the pushing job's name.
+    HoldedCreditorAccountNumChanged,
     // A Finance admin provisioned a Holded expense account for a budget category from /Finance/HoldedAccounts.
     HoldedCategoryAccountProvisioned,
 
@@ -425,4 +435,12 @@ public enum AuditAction
     VolunteerTrackingExported,
     ExpenseLineDeclined,
     ExpenseLineDeclineUndone,
+    DataMigrationApplied,
+    GrantProgramCreated,
+    GrantProgramEdited,
+    GrantProgramManagerAdded,
+    GrantProgramManagerRemoved,
+    GrantIssued,
+    GrantRevoked,
+    GrantNoticeResent,
 }

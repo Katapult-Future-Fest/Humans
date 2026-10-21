@@ -21,8 +21,8 @@ Repository: `IExpenseRepository`.
 | HoldedExpenseOutboxEvents | R/W (outbox to Holded) |
 
 Cross-section calls via `IFileStorage`, `IBudgetService`, `ITeamService`,
-`IUserService`, `IUserWrite` (`SetProfileIbanAsync` — the submitter's IBAN is written
-through the owning Users service), `IUserEmailService`, `IEmailService`, `IAuditLogService`,
+`IUserService`, `IFinanceService` / `IFinanceWrite` (Finance section — `GetIbanAsync` /
+`SetIbanAsync`: the submitter's IBAN is read and written through its owner), `IUserEmailService`, `IEmailService`, `IAuditLogService`,
 `IHoldedClient`, `IHoldedFinanceService` (Finance section — creditor balance exposure to
 expense submitters; `ListExpenseAccountsAsync` / `GetCategoryMapAsync` resolve the
 account a report books to and the budget category it maps to), `IPreapprovalService`
@@ -65,6 +65,21 @@ it selects is baked into the line's amount at creation. The service has an
 `IOptions<TravelReimbursementConfig>` dependency (rates from
 `appsettings.json`); rate math happens in the service, not the DB. Travel
 lines can no longer be created — see `health.md` §5.
+
+### ExpenseHoldedBookingService (Scoped — `IExpenseHoldedBookingService`)
+
+Repository: `IExpenseRepository`. Read-only list of every booked expense line for Finance's
+Holded reconciliation; it carries no `ExpenseReportService` dependency so Finance can inject
+it without a DI cycle.
+
+| Table | R/W |
+|-------|-----|
+| ExpenseReports | R |
+| ExpenseLines | R |
+| ExpenseAttachments | R (included with the lines) |
+
+Cross-section calls via `IUserService` (resolves the submitter to the survivor after a merge,
+the creditor as `ExpenseHoldedPublisher` binds it). No `IMemoryCache`.
 
 ---
 

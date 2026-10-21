@@ -57,7 +57,7 @@ internal sealed class ProfileApiController(
             Guid? matchedUserId = owners[0];
 
             var matchedInfo = await _userService.GetUserInfoAsync(matchedUserId.Value, ct);
-            if (matchedInfo?.Profile is null || matchedInfo.Profile.RejectedAt is not null)
+            if (matchedInfo is not { IsSearchable: true })
                 return Ok(Array.Empty<HumanLookupSearchResult>());
 
             var emailDetail = await GetSharedDetailAsync(matchedUserId.Value, viewerUserId, ct);
@@ -121,7 +121,7 @@ internal sealed class ProfileApiController(
         var viewerUserId = viewer.Id;
 
         var info = await _userService.GetUserInfoAsync(userId, ct);
-        if (info?.Profile is null || info.Profile.RejectedAt is not null)
+        if (info is not { IsSearchable: true })
             return NotFound();
         userId = info.Id; // a merged-away id answers as its survivor
 

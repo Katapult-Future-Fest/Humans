@@ -5,9 +5,11 @@ using AwesomeAssertions;
 using Humans.Settings.Contracts;
 using Humans.Shifts.Contracts;
 using Humans.Shifts.Services;
+using Humans.Shifts.Tests.Infrastructure;
 using NodaTime;
 using NodaTime.Testing;
 using NSubstitute;
+using Humans.Tickets.Contracts;
 using Humans.Users.Contracts;
 using Humans.Users.Services;
 
@@ -32,7 +34,7 @@ public class VolunteerTrackingServiceTests
         var service = new VolunteerTrackingService(
             repo, Substitute.For<IShiftManagementRepository>(),
             new EventCalendarResolver(Substitute.For<ISettingsService>()),
-            Substitute.For<IUserService>(), Substitute.For<IShiftViewInvalidator>(),
+            Substitute.For<IUserService>(), Substitute.For<ITicketService>(), new ShiftViewProbe().Cache,
             new FakeClock(TestNow), Substitute.For<IAuditLogService>());
 
         Func<Task> read = () => service.GetAvailableForDayAsync(eventId, -1, cancellation.Token);
@@ -712,6 +714,127 @@ public class VolunteerTrackingServiceTests
         bs.DayOffs.Should().HaveCount(1);
     }
 
+    // ----------------------------------------------------------------------
+    // Coordinator writes audit themselves
+    // ----------------------------------------------------------------------
+
+    [HumansFact]
+    public async Task SetCampSetupAsync_audits_the_change_and_each_auto_cleared_day_off()
+    {
+        var es = MakeEvent(buildStartOffset: -10);
+        var userId = Guid.NewGuid();
+        var coordId = Guid.NewGuid();
+        var bs = new VolunteerBuildStatus
+        {
+            Id = Guid.NewGuid(),
+            UserId = userId,
+            EventSettingsId = es.Id,
+            DayOffs = [new(-6, "soon", Guid.NewGuid(), TestNow), new(-4, "later", Guid.NewGuid(), TestNow)],
+        };
+        var audit = Substitute.For<IAuditLogService>();
+        var sut = BuildSut(es, buildStatuses: [bs], trackingRepo: new FakeVolunteerTrackingRepository([bs], []), audit: audit);
+        var setupDate = es.GateOpeningDate.PlusDays(-7);
+
+        await sut.SetCampSetupAsync(userId, setupDate, notes: null, coordId, Xunit.TestContext.Current.CancellationToken);
+
+        await audit.Received(1).LogAsync(
+            AuditAction.VolunteerCampSetupSet, nameof(VolunteerBuildStatus), userId,
+            $"BarrioSetupStartDate set to {NodaTime.Text.LocalDatePattern.Iso.Format(setupDate)}; notes=—", coordId);
+        await audit.Received(1).LogAsync(
+            AuditAction.VolunteerDayOffCleared, nameof(VolunteerBuildStatus), userId,
+            "DayOffset=-6; auto-cleared by camp-setup change", coordId);
+        await audit.Received(1).LogAsync(
+            AuditAction.VolunteerDayOffCleared, nameof(VolunteerBuildStatus), userId,
+            "DayOffset=-4; auto-cleared by camp-setup change", coordId);
+    }
+
+    [HumansFact]
+    public async Task SetCampSetupAsync_rejected_writes_no_audit()
+    {
+        var es = MakeEvent(buildStartOffset: -10);
+        var audit = Substitute.For<IAuditLogService>();
+        var sut = BuildSut(es, audit: audit);
+
+        var result = await sut.SetCampSetupAsync(
+            Guid.NewGuid(), es.GateOpeningDate, "late", Guid.NewGuid(), Xunit.TestContext.Current.CancellationToken);
+
+        result.Ok.Should().BeFalse();
+        audit.ReceivedCalls().Should().BeEmpty();
+    }
+
+    [HumansFact]
+    public async Task ClearCampSetupAsync_audits_the_clear()
+    {
+        var es = MakeEvent(buildStartOffset: -10);
+        var userId = Guid.NewGuid();
+        var coordId = Guid.NewGuid();
+        var audit = Substitute.For<IAuditLogService>();
+        var sut = BuildSut(es, trackingRepo: new FakeVolunteerTrackingRepository([], []), audit: audit);
+
+        await sut.ClearCampSetupAsync(userId, coordId, Xunit.TestContext.Current.CancellationToken);
+
+        await audit.Received(1).LogAsync(
+            AuditAction.VolunteerCampSetupCleared, nameof(VolunteerBuildStatus), userId,
+            "BarrioSetupStartDate cleared", coordId);
+    }
+
+    [HumansTheory]
+    [Xunit.InlineData("doctor", "doctor")]
+    [Xunit.InlineData("  ", "—")]
+    public async Task SetDayOffAsync_audits_a_marked_day_off(string reason, string auditedReason)
+    {
+        var es = MakeEvent(buildStartOffset: -5);
+        var userId = Guid.NewGuid();
+        var coordId = Guid.NewGuid();
+        var audit = Substitute.For<IAuditLogService>();
+        var sut = BuildSut(es, trackingRepo: new FakeVolunteerTrackingRepository([], []), audit: audit);
+
+        await sut.SetDayOffAsync(userId, -3, reason, coordId, Xunit.TestContext.Current.CancellationToken);
+
+        await audit.Received(1).LogAsync(
+            AuditAction.VolunteerDayOffMarked, nameof(VolunteerBuildStatus), userId,
+            $"DayOffset=-3; reason={auditedReason}", coordId);
+    }
+
+    [HumansFact]
+    public async Task SetDayOffAsync_rejected_writes_no_audit()
+    {
+        var es = MakeEvent(buildStartOffset: -5);
+        var audit = Substitute.For<IAuditLogService>();
+        var sut = BuildSut(es, audit: audit);
+
+        var result = await sut.SetDayOffAsync(
+            Guid.NewGuid(), -9, null, Guid.NewGuid(), Xunit.TestContext.Current.CancellationToken);
+
+        result.Ok.Should().BeFalse();
+        audit.ReceivedCalls().Should().BeEmpty();
+    }
+
+    [HumansTheory]
+    [Xunit.InlineData(true)]
+    [Xunit.InlineData(false)]
+    public async Task ClearDayOffAsync_audits_only_a_removed_entry(bool present)
+    {
+        var es = MakeEvent(buildStartOffset: -5);
+        var userId = Guid.NewGuid();
+        var coordId = Guid.NewGuid();
+        var bs = new VolunteerBuildStatus
+        {
+            Id = Guid.NewGuid(),
+            UserId = userId,
+            EventSettingsId = es.Id,
+            DayOffs = present ? [new(-3, "doctor", Guid.NewGuid(), TestNow)] : [],
+        };
+        var audit = Substitute.For<IAuditLogService>();
+        var sut = BuildSut(es, buildStatuses: [bs], trackingRepo: new FakeVolunteerTrackingRepository([bs], []), audit: audit);
+
+        await sut.ClearDayOffAsync(userId, -3, coordId, Xunit.TestContext.Current.CancellationToken);
+
+        await audit.Received(present ? 1 : 0).LogAsync(
+            AuditAction.VolunteerDayOffCleared, nameof(VolunteerBuildStatus), userId,
+            "DayOffset=-3; cleared by coordinator", coordId);
+    }
+
     private static GeneralAvailability Availability(Guid userId, Guid eventSettingsId, IReadOnlyList<int> days)
         => new()
         {
@@ -723,15 +846,8 @@ public class VolunteerTrackingServiceTests
             UpdatedAt = TestNow,
         };
 
-    private static EventParticipation Participation(Guid userId, ParticipationStatus status, int year)
-        => new()
-        {
-            Id = Guid.NewGuid(),
-            UserId = userId,
-            Year = year,
-            Status = status,
-            Source = ParticipationSource.UserDeclared,
-        };
+    private static EventParticipationInfo Participation(Guid userId, ParticipationStatus status, int year)
+        => new(userId, year, status, ParticipationSource.UserDeclared, null, null);
 
     // ----------------------------------------------------------------------
     // Test SUT builder with fakes
@@ -741,10 +857,11 @@ public class VolunteerTrackingServiceTests
         EventSettings? activeEvent,
         IReadOnlyList<EligibleBuildSignup>? signups = null,
         IReadOnlyList<VolunteerBuildStatus>? buildStatuses = null,
-        IReadOnlyList<EventParticipation>? participations = null,
+        IReadOnlyList<EventParticipationInfo>? participations = null,
         IReadOnlyList<GeneralAvailability>? availabilities = null,
         Instant? now = null,
-        FakeVolunteerTrackingRepository? trackingRepo = null)
+        FakeVolunteerTrackingRepository? trackingRepo = null,
+        IAuditLogService? audit = null)
     {
         var clock = new FakeClock(now ?? TestNow);
 
@@ -774,7 +891,7 @@ public class VolunteerTrackingServiceTests
                             CreatedAt = TestNow
                         },
                         userEmails: [],
-                        eventParticipations: g.ToList(),
+                        eventParticipations: [],
                         externalLogins: [],
                         profile: null,
                         contactFields: [],
@@ -785,13 +902,17 @@ public class VolunteerTrackingServiceTests
                 return Task.FromResult<IReadOnlyCollection<UserInfo>>(users);
             });
 
+        var tickets = Substitute.For<ITicketService>();
+        tickets.GetAllParticipationsAsync(Arg.Any<CancellationToken>())
+            .Returns(participations ?? []);
+
         trackingRepo ??= new FakeVolunteerTrackingRepository(
             buildStatuses ?? [],
             availabilities ?? []);
 
         return new VolunteerTrackingService(
-            trackingRepo, shiftMgmt, calendarResolver, userService, Substitute.For<IShiftViewInvalidator>(), clock,
-            Substitute.For<IAuditLogService>());
+            trackingRepo, shiftMgmt, calendarResolver, userService, tickets, new ShiftViewProbe().Cache, clock,
+            audit ?? Substitute.For<IAuditLogService>());
     }
 
     private static EventSettingsInfo ToEventSettingsInfo(EventSettings src) => new(

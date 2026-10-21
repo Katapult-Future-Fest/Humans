@@ -1,3 +1,4 @@
+using Humans.Email.Contracts;
 using Humans.Base.Caching;
 using Humans.Notifications.Domain;
 using Xunit;
@@ -5,7 +6,6 @@ using Humans.Notifications.Data;
 using Humans.Notifications.Services;
 using AwesomeAssertions;
 using Humans.Notifications.Contracts;
-using Humans.Users.Contracts;
 using static Humans.Notifications.Tests.NotificationTestFixtures;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
@@ -70,9 +70,9 @@ public class NotificationEmitterTests : IDisposable
             NotificationClass.Informational,
             NotificationPriority.Normal,
             "Empty",
-            recipientUserIds: [], cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            recipientUserIds: [], cancellationToken: TestContext.Current.CancellationToken);
 
-        (await _notificationsDb.Notifications.CountAsync(Xunit.TestContext.Current.CancellationToken)).Should().Be(0);
+        (await _notificationsDb.Notifications.CountAsync(TestContext.Current.CancellationToken)).Should().Be(0);
     }
 
     [HumansFact]
@@ -86,13 +86,13 @@ public class NotificationEmitterTests : IDisposable
             NotificationClass.Informational,
             NotificationPriority.Normal,
             "Hello",
-            recipientUserIds: [user1, user2], cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            recipientUserIds: [user1, user2], cancellationToken: TestContext.Current.CancellationToken);
 
         var stored = await _notificationsDb.Notifications
             .AsNoTracking()
             .Include(n => n.Recipients)
             .OrderBy(n => n.Id)
-            .ToListAsync(Xunit.TestContext.Current.CancellationToken);
+            .ToListAsync(TestContext.Current.CancellationToken);
 
         stored.Should().HaveCount(2);
         stored.Should().OnlyContain(n => n.Recipients.Count == 1);
@@ -112,16 +112,16 @@ public class NotificationEmitterTests : IDisposable
             Category = NotificationSource.TeamMemberAdded.ToMessageCategory(),
             InboxEnabled = false,
         });
-        await _dbContext.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+        await _dbContext.SaveChangesAsync(TestContext.Current.CancellationToken);
 
         await _emitter.SendAsync(
             NotificationSource.TeamMemberAdded,
             NotificationClass.Informational,
             NotificationPriority.Normal,
             "Filtered",
-            recipientUserIds: [suppressed, allowed], cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            recipientUserIds: [suppressed, allowed], cancellationToken: TestContext.Current.CancellationToken);
 
-        var rows = await _notificationsDb.NotificationRecipients.AsNoTracking().ToListAsync(Xunit.TestContext.Current.CancellationToken);
+        var rows = await _notificationsDb.NotificationRecipients.AsNoTracking().ToListAsync(TestContext.Current.CancellationToken);
         rows.Should().ContainSingle();
         rows.Single().UserId.Should().Be(allowed);
     }
@@ -144,20 +144,22 @@ public class NotificationEmitterTests : IDisposable
             Category = NotificationSource.TeamMemberAdded.ToMessageCategory(),
             InboxEnabled = false,
         });
-        await _dbContext.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+        await _dbContext.SaveChangesAsync(TestContext.Current.CancellationToken);
 
         await _emitter.SendAsync(
             NotificationSource.TeamMemberAdded,
             NotificationClass.Informational,
             NotificationPriority.Normal,
             "All suppressed",
-            recipientUserIds: [u1, u2], cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            recipientUserIds: [u1, u2], cancellationToken: TestContext.Current.CancellationToken);
 
-        (await _notificationsDb.Notifications.CountAsync(Xunit.TestContext.Current.CancellationToken)).Should().Be(0);
+        (await _notificationsDb.Notifications.CountAsync(TestContext.Current.CancellationToken)).Should().Be(0);
     }
 
-    [HumansFact]
-    public async Task SendAsync_Actionable_BypassesInboxSuppression()
+    [HumansTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SendAsync_Actionable_BypassesInboxSuppression(bool preferenceReadFails)
     {
         var suppressed = Guid.NewGuid();
 
@@ -167,16 +169,21 @@ public class NotificationEmitterTests : IDisposable
             Category = NotificationSource.ApplicationSubmitted.ToMessageCategory(),
             InboxEnabled = false,
         });
-        await _dbContext.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+        await _dbContext.SaveChangesAsync(TestContext.Current.CancellationToken);
+
+        if (preferenceReadFails)
+            _preferenceService.GetUsersWithInboxDisabledAsync(
+                    Arg.Any<IReadOnlyList<Guid>>(), Arg.Any<MessageCategory>(), Arg.Any<CancellationToken>())
+                .Returns(Task.FromException<IReadOnlySet<Guid>>(new InvalidOperationException("Preferences unavailable")));
 
         await _emitter.SendAsync(
             NotificationSource.ApplicationSubmitted,
             NotificationClass.Actionable,
             NotificationPriority.High,
             "Action required",
-            recipientUserIds: [suppressed], cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            recipientUserIds: [suppressed], cancellationToken: TestContext.Current.CancellationToken);
 
-        var rows = await _notificationsDb.NotificationRecipients.AsNoTracking().ToListAsync(Xunit.TestContext.Current.CancellationToken);
+        var rows = await _notificationsDb.NotificationRecipients.AsNoTracking().ToListAsync(TestContext.Current.CancellationToken);
         rows.Should().ContainSingle(r => r.UserId == suppressed);
     }
 
@@ -198,9 +205,9 @@ public class NotificationEmitterTests : IDisposable
 
         await _emitter.SendAsync(NotificationSource.PreapprovalFileBy, NotificationClass.Actionable,
             NotificationPriority.Normal, title, [Guid.NewGuid()], body,
-            cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            cancellationToken: TestContext.Current.CancellationToken);
 
-        var stored = await _notificationsDb.Notifications.AsNoTracking().SingleAsync(Xunit.TestContext.Current.CancellationToken);
+        var stored = await _notificationsDb.Notifications.AsNoTracking().SingleAsync(TestContext.Current.CancellationToken);
         stored.Title.EnumerateRunes().Count().Should().BeLessThanOrEqualTo(titleLimit);
         if (stored.Body is not null)
             stored.Body.EnumerateRunes().Count().Should().BeLessThanOrEqualTo(bodyLimit);
@@ -231,9 +238,9 @@ public class NotificationEmitterTests : IDisposable
             body: "Body text",
             actionUrl: "/somewhere",
             actionLabel: "Open",
-            targetGroupName: "Build Team", cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            targetGroupName: "Build Team", cancellationToken: TestContext.Current.CancellationToken);
 
-        var n = await _notificationsDb.Notifications.AsNoTracking().SingleAsync(Xunit.TestContext.Current.CancellationToken);
+        var n = await _notificationsDb.Notifications.AsNoTracking().SingleAsync(TestContext.Current.CancellationToken);
         n.Title.Should().Be("Title");
         n.Body.Should().Be("Body text");
         n.ActionUrl.Should().Be("/somewhere");
@@ -257,7 +264,7 @@ public class NotificationEmitterTests : IDisposable
             NotificationClass.Informational,
             NotificationPriority.Normal,
             "Cache evict",
-            recipientUserIds: [user], cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            recipientUserIds: [user], cancellationToken: TestContext.Current.CancellationToken);
 
         _cache.TryGetValue(key, out _).Should().BeFalse();
     }

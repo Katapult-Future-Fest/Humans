@@ -109,12 +109,10 @@ public class TeamServiceSlugRaceTests
             Substitute.For<IAuditLogService>(),
             Substitute.For<INotificationEmitter>(),
             Substitute.For<IShiftManagement>(),
-            Substitute.For<INotificationMeterCacheInvalidator>(),
-            Substitute.For<IShiftAuthorizationInvalidator>(),
             Substitute.For<IAdminAuthorizationService>(),
-            Substitute.For<IEarlyEntryInvalidator>(),
             new ServiceLocatorBuilder()
                 .With<IGoogleSyncOutboxService>()
+                .With<IGoogleIntegrationService>()
                 .Build(),
             clock,
             NullLogger<TeamService>.Instance);

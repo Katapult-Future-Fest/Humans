@@ -1,11 +1,8 @@
 using Humans.Auth.Contracts;
 using AwesomeAssertions;
-using Humans.Base.Interfaces.Caching;
 using Humans.Users.Contracts;
-using Humans.Issues.Data;
 using Humans.Issues.Services;
 using IssuesService = Humans.Issues.Services.IssuesService;
-using Humans.Issues.Contracts;
 
 namespace Humans.Issues.Tests.Architecture;
 
@@ -17,26 +14,6 @@ namespace Humans.Issues.Tests.Architecture;
 public class IssuesArchitectureTests
 {
     // ── IssuesService ────────────────────────────────────────────────────────
-
-    [HumansFact]
-    public void IssuesService_TakesIssuesBadgeInvalidator()
-    {
-        var ctor = typeof(IssuesService).GetConstructors().Single();
-        var paramTypes = ctor.GetParameters().Select(p => p.ParameterType).ToList();
-
-        paramTypes.Should().Contain(typeof(IIssuesBadgeCacheInvalidator),
-            because: "IssuesService evicts the per-user actionable counts through this invalidator (memory/code/viewcomponent-no-cache.md)");
-    }
-
-    [HumansFact]
-    public void IssuesService_TakesNavBadgeInvalidator()
-    {
-        var ctor = typeof(IssuesService).GetConstructors().Single();
-        var paramTypes = ctor.GetParameters().Select(p => p.ParameterType).ToList();
-
-        paramTypes.Should().Contain(typeof(INavBadgeCacheInvalidator),
-            because: "IssuesService invalidates the nav-badge count through this invalidator");
-    }
 
     [HumansFact]
     public void IssuesService_TakesCrossSectionServiceInterfaces()

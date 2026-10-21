@@ -60,15 +60,15 @@ dates, or ones whose `what:` describes a "stale comment"/"doc says X" pattern
 — those flip fastest as code moves).
 
 **Seed (verify each, then delete the row / fix the note):**
-- `src/Sections/Humans.Teams/Docs/debt.yml` — the `IShiftManagementService`
-  data-access.md row: already reads `IShiftManagementService`, both sites.
+- `src/Sections/Humans.Teams/Docs/debt.yml` — the `IShiftService`
+  data-access.md row: already reads `IShiftService`, both sites.
 - `src/Sections/Humans.Users/Docs/debt.yml` — the `AccountDeletionService`
   "false thread-safety rationale" row: `grep -i thread` now returns nothing.
 - `src/Sections/Humans.Email/Docs/debt.yml` — the `ISystemSettingsService`
   data-access.md row: doc already says `ISettingsService` throughout.
 - `src/Sections/Humans.Calendar/Docs/debt.yml` — the `ICalFeedService.cs`
   stale thread-safety comment row: comment already rewritten.
-- `src/Sections/Humans.Search/Docs/debt.yml` — the `IShiftManagementService`
+- `src/Sections/Humans.Search/Docs/debt.yml` — the `IShiftService`
   doc/csproj row: `SearchService.cs` already injects the `Read` leaf.
 - `docs/architecture/debt-ledger.yml` `inbox:` — close: the
   `burnername-is-the-display-name.md` stale-atom row (already rewritten
@@ -339,6 +339,6 @@ future run doesn't re-derive it:
 - **`HUM0010`/`HUM0011`** in `WarningsNotAsErrors`. The `[ExpiresOn]` staged
   escalation depends on these staying warnings pre-deadline — do not remove
   alongside rung 2's ids.
-- **`HUM0031`** and anything under a `parked:` key in `debt-ledger.yml`.
-  Peter froze `grandfathered-hum0031-controller-logic` 2026-08-07 pending
-  the per-section assembly split; don't lower thresholds or de-grandfather.
+- **`HUM0031`'s thresholds** and anything under a `parked:` key in
+  `debt-ledger.yml`. The 40/15 numbers are fixed permanently (Peter,
+  2026-10-21); controller intent is section-doctor's call. Never move them.

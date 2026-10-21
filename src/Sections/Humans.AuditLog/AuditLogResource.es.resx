@@ -232,6 +232,7 @@
   <data name="Enum_AuditAction_ExpenseHoldedRequeued" xml:space="preserve"><value>Gasto reenviado a la cola para Holded</value></data>
   <data name="Enum_AuditAction_ExpenseLineDeclined" xml:space="preserve"><value>Línea de gasto rechazada</value></data>
   <data name="Enum_AuditAction_ExpenseLineDeclineUndone" xml:space="preserve"><value>Rechazo de línea de gasto deshecho</value></data>
+  <data name="Enum_AuditAction_DataMigrationApplied" xml:space="preserve"><value>Migración de datos aplicada</value></data>
   <data name="Enum_AuditAction_HoldedExpenseAccountCreated" xml:space="preserve"><value>Cuenta de gastos de Holded creada</value></data>
   <data name="Enum_AuditAction_HoldedExpenseAccountLinked" xml:space="preserve"><value>Cuenta de gastos de Holded vinculada</value></data>
   <data name="Enum_AuditAction_HoldedExpenseAccountActiveChanged" xml:space="preserve"><value>Estado activo de la cuenta de gastos de Holded cambiado</value></data>
@@ -244,12 +245,15 @@
   <data name="Enum_AuditAction_SepaBankLineSkipped" xml:space="preserve"><value>Línea bancaria SEPA omitida</value></data>
   <data name="Enum_AuditAction_CityPlanningPlacementOpened" xml:space="preserve"><value>Periodo de asignación urbanística abierto</value></data>
   <data name="Enum_AuditAction_CityPlanningPlacementClosed" xml:space="preserve"><value>Periodo de asignación urbanística cerrado</value></data>
+  <data name="Enum_AuditAction_CityPlanningPlacementOverrideCleared" xml:space="preserve"><value>Anulación manual de la asignación urbanística retirada</value></data>
   <data name="Enum_AuditAction_CityPlanningContainerPlacementOpened" xml:space="preserve"><value>Periodo de ubicación urbanística de contenedores abierto</value></data>
   <data name="Enum_AuditAction_CityPlanningContainerPlacementClosed" xml:space="preserve"><value>Periodo de ubicación urbanística de contenedores cerrado</value></data>
   <data name="Enum_AuditAction_CityPlanningLimitZoneUpdated" xml:space="preserve"><value>Zona límite urbanística actualizada</value></data>
   <data name="Enum_AuditAction_CityPlanningLimitZoneDeleted" xml:space="preserve"><value>Se elimina la zona límite urbanística</value></data>
   <data name="Enum_AuditAction_CityPlanningOfficialZonesUpdated" xml:space="preserve"><value>Zonas oficiales de planificación urbana actualizadas</value></data>
   <data name="Enum_AuditAction_CityPlanningOfficialZonesDeleted" xml:space="preserve"><value>Se eliminan las zonas oficiales de planificación urbana</value></data>
+  <data name="Enum_AuditAction_CityPlanningPlacementDatesUpdated" xml:space="preserve"><value>Se actualizan las fechas de colocación de planificación urbana</value></data>
+  <data name="Enum_AuditAction_CityPlanningRegistrationInfoUpdated" xml:space="preserve"><value>Se actualiza la información de inscripción de planificación urbana</value></data>
   <data name="Enum_AuditAction_ExpenseCreatedOnBehalf" xml:space="preserve"><value>Gasto creado en nombre de otra persona</value></data>
   <data name="Enum_AuditAction_ExpenseEditedOnBehalf" xml:space="preserve"><value>Gasto editado en nombre de otra persona</value></data>
   <data name="Enum_AuditAction_ExpensePayeeIbanUpdated" xml:space="preserve"><value>IBAN del beneficiario del gasto actualizado</value></data>
@@ -294,6 +298,7 @@
   <data name="Enum_AuditAction_StorePaymentMethodBackfilled" xml:space="preserve"><value>Método de pago de la tienda completado retroactivamente</value></data>
   <data name="Enum_AuditAction_HoldedCreditorBound" xml:space="preserve"><value>Acreedor de Holded vinculado</value></data>
   <data name="Enum_AuditAction_HoldedCreditorUnbound" xml:space="preserve"><value>Acreedor de Holded desvinculado</value></data>
+  <data name="Enum_AuditAction_HoldedCreditorAccountNumChanged" xml:space="preserve"><value>Cuenta de acreedor de Holded cambiada</value></data>
   <data name="Enum_AuditAction_HoldedCategoryAccountProvisioned" xml:space="preserve"><value>Cuenta de categoría de Holded aprovisionada</value></data>
   <data name="Enum_AuditAction_CampaignCreated" xml:space="preserve"><value>Campaña creada</value></data>
   <data name="Enum_AuditAction_CampaignUpdated" xml:space="preserve"><value>Campaña actualizada</value></data>

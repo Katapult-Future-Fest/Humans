@@ -41,8 +41,7 @@ public class HumanLifecycleServiceTests
         var userId = Guid.NewGuid();
         _userService.GetUserInfoAsync(userId, Arg.Any<CancellationToken>())
             .Returns(MakeUserInfo(userId, UserState.AdminSuspended) with { PreferredLanguage = "es" });
-        _userService.ApplyProfileOnboardingMutationAsync(userId,
-            Arg.Any<UserProfileOnboardingCommand>(), Arg.Any<CancellationToken>())
+        _userService.SetSuspensionAsync(userId, Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
             .Returns(new OnboardingResult(true));
 
         (await BuildSut().SuspendAsync(userId, Guid.NewGuid(), notes,
@@ -59,15 +58,14 @@ public class HumanLifecycleServiceTests
     [HumansTheory]
     [Xunit.InlineData("a")]
     [Xunit.InlineData("😀")]
-    public async Task SuspendAsync_LongReason_BoundsNoticePreviewAndPreservesAudit(string character)
+    public async Task SuspendAsync_LongReason_LeavesBoundingToNotificationsAndPreservesAudit(string character)
     {
         var userId = Guid.NewGuid();
         var adminId = Guid.NewGuid();
         var notes = string.Concat(Enumerable.Repeat(character, 2000));
         _userService.GetUserInfoAsync(userId, Arg.Any<CancellationToken>())
             .Returns(MakeUserInfo(userId, UserState.AdminSuspended) with { PreferredLanguage = "es" });
-        _userService.ApplyProfileOnboardingMutationAsync(userId,
-            Arg.Any<UserProfileOnboardingCommand>(), Arg.Any<CancellationToken>())
+        _userService.SetSuspensionAsync(userId, Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
             .Returns(new OnboardingResult(true));
 
         var result = await BuildSut().SuspendAsync(userId, adminId, notes,
@@ -75,16 +73,12 @@ public class HumanLifecycleServiceTests
 
         result.Success.Should().BeTrue();
         var body = (string)_notificationService.ReceivedCalls().Single().GetArguments()[5]!;
-        body.EnumerateRunes().Count().Should().Be(2000);
-        body.Should().StartWith("Tu acceso ha sido suspendido: ");
-        body.Should().EndWith("…");
-        body.Should().NotContain("�");
+        // Notifications owns the column limit and bounds the copy itself.
+        body.Should().Be("Tu acceso ha sido suspendido: " + notes);
         await _auditLogService.Received(1).LogAsync(
             AuditAction.MemberSuspended, nameof(User), userId,
             "Suspended: " + notes, adminId);
-        await _userService.Received(1).ApplyProfileOnboardingMutationAsync(userId,
-            Arg.Is<UserProfileOnboardingCommand>(command => command.Notes == notes),
-            Arg.Any<CancellationToken>());
+        await _userService.Received(1).SetSuspensionAsync(userId, Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<CancellationToken>());
     }
 
     [HumansFact]
@@ -94,15 +88,7 @@ public class HumanLifecycleServiceTests
         var adminId = Guid.NewGuid();
         const string notes = "Disruptive behaviour";
 
-        _userService.ApplyProfileOnboardingMutationAsync(
-                userId,
-                Arg.Is<UserProfileOnboardingCommand>(cmd =>
-                    cmd.Mutation == UserProfileOnboardingMutation.SetSuspension
-                    && cmd.ActorUserId == adminId
-                    && cmd.Suspended == true
-                    && cmd.AdminSuspension
-                    && cmd.Notes == notes),
-                Arg.Any<CancellationToken>())
+        _userService.SetSuspensionAsync(userId, true, true, Arg.Any<CancellationToken>())
             .Returns(new OnboardingResult(true));
 
         var sut = BuildSut();
@@ -110,15 +96,7 @@ public class HumanLifecycleServiceTests
         var result = await sut.SuspendAsync(userId, adminId, notes, Xunit.TestContext.Current.CancellationToken);
 
         result.Success.Should().BeTrue();
-        await _userService.Received(1).ApplyProfileOnboardingMutationAsync(
-            userId,
-            Arg.Is<UserProfileOnboardingCommand>(cmd =>
-                cmd.Mutation == UserProfileOnboardingMutation.SetSuspension
-                && cmd.ActorUserId == adminId
-                && cmd.Suspended == true
-                && cmd.AdminSuspension
-                && cmd.Notes == notes),
-            Arg.Any<CancellationToken>());
+        await _userService.Received(1).SetSuspensionAsync(userId, true, true, Arg.Any<CancellationToken>());
         await _auditLogService.Received(1).LogAsync(
             AuditAction.MemberSuspended,
             nameof(User),
@@ -146,15 +124,7 @@ public class HumanLifecycleServiceTests
         var userId = Guid.NewGuid();
         var adminId = Guid.NewGuid();
 
-        _userService.ApplyProfileOnboardingMutationAsync(
-                userId,
-                Arg.Is<UserProfileOnboardingCommand>(cmd =>
-                    cmd.Mutation == UserProfileOnboardingMutation.SetSuspension
-                    && cmd.ActorUserId == adminId
-                    && cmd.Suspended == true
-                    && cmd.AdminSuspension
-                    && cmd.Notes == null),
-                Arg.Any<CancellationToken>())
+        _userService.SetSuspensionAsync(userId, true, true, Arg.Any<CancellationToken>())
             .Returns(new OnboardingResult(true));
 
         var sut = BuildSut();
@@ -181,10 +151,7 @@ public class HumanLifecycleServiceTests
         var userId = Guid.NewGuid();
         var adminId = Guid.NewGuid();
 
-        _userService.ApplyProfileOnboardingMutationAsync(
-                userId,
-                Arg.Any<UserProfileOnboardingCommand>(),
-                Arg.Any<CancellationToken>())
+        _userService.SetSuspensionAsync(userId, Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
             .Returns(new OnboardingResult(false, "NotFound"));
 
         var sut = BuildSut();
@@ -206,13 +173,7 @@ public class HumanLifecycleServiceTests
         var userId = Guid.NewGuid();
         var adminId = Guid.NewGuid();
 
-        _userService.ApplyProfileOnboardingMutationAsync(
-                userId,
-                Arg.Is<UserProfileOnboardingCommand>(cmd =>
-                    cmd.Mutation == UserProfileOnboardingMutation.SetSuspension
-                    && cmd.ActorUserId == adminId
-                    && cmd.Suspended == false),
-                Arg.Any<CancellationToken>())
+        _userService.SetSuspensionAsync(userId, false, false, Arg.Any<CancellationToken>())
             .Returns(new OnboardingResult(true));
 
         var sut = BuildSut();
@@ -220,13 +181,7 @@ public class HumanLifecycleServiceTests
         var result = await sut.UnsuspendAsync(userId, adminId, Xunit.TestContext.Current.CancellationToken);
 
         result.Success.Should().BeTrue();
-        await _userService.Received(1).ApplyProfileOnboardingMutationAsync(
-            userId,
-            Arg.Is<UserProfileOnboardingCommand>(cmd =>
-                cmd.Mutation == UserProfileOnboardingMutation.SetSuspension
-                && cmd.ActorUserId == adminId
-                && cmd.Suspended == false),
-            Arg.Any<CancellationToken>());
+        await _userService.Received(1).SetSuspensionAsync(userId, false, false, Arg.Any<CancellationToken>());
         await _auditLogService.Received(1).LogAsync(
             AuditAction.MemberUnsuspended,
             nameof(User),
@@ -243,10 +198,7 @@ public class HumanLifecycleServiceTests
         var userId = Guid.NewGuid();
         var adminId = Guid.NewGuid();
 
-        _userService.ApplyProfileOnboardingMutationAsync(
-                userId,
-                Arg.Any<UserProfileOnboardingCommand>(),
-                Arg.Any<CancellationToken>())
+        _userService.SetSuspensionAsync(userId, Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
             .Returns(new OnboardingResult(false, "NotFound"));
 
         var sut = BuildSut();
@@ -268,10 +220,7 @@ public class HumanLifecycleServiceTests
         var userId = Guid.NewGuid();
         var adminId = Guid.NewGuid();
 
-        _userService.ApplyProfileOnboardingMutationAsync(
-                userId,
-                Arg.Any<UserProfileOnboardingCommand>(),
-                Arg.Any<CancellationToken>())
+        _userService.SetSuspensionAsync(userId, Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
             .Returns(new OnboardingResult(true));
         _notificationService.SendAsync(
                 Arg.Any<NotificationSource>(),
@@ -304,10 +253,7 @@ public class HumanLifecycleServiceTests
         var userId = Guid.NewGuid();
         var adminId = Guid.NewGuid();
 
-        _userService.ApplyProfileOnboardingMutationAsync(
-                userId,
-                Arg.Any<UserProfileOnboardingCommand>(),
-                Arg.Any<CancellationToken>())
+        _userService.SetSuspensionAsync(userId, Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
             .Returns(new OnboardingResult(true));
         _notificationInboxService
             .ResolveBySourceAsync(userId, NotificationSource.AccessSuspended, Arg.Any<CancellationToken>())
@@ -326,23 +272,13 @@ public class HumanLifecycleServiceTests
         var userId = Guid.NewGuid();
         _userService.GetUserInfoAsync(userId, Arg.Any<CancellationToken>())
             .Returns(new ValueTask<UserInfo?>(MakeUserInfo(userId, UserState.Suspended)));
-        _userService.ApplyProfileOnboardingMutationAsync(
-                userId,
-                Arg.Is<UserProfileOnboardingCommand>(cmd =>
-                    cmd.Mutation == UserProfileOnboardingMutation.SetSuspension
-                    && cmd.Suspended == false),
-                Arg.Any<CancellationToken>())
+        _userService.SetSuspensionAsync(userId, false, false, Arg.Any<CancellationToken>())
             .Returns(new OnboardingResult(true));
 
         var result = await BuildSut().RestoreConsentSuspensionAsync(userId, Xunit.TestContext.Current.CancellationToken);
 
         result.Success.Should().BeTrue();
-        await _userService.Received(1).ApplyProfileOnboardingMutationAsync(
-            userId,
-            Arg.Is<UserProfileOnboardingCommand>(cmd =>
-                cmd.Mutation == UserProfileOnboardingMutation.SetSuspension
-                && cmd.Suspended == false),
-            Arg.Any<CancellationToken>());
+        await _userService.Received(1).SetSuspensionAsync(userId, false, false, Arg.Any<CancellationToken>());
         await _auditLogService.Received(1).LogAsync(
             AuditAction.MemberUnsuspended,
             nameof(User),
@@ -361,8 +297,7 @@ public class HumanLifecycleServiceTests
         var result = await BuildSut().RestoreConsentSuspensionAsync(userId, Xunit.TestContext.Current.CancellationToken);
 
         result.Success.Should().BeTrue();
-        await _userService.DidNotReceiveWithAnyArgs().ApplyProfileOnboardingMutationAsync(
-            Guid.Empty, default!, Arg.Any<CancellationToken>());
+        await _userService.DidNotReceiveWithAnyArgs().SetSuspensionAsync(default, default, default, Arg.Any<CancellationToken>());
         await _auditLogService.DidNotReceiveWithAnyArgs().LogAsync(
             default, null!, default, null!, null!);
     }

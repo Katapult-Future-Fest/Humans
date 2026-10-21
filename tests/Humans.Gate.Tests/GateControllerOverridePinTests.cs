@@ -1,6 +1,5 @@
 using System.Security.Claims;
 using AwesomeAssertions;
-using Hangfire;
 using Humans.Gate.Controllers;
 using Humans.Gate.Domain;
 using Humans.Gate.Models;
@@ -43,22 +42,14 @@ public class GateControllerOverridePinTests
                 IsEarly: true, null, null));
     }
 
-    private GateController BuildController(
-        string? configuredPin,
-        bool mirrorEnabled = false,
-        GateVendorMirrorLedger? mirrorLedger = null,
-        IBackgroundJobClient? backgroundJobs = null)
+    private GateController BuildController(string? configuredPin)
     {
         Dictionary<string, string?> settings = new(StringComparer.OrdinalIgnoreCase);
         if (configuredPin is not null)
             settings["Gate:SupervisorPin"] = configuredPin;
-        if (mirrorEnabled)
-            settings["Gate:VendorMirrorEnabled"] = "true";
         var config = new ConfigurationBuilder().AddInMemoryCollection(settings).Build();
         var throttle = new GatePinThrottle(new MemoryCache(new MemoryCacheOptions()), _clock);
-        mirrorLedger ??= new GateVendorMirrorLedger(new MemoryCache(new MemoryCacheOptions()));
-        var controller = new GateController(_gate, _users, config, throttle, mirrorLedger,
-            backgroundJobs ?? Substitute.For<IBackgroundJobClient>(), _clock, NullLogger<GateController>.Instance);
+        var controller = new GateController(_gate, _users, config, throttle, _clock, NullLogger<GateController>.Instance);
 
         var http = new DefaultHttpContext
         {
@@ -70,7 +61,7 @@ public class GateControllerOverridePinTests
         return controller;
     }
 
-    private Task<IActionResult> Decide(GateController c, bool overrideEarly = false, bool child = false, string? pin = null) =>
+    private Task<IActionResult> DecideAsync(GateController c, bool overrideEarly = false, bool child = false, string? pin = null) =>
         c.Decision(Barcode, idConfirmed: false, childWithAdult: child, overrideEarly: overrideEarly,
             supervisorPin: pin, laneId: null, TestContext.Current.CancellationToken);
 
@@ -117,7 +108,7 @@ public class GateControllerOverridePinTests
     {
         var controller = BuildController(Pin);
 
-        var card = CardOf(await Decide(controller, overrideEarly: true, pin: "0000"));
+        var card = CardOf(await DecideAsync(controller, overrideEarly: true, pin: "0000"));
 
         Assert.Equal(GateCardKind.Amber, card.Kind);
         Assert.True(card.AllowSupervisorOverride); // inline retry stays available
@@ -130,7 +121,7 @@ public class GateControllerOverridePinTests
     {
         var controller = BuildController(Pin);
 
-        await Decide(controller, overrideEarly: true, pin: Pin);
+        await DecideAsync(controller, overrideEarly: true, pin: Pin);
 
         await _gate.Received(1).RecordDecisionAsync(
             Arg.Is<GateDecisionInput>(i => i.OverrideByUserId == _gateAccount),
@@ -142,7 +133,7 @@ public class GateControllerOverridePinTests
     {
         var controller = BuildController(configuredPin: null);
 
-        var card = CardOf(await Decide(controller, overrideEarly: true, pin: "1111"));
+        var card = CardOf(await DecideAsync(controller, overrideEarly: true, pin: "1111"));
 
         Assert.Equal(GateCardKind.Amber, card.Kind);
         Assert.Contains("not configured", card.Reason, StringComparison.OrdinalIgnoreCase);
@@ -158,28 +149,28 @@ public class GateControllerOverridePinTests
         // Literal 5, not GatePinThrottle.MaxFailures — a test written against the constant
         // it pins cannot notice the constant changing.
         for (var i = 0; i < 5; i++)
-            await Decide(controller, overrideEarly: true, pin: "0000");
+            await DecideAsync(controller, overrideEarly: true, pin: "0000");
 
         // Even the CORRECT pin is now refused (locked out)…
-        var locked = CardOf(await Decide(controller, overrideEarly: true, pin: Pin));
+        var locked = CardOf(await DecideAsync(controller, overrideEarly: true, pin: Pin));
         Assert.Contains("wait", locked.Reason, StringComparison.OrdinalIgnoreCase);
         await _gate.DidNotReceive().RecordDecisionAsync(
             Arg.Any<GateDecisionInput>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>());
 
         // …and the lockout does not decay early: 14 minutes in, still locked…
         _clock.Advance(Duration.FromMinutes(14));
-        var stillLocked = CardOf(await Decide(controller, overrideEarly: true, pin: Pin));
+        var stillLocked = CardOf(await DecideAsync(controller, overrideEarly: true, pin: Pin));
         Assert.Contains("wait", stillLocked.Reason, StringComparison.OrdinalIgnoreCase);
 
         // …but a plain (non-override) decision on the same terminal still records.
-        await Decide(controller);
+        await DecideAsync(controller);
         await _gate.Received(1).RecordDecisionAsync(
             Arg.Is<GateDecisionInput>(i => i.OverrideByUserId == null),
             _gateAccount, Arg.Any<CancellationToken>());
 
         // Past the full 15 minutes the correct PIN authorizes again.
         _clock.Advance(Duration.FromMinutes(1) + Duration.FromSeconds(1));
-        await Decide(controller, overrideEarly: true, pin: Pin);
+        await DecideAsync(controller, overrideEarly: true, pin: Pin);
         await _gate.Received(1).RecordDecisionAsync(
             Arg.Is<GateDecisionInput>(i => i.OverrideByUserId == _gateAccount),
             _gateAccount, Arg.Any<CancellationToken>());
@@ -190,41 +181,16 @@ public class GateControllerOverridePinTests
     {
         var controller = BuildController(Pin);
 
-        var card = CardOf(await Decide(controller, child: true, pin: "9999"));
+        var card = CardOf(await DecideAsync(controller, child: true, pin: "9999"));
 
         Assert.Equal(GateCardKind.Amber, card.Kind);
         Assert.False(card.AllowSupervisorOverride); // child waiver retries by re-scanning
         await _gate.DidNotReceive().RecordDecisionAsync(
             Arg.Any<GateDecisionInput>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>());
 
-        await Decide(controller, child: true, pin: Pin);
+        await DecideAsync(controller, child: true, pin: Pin);
         await _gate.Received(1).RecordDecisionAsync(
             Arg.Is<GateDecisionInput>(i => i.ChildWithAdult && i.OverrideByUserId == _gateAccount),
             _gateAccount, Arg.Any<CancellationToken>());
-    }
-
-    [HumansFact]
-    public async Task AdmitWithVendorTicket_AlwaysEnqueuesTheMirror_ButMarksTheLedgerOnlyWhenTheFlagIsOn()
-    {
-        _gate.RecordDecisionAsync(Arg.Any<GateDecisionInput>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>())
-            .Returns(new GateDecisionResult(GateVerdict.Admitted, "Guest", null,
-                IsEarly: false, null, null, VendorTicketId: "vt-1"));
-
-        // Flag off: the job is still enqueued (it no-ops itself), but the ledger must NOT be
-        // marked — a mark would hide exactly the row the backfill page exists to recover.
-        var ledgerOff = new GateVendorMirrorLedger(new MemoryCache(new MemoryCacheOptions()));
-        var jobsOff = Substitute.For<IBackgroundJobClient>();
-        await Decide(BuildController(Pin, mirrorEnabled: false, ledgerOff, jobsOff));
-        jobsOff.ReceivedCalls().Should().NotBeEmpty();
-        ledgerOff.WasSent("vt-1").Should().BeFalse();
-
-        // Flag on: enqueued AND ledger-claimed, so a backfill after this mark won't re-send.
-        // The mark lands after the enqueue, so a backfill in that instant can still double-post
-        // one — accepted, not a guarantee (health.md, "Vendor mirror").
-        var ledgerOn = new GateVendorMirrorLedger(new MemoryCache(new MemoryCacheOptions()));
-        var jobsOn = Substitute.For<IBackgroundJobClient>();
-        await Decide(BuildController(Pin, mirrorEnabled: true, ledgerOn, jobsOn));
-        jobsOn.ReceivedCalls().Should().NotBeEmpty();
-        ledgerOn.WasSent("vt-1").Should().BeTrue();
     }
 }

@@ -1,6 +1,7 @@
 using Humans.AuditLog.Contracts;
 using Humans.Users.Contracts;
 using Humans.Settings.Contracts;
+using Humans.Tickets.Contracts;
 using Humans.Tickets.Services.Dtos;
 using NodaTime;
 using Humans.Tickets.Data;
@@ -13,9 +14,8 @@ internal sealed class AttendeeContactImportService(
     IUserEmailService userEmails,
     IAccountProvisioningService provisioning,
     IUserService users,
-    IUserWrite userWrite,
+    IEventParticipationManagement participations,
     ISettingsService settingsService,
-    ITicketCacheInvalidator ticketCacheInvalidator,
     IAuditLogService audit,
     IClock clock,
     ILogger<AttendeeContactImportService> logger) : IAttendeeContactImportService
@@ -103,16 +103,13 @@ internal sealed class AttendeeContactImportService(
             await ticketRepository.UpsertAttendeesAsync(importState.ToUpsert, ct);
         }
 
-        // Evict before participation loop so attendee mutation always invalidates caches.
-        ticketCacheInvalidator.InvalidateAfterContactImport();
-
         var active = await settingsService.GetActiveEventSettingsAsync();
         if (active is not null)
         {
             foreach (var group in importState.ToUpsert.GroupBy(a => a.MatchedUserId!.Value))
             {
                 var earliestScan = group.Min(a => a.CheckedInAt);
-                await userWrite.SetParticipationFromTicketSyncAsync(
+                await participations.RecordParticipationAsync(
                     group.Key, active.Year,
                     earliestScan is not null ? ParticipationStatus.Attended : ParticipationStatus.Ticketed,
                     earliestScan, ct);
@@ -223,7 +220,7 @@ internal sealed class AttendeeContactImportService(
                 var replacement = await provisioning.ReplaceUnverifiedEmailAndProvisionAsync(
                     decision.UnverifiedRowUserId!.Value, decision.UnverifiedEmailIdToDelete!.Value,
                     decision.Email!, decision.AttendeeName, ContactSource.TicketTailor, ct);
-                AttachResolvedAttendees(resolved, replacement.User.Id, state);
+                AttachResolvedAttendees(resolved, replacement.UserId, state);
                 if (replacement.Created) state.Created++;
                 state.Replaced++;
                 return;
@@ -231,7 +228,7 @@ internal sealed class AttendeeContactImportService(
             case AttendeeImportOutcome.CreateNewUser:
                 var createdUser = await provisioning.FindOrCreateUserByEmailAsync(
                     decision.Email!, decision.AttendeeName, ContactSource.TicketTailor, ct);
-                AttachResolvedAttendees(resolved, createdUser.User.Id, state);
+                AttachResolvedAttendees(resolved, createdUser.UserId, state);
                 if (createdUser.Created) state.Created++;
                 return;
         }

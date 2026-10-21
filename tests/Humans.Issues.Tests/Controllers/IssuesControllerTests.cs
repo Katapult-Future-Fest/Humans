@@ -269,7 +269,7 @@ public sealed class IssuesControllerTests
         var actor = Guid.NewGuid();
         var issueId = Guid.NewGuid();
         var issues = Substitute.For<IIssuesService>();
-        issues.SubmitIssueAsync(default, default, default!, default!, default, default, default, default, default, default, default, default)
+        issues.SubmitIssueAsync(default, default, default!, default!, default, default, default, default, default)
             .ReturnsForAnyArgs(new IssueSubmissionResult(new Issue { Id = issueId }));
         var users = Substitute.For<IUserService>();
         if (viewerExists)
@@ -368,5 +368,36 @@ public sealed class IssuesControllerTests
         var model = Assert.IsType<IssuePageViewModel>(Assert.IsType<ViewResult>(result).Model);
         Assert.Equal(new[] { "Alice", "Zoe" }, model.Reporters.Select(r => r.DisplayName), StringComparer.Ordinal);
         Assert.Equal(new[] { 1, 2 }, model.Reporters.Select(r => r.Count));
+    }
+
+    [HumansTheory]
+    [InlineData("Open", new[] { IssueStatus.Triage, IssueStatus.Open, IssueStatus.InProgress })]
+    [InlineData("Closed", new[] { IssueStatus.Resolved, IssueStatus.WontFix, IssueStatus.Duplicate })]
+    public async Task Index_OpenAndClosedViews_FilterByTheTerminalStatusRule(string view, IssueStatus[] expected)
+    {
+        var userId = Guid.NewGuid();
+        var issues = Substitute.For<IIssuesService>();
+        var users = Substitute.For<IUserService>();
+        users.GetUserInfoAsync(userId, Arg.Any<CancellationToken>()).Returns(
+            UserInfo.Create(new User { Id = userId }, [], [], [], null, []));
+        var controller = new IssuesController(issues, Substitute.For<IAuthorizationService>(), users,
+            new IssueSectionRouting([]), Substitute.For<IStringLocalizer<IssuesResource>>(),
+            NullLogger<IssuesController>.Instance)
+        {
+            ControllerContext = new ControllerContext
+            {
+                HttpContext = new DefaultHttpContext
+                {
+                    User = new ClaimsPrincipal(new ClaimsIdentity(
+                        [new Claim(ClaimTypes.NameIdentifier, userId.ToString())], "test"))
+                }
+            }
+        };
+
+        await controller.Index(Enum.Parse<IssueViewMode>(view), null, null, null, null, null);
+
+        await issues.Received(1).GetIssueListAsync(
+            Arg.Is<IssueListFilter>(f => f.Statuses != null && f.Statuses.SequenceEqual(expected)),
+            Arg.Any<IssueViewer>(), Arg.Any<CancellationToken>());
     }
 }

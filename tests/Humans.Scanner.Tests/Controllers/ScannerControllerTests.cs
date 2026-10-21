@@ -14,7 +14,6 @@ using Microsoft.AspNetCore.Mvc.ViewFeatures;
 using Microsoft.Extensions.DependencyInjection;
 using NodaTime;
 using NSubstitute;
-using Humans.Users.Contracts;
 using Xunit;
 
 namespace Humans.Scanner.Tests.Controllers;
@@ -23,7 +22,6 @@ public class ScannerControllerTests
 {
     private static ScannerController NewController(
         ITicketService tickets,
-        IUserService? users = null,
         IEarlyEntryService? earlyEntry = null,
         IConsentService? consents = null,
         IICalFeedService? calendarFeed = null,
@@ -32,7 +30,6 @@ public class ScannerControllerTests
     {
         var ctrl = new ScannerController(
             tickets,
-            users ?? Substitute.For<IUserService>(),
             earlyEntry ?? Substitute.For<IEarlyEntryService>(),
             consents ?? Substitute.For<IConsentService>(),
             calendarFeed ?? Substitute.For<IICalFeedService>(),
@@ -118,7 +115,7 @@ public class ScannerControllerTests
         var tickets = TicketsWithAttendee(Attendee());
         var ctrl = NewController(tickets);
 
-        var result = await ctrl.Card("xyz34Qy5", Xunit.TestContext.Current.CancellationToken);
+        var result = await ctrl.Card("xyz34Qy5", TestContext.Current.CancellationToken);
 
         var vm = result.Should().BeOfType<PartialViewResult>().Subject
             .Model.Should().BeOfType<ScannerTicketCardViewModel>().Subject;
@@ -150,7 +147,7 @@ public class ScannerControllerTests
         var tickets = TicketsWithAttendee(attendee);
         var ctrl = NewController(tickets);
 
-        var result = await ctrl.Card("vb1", Xunit.TestContext.Current.CancellationToken);
+        var result = await ctrl.Card("vb1", TestContext.Current.CancellationToken);
 
         var vm = result.Should().BeOfType<PartialViewResult>().Subject
             .Model.Should().BeOfType<ScannerTicketCardViewModel>().Subject;
@@ -165,7 +162,7 @@ public class ScannerControllerTests
         var tickets = TicketsWithAttendee(Attendee());
         var ctrl = NewController(tickets);
 
-        var result = await ctrl.Card("nope-0000", Xunit.TestContext.Current.CancellationToken);
+        var result = await ctrl.Card("nope-0000", TestContext.Current.CancellationToken);
 
         var vm = result.Should().BeOfType<PartialViewResult>().Subject
             .Model.Should().BeOfType<ScannerTicketCardViewModel>().Subject;
@@ -180,7 +177,7 @@ public class ScannerControllerTests
         var tickets = TicketsWithAttendee(Attendee(), isCurrentEvent: false);
         var ctrl = NewController(tickets);
 
-        var result = await ctrl.Card("xyz34Qy5", Xunit.TestContext.Current.CancellationToken);
+        var result = await ctrl.Card("xyz34Qy5", TestContext.Current.CancellationToken);
 
         var vm = result.Should().BeOfType<PartialViewResult>().Subject
             .Model.Should().BeOfType<ScannerTicketCardViewModel>().Subject;
@@ -196,7 +193,7 @@ public class ScannerControllerTests
     {
         var ctrl = NewController(TicketsWithAttendee(Attendee()));
 
-        var result = await ctrl.Card(barcode!, Xunit.TestContext.Current.CancellationToken);
+        var result = await ctrl.Card(barcode!, TestContext.Current.CancellationToken);
 
         var vm = result.Should().BeOfType<PartialViewResult>().Subject
             .Model.Should().BeOfType<ScannerTicketCardViewModel>().Subject;
@@ -217,7 +214,7 @@ public class ScannerControllerTests
             });
         var ctrl = NewController(TicketsWithAttendee(Attendee(userId)), events: events);
 
-        var result = await ctrl.Card("xyz34Qy5", Xunit.TestContext.Current.CancellationToken);
+        var result = await ctrl.Card("xyz34Qy5", TestContext.Current.CancellationToken);
 
         var vm = result.Should().BeOfType<PartialViewResult>().Subject
             .Model.Should().BeOfType<ScannerTicketCardViewModel>().Subject;
@@ -232,10 +229,9 @@ public class ScannerControllerTests
         var tickets = TicketsWithAttendee(Attendee(matchedUserId: null));
         var earlyEntry = Substitute.For<IEarlyEntryService>();
         var consents = Substitute.For<IConsentService>();
-        var users = Substitute.For<IUserService>();
-        var ctrl = NewController(tickets, users: users, earlyEntry: earlyEntry, consents: consents);
+        var ctrl = NewController(tickets, earlyEntry: earlyEntry, consents: consents);
 
-        var result = await ctrl.Card("xyz34Qy5", Xunit.TestContext.Current.CancellationToken);
+        var result = await ctrl.Card("xyz34Qy5", TestContext.Current.CancellationToken);
 
         var vm = result.Should().BeOfType<PartialViewResult>().Subject
             .Model.Should().BeOfType<ScannerTicketCardViewModel>().Subject;
@@ -246,7 +242,7 @@ public class ScannerControllerTests
         vm.ProvideItems.Should().BeNull();
         await earlyEntry.DidNotReceive().GetForUserAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>());
         await consents.DidNotReceive().GetPendingDocumentNamesAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>());
-        await users.DidNotReceive().GetUserInfoAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>());
+        await tickets.DidNotReceive().GetParticipationsAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>());
     }
 
     [HumansFact]
@@ -267,26 +263,14 @@ public class ScannerControllerTests
         var burnSettings = Substitute.For<ISettingsService>();
         burnSettings.GetActiveEventSettingsAsync(Arg.Any<CancellationToken>()).Returns(ActiveBurn());
 
-        var users = Substitute.For<IUserService>();
-        users.GetUserInfoAsync(userId, Arg.Any<CancellationToken>()).Returns(UserInfo.Create(
-            new User { Id = userId, PreferredLanguage = "en" },
-            [],
-            [
-                // Prior year's check-in must not leak into the current card.
-                new EventParticipation
-                {
-                    Id = Guid.NewGuid(), UserId = userId, Year = 2025,
-                    Status = ParticipationStatus.Attended, Source = ParticipationSource.TicketSync,
-                    CheckedInAt = Instant.FromUtc(2025, 6, 18, 9, 0),
-                },
-                new EventParticipation
-                {
-                    Id = Guid.NewGuid(), UserId = userId, Year = 2026,
-                    Status = ParticipationStatus.Attended, Source = ParticipationSource.TicketSync,
-                    CheckedInAt = checkedInAt,
-                },
-            ],
-            [], profile: null, []));
+        tickets.GetParticipationsAsync(userId, Arg.Any<CancellationToken>()).Returns(
+        [
+            // Prior year's check-in must not leak into the current card.
+            new EventParticipationInfo(userId, 2025, ParticipationStatus.Attended, ParticipationSource.TicketSync,
+                null, Instant.FromUtc(2025, 6, 18, 9, 0)),
+            new EventParticipationInfo(userId, 2026, ParticipationStatus.Attended, ParticipationSource.TicketSync,
+                null, checkedInAt),
+        ]);
 
         var calendarFeed = Substitute.For<IICalFeedService>();
         var shiftItem = new CalendarFeedItem(
@@ -311,9 +295,9 @@ public class ScannerControllerTests
                 OfferedEvent(Guid.NewGuid(), campId: null, "Other Human's Talk", Instant.FromUtc(2026, 6, 18, 17, 0)),
             });
 
-        var ctrl = NewController(tickets, users, earlyEntry, consents, calendarFeed, events, burnSettings);
+        var ctrl = NewController(tickets, earlyEntry, consents, calendarFeed, events, burnSettings);
 
-        var result = await ctrl.Card("xyz34Qy5", Xunit.TestContext.Current.CancellationToken);
+        var result = await ctrl.Card("xyz34Qy5", TestContext.Current.CancellationToken);
 
         var vm = result.Should().BeOfType<PartialViewResult>().Subject
             .Model.Should().BeOfType<ScannerTicketCardViewModel>().Subject;
@@ -346,7 +330,7 @@ public class ScannerControllerTests
 
         var ctrl = NewController(tickets, consents: consents);
 
-        var result = await ctrl.Card("xyz34Qy5", Xunit.TestContext.Current.CancellationToken);
+        var result = await ctrl.Card("xyz34Qy5", TestContext.Current.CancellationToken);
 
         var vm = result.Should().BeOfType<PartialViewResult>().Subject
             .Model.Should().BeOfType<ScannerTicketCardViewModel>().Subject;

@@ -29,9 +29,11 @@ internal sealed class ExpenseReportAuthorizationHandler(IBudgetService budgetSer
         var isFinanceAdmin = RoleChecks.IsFinanceAdmin(context.User); // includes Admin
 
         if (isFinanceAdmin
-            && (op is ExpenseReportOperation.View
-                    or ExpenseReportOperation.Approve
-                    or ExpenseReportOperation.FinanceReject
+            && (op == ExpenseReportOperation.View
+                // A finance decision is open only while the report awaits one (the repository's gate).
+                || (op is ExpenseReportOperation.Approve or ExpenseReportOperation.FinanceReject
+                    && resource.Status is ExpenseReportStatus.Submitted
+                        or ExpenseReportStatus.CoordinatorEndorsed)
                 // Filing and fixing a report for a member who cannot do it themselves. Editing a
                 // report already Submitted or CoordinatorEndorsed does not send it back a step —
                 // the endorsement stands. Approved and Withdrawn are closed to everyone.
@@ -78,10 +80,10 @@ internal sealed class ExpenseReportAuthorizationHandler(IBudgetService budgetSer
                 return;
             }
 
+            // Approval queues the Holded push, so an Approved report is past withdrawing.
             if (op == ExpenseReportOperation.Withdraw &&
                 resource.Status is ExpenseReportStatus.Submitted
-                    or ExpenseReportStatus.CoordinatorEndorsed
-                    or ExpenseReportStatus.Approved)
+                    or ExpenseReportStatus.CoordinatorEndorsed)
             {
                 context.Succeed(requirement);
                 return;

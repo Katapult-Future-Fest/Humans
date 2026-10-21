@@ -9,7 +9,6 @@ using Humans.Consent.Models;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.ViewFeatures;
-using System.Text;
 using Humans.AuditLog.Contracts;
 using AwesomeAssertions;
 using Humans.Notifications.Contracts;
@@ -31,7 +30,8 @@ namespace Humans.Consent.Tests.Services;
 /// Covers the merged <see cref="LegalDocumentSyncService"/> (nobodies-collective/Humans#751):
 /// the sole writer for <c>legal_documents</c>/<c>document_versions</c>, owning both the admin
 /// write surface (<see cref="IAdminLegalDocumentService"/>) and the GitHub-sync write surface
-/// (<see cref="ILegalDocumentSyncManagement"/>). Invalidator assertions here replace the deleted
+/// (<see cref="ILegalDocumentSyncManagement"/>). Eviction assertions (the real decorator's
+/// <c>BulkInvalidations</c>) here replace the deleted
 /// <c>LegalDocumentSaveChangesInterceptorTests</c> — invalidation now fires from the service
 /// after each successful repository write instead of from a cross-cutting EF interceptor.
 /// </summary>
@@ -43,7 +43,8 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
     private readonly IGitHubLegalDocumentConnector _gitHub = Substitute.For<IGitHubLegalDocumentConnector>();
     private readonly ITeamService _teamService = Substitute.For<ITeamService>();
     private readonly IUserService _userService = Substitute.For<IUserService>();
-    private readonly ILegalDocumentCacheInvalidator _invalidator = Substitute.For<ILegalDocumentCacheInvalidator>();
+    // The real decorator; only its eviction is exercised, so its scope factory resolves nothing.
+    private readonly CachingLegalDocumentSyncService _cache;
     private readonly LegalDocumentSyncService _service;
     private readonly TeamInfo _team;
 
@@ -69,7 +70,12 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
             });
 
         _userService.GetAllUserInfosAsync(Arg.Any<CancellationToken>())
-            .Returns((IReadOnlyCollection<UserInfo>)[]);
+            .Returns([]);
+
+        _cache = new CachingLegalDocumentSyncService(
+            new ServiceCollection().BuildServiceProvider().GetRequiredService<IServiceScopeFactory>(),
+            Clock,
+            NullLogger<CachingLegalDocumentSyncService>.Instance);
 
         _service = new LegalDocumentSyncService(
             _repository,
@@ -77,7 +83,7 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
             Notifier,
             _teamService,
             _userService,
-            _invalidator,
+            _cache,
             _audit,
             Options.Create(new GitHubSettings
             {
@@ -127,6 +133,37 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
         versions.Should().ContainSingle().Which.Id.Should().Be(currentId);
     }
 
+    [HumansFact]
+    public async Task GetLegalDocumentWithVersionsAsync_CurrentVersionIsLatestAlreadyEffective()
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var document = await SeedDocumentAsync("Privacy");
+        var now = Clock.GetCurrentInstant();
+        foreach (var (number, effectiveFrom) in new[]
+        {
+            ("v1", now.Minus(Duration.FromDays(2))),
+            ("v2", now.Minus(Duration.FromDays(1))),
+            ("v3", now.Plus(Duration.FromDays(1)))
+        })
+        {
+            LegalDb.DocumentVersions.Add(new DocumentVersion
+            {
+                Id = Guid.NewGuid(),
+                LegalDocumentId = document.Id,
+                VersionNumber = number,
+                CommitSha = number,
+                EffectiveFrom = effectiveFrom,
+                CreatedAt = now
+            });
+        }
+        await SaveAllAsync(ct);
+
+        var detail = await _service.GetLegalDocumentWithVersionsAsync(document.Id, ct);
+
+        detail!.CurrentVersion.Should().Be("v2");
+        detail.Versions.Should().HaveCount(3);
+    }
+
     // ── NormalizeGitHubFolderPath ────────────────────────────────────────────
 
     [HumansFact]
@@ -173,7 +210,7 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
             User = new ClaimsPrincipal(new ClaimsIdentity(
                 [new Claim(ClaimTypes.NameIdentifier, _actorUserId.ToString())], "test"))
         };
-        var controller = new AdminLegalDocumentsController(_userService, _service, _teamService, Clock,
+        var controller = new AdminLegalDocumentsController(_userService, _service, _teamService,
             NullLogger<AdminLegalDocumentsController>.Instance)
         {
             ControllerContext = new ControllerContext { HttpContext = http },
@@ -205,7 +242,7 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
 
         var result = await controller.EditLegalDocument(document.Id, model);
 
-        await using var verify = LegalDbFactory.CreateDbContext();
+        await using var verify = await LegalDbFactory.CreateDbContextAsync(Xunit.TestContext.Current.CancellationToken);
         var stored = await verify.LegalDocuments.AsNoTracking().SingleAsync(Xunit.TestContext.Current.CancellationToken);
         if (omitted is not null)
         {
@@ -215,7 +252,7 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
             stored.IsRequired.Should().BeFalse();
             stored.IsActive.Should().BeFalse();
             stored.GracePeriodDays.Should().Be(30);
-            _invalidator.ReceivedCalls().Should().BeEmpty();
+            _cache.BulkInvalidations.Should().Be(0);
             _audit.ReceivedCalls().Should().BeEmpty();
             controller.TempData.Should().BeEmpty();
         }
@@ -226,7 +263,7 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
             stored.IsRequired.Should().Be(enabled);
             stored.IsActive.Should().Be(enabled);
             stored.GracePeriodDays.Should().Be(enabled ? 1 : 365);
-            _invalidator.Received(1).InvalidateAll();
+            _cache.BulkInvalidations.Should().Be(1);
         }
     }
 
@@ -252,7 +289,7 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
             User = new ClaimsPrincipal(new ClaimsIdentity(
                 [new Claim(ClaimTypes.NameIdentifier, _actorUserId.ToString())], "test"))
         };
-        var controller = new AdminLegalDocumentsController(_userService, _service, _teamService, Clock,
+        var controller = new AdminLegalDocumentsController(_userService, _service, _teamService,
             NullLogger<AdminLegalDocumentsController>.Instance)
         {
             ControllerContext = new ControllerContext { HttpContext = http },
@@ -265,11 +302,11 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
             : await controller.CreateLegalDocument(model);
 
         result.Should().BeOfType<NotFoundResult>();
-        await using var verify = LegalDbFactory.CreateDbContext();
+        await using var verify = await LegalDbFactory.CreateDbContextAsync(Xunit.TestContext.Current.CancellationToken);
         var stored = await verify.LegalDocuments.AsNoTracking().ToListAsync(Xunit.TestContext.Current.CancellationToken);
         stored.Should().ContainSingle().Which.Name.Should().Be("Existing document");
         stored[0].TeamId.Should().Be(_team.Id);
-        _invalidator.ReceivedCalls().Should().BeEmpty();
+        _cache.BulkInvalidations.Should().Be(0);
         _audit.ReceivedCalls().Should().BeEmpty();
         _gitHub.ReceivedCalls().Should().BeEmpty();
         controller.TempData.Should().BeEmpty();
@@ -307,14 +344,14 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
 
         await _audit.Received(1).LogAsync(AuditAction.LegalDocumentCreated, "LegalDocument", result!.Document.Id,
             Arg.Is<string>(text => text.Contains("grace period 7 days", StringComparison.Ordinal)), _actorUserId);
-        await _audit.Received(1).LogAsync(AuditAction.LegalDocumentVersionPublished, "LegalDocument", result!.Document.Id,
+        await _audit.Received(1).LogAsync(AuditAction.LegalDocumentVersionPublished, "LegalDocument", result.Document.Id,
             Arg.Is<string>(text => text.Contains("sha-1", StringComparison.Ordinal)), _actorUserId,
             Arg.Is<Guid?>(id => id.HasValue && id.Value != Guid.Empty), "DocumentVersion");
-        result!.InitialSyncStatus.Should().Be(AdminLegalDocumentInitialSyncStatus.Synced);
-        result!.SyncMessage.Should().Contain("v1.0");
+        result.InitialSyncStatus.Should().Be(AdminLegalDocumentInitialSyncStatus.Synced);
+        result.SyncMessage.Should().Contain("v1.0");
 
         // One invalidation for the create, one for the version add from sync.
-        _invalidator.Received(2).InvalidateAll();
+        _cache.BulkInvalidations.Should().Be(2);
     }
 
     [HumansFact]
@@ -327,7 +364,7 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
             request, _actorUserId, Xunit.TestContext.Current.CancellationToken);
 
         result!.InitialSyncStatus.Should().Be(AdminLegalDocumentInitialSyncStatus.NoGitHubFolderPath);
-        _invalidator.Received(1).InvalidateAll(); // create only, no sync attempted
+        _cache.BulkInvalidations.Should().Be(1); // create only, no sync attempted
     }
 
     [HumansFact]
@@ -335,15 +372,15 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
     {
         var request = new AdminLegalDocumentUpsertRequest("Privacy", _team.Id, true, true, 7, "missing/");
         _gitHub.DiscoverLanguageFilesAsync("missing/", Arg.Any<CancellationToken>())
-            .Returns((IReadOnlyDictionary<string, string>)new Dictionary<string, string>(StringComparer.Ordinal));
+            .Returns(new Dictionary<string, string>(StringComparer.Ordinal));
 
         var result = await _service.CreateLegalDocumentWithInitialSyncAsync(
             request, _actorUserId, Xunit.TestContext.Current.CancellationToken);
 
         result!.InitialSyncStatus.Should().Be(AdminLegalDocumentInitialSyncStatus.Failed);
-        (await _repository.GetByIdAsync(result!.Document.Id, Xunit.TestContext.Current.CancellationToken))
+        (await _repository.GetByIdAsync(result.Document.Id, Xunit.TestContext.Current.CancellationToken))
             .Should().NotBeNull();
-        await _audit.Received(1).LogAsync(AuditAction.LegalDocumentCreated, "LegalDocument", result!.Document.Id,
+        await _audit.Received(1).LogAsync(AuditAction.LegalDocumentCreated, "LegalDocument", result.Document.Id,
             Arg.Any<string>(), _actorUserId);
         _audit.ReceivedCalls().Should().ContainSingle();
     }
@@ -351,7 +388,7 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
     // ── UpdateLegalDocumentAsync ─────────────────────────────────────────────
 
     [HumansFact]
-    public async Task UpdateLegalDocumentAsync_UpdatesAndInvokesInvalidator()
+    public async Task UpdateLegalDocumentAsync_UpdatesAndEvictsCache()
     {
         var document = await SeedDocumentAsync("Code of Conduct");
 
@@ -362,10 +399,10 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
             document.Id, request, _actorUserId, Xunit.TestContext.Current.CancellationToken);
 
         updated.Should().NotBeNull();
-        updated!.Name.Should().Be("Code of Conduct v2");
+        updated.Name.Should().Be("Code of Conduct v2");
         await _audit.Received(1).LogAsync(AuditAction.LegalDocumentUpdated, "LegalDocument", document.Id,
             Arg.Is<string>(text => text.Contains("grace period 14 days", StringComparison.Ordinal)), _actorUserId);
-        _invalidator.Received(1).InvalidateAll();
+        _cache.BulkInvalidations.Should().Be(1);
     }
 
     [HumansFact]
@@ -377,14 +414,14 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
             Guid.NewGuid(), request, _actorUserId, Xunit.TestContext.Current.CancellationToken);
 
         updated.Should().BeNull();
-        _invalidator.DidNotReceive().InvalidateAll();
+        _cache.BulkInvalidations.Should().Be(0);
         _audit.ReceivedCalls().Should().BeEmpty();
     }
 
     // ── ArchiveLegalDocumentAsync ─────────────────────────────────────────────
 
     [HumansFact]
-    public async Task ArchiveLegalDocumentAsync_ArchivesAndInvokesInvalidator()
+    public async Task ArchiveLegalDocumentAsync_ArchivesAndEvictsCache()
     {
         var document = await SeedDocumentAsync("Code of Conduct");
 
@@ -392,10 +429,10 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
             document.Id, _actorUserId, Xunit.TestContext.Current.CancellationToken);
 
         archived.Should().NotBeNull();
-        archived!.IsActive.Should().BeFalse();
+        archived.IsActive.Should().BeFalse();
         await _audit.Received(1).LogAsync(AuditAction.LegalDocumentArchived, "LegalDocument", document.Id,
             Arg.Any<string>(), _actorUserId);
-        _invalidator.Received(1).InvalidateAll();
+        _cache.BulkInvalidations.Should().Be(1);
     }
 
     [HumansFact]
@@ -405,7 +442,7 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
             Guid.NewGuid(), _actorUserId, Xunit.TestContext.Current.CancellationToken);
 
         archived.Should().BeNull();
-        _invalidator.DidNotReceive().InvalidateAll();
+        _cache.BulkInvalidations.Should().Be(0);
         _audit.ReceivedCalls().Should().BeEmpty();
     }
 
@@ -447,7 +484,7 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
         // Repository created its own DbContext via the factory; read the
         // refreshed value through a fresh context rather than the test's
         // change-tracker-polluted one.
-        await using var verifyCtx = LegalDbFactory.CreateDbContext();
+        await using var verifyCtx = await LegalDbFactory.CreateDbContextAsync(Xunit.TestContext.Current.CancellationToken);
         var version = await verifyCtx.DocumentVersions
             .AsNoTracking()
             .FirstOrDefaultAsync(v => v.Id == versionId, Xunit.TestContext.Current.CancellationToken);
@@ -456,19 +493,19 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
         {
             updated.Should().Be(VersionSummaryUpdateResult.TooLong);
             version!.ChangesSummary.Should().Be("Existing summary");
-            _invalidator.ReceivedCalls().Should().BeEmpty();
+            _cache.BulkInvalidations.Should().Be(0);
             _audit.ReceivedCalls().Should().BeEmpty();
         }
         else
         {
             updated.Should().Be(VersionSummaryUpdateResult.Updated);
             version.Should().NotBeNull();
-            version!.ChangesSummary.Should().Be(string.IsNullOrWhiteSpace(summary) ? null : summary.Trim());
+            version.ChangesSummary.Should().Be(string.IsNullOrWhiteSpace(summary) ? null : summary.Trim());
             var expectedAudit = $"Updated summary of version {versionId} to '{summary?.Trim()}'.";
             await _audit.Received(1).LogAsync(AuditAction.LegalDocumentVersionSummaryUpdated, "LegalDocument", document.Id,
                 Arg.Is<string>(text => string.Equals(text, expectedAudit, StringComparison.Ordinal)),
                 _actorUserId, versionId, "DocumentVersion");
-            _invalidator.Received(1).InvalidateAll();
+            _cache.BulkInvalidations.Should().Be(1);
         }
     }
 
@@ -481,7 +518,7 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
             document.Id, Guid.NewGuid(), "Anything", _actorUserId, Xunit.TestContext.Current.CancellationToken);
 
         updated.Should().Be(VersionSummaryUpdateResult.NotFound);
-        _invalidator.DidNotReceive().InvalidateAll();
+        _cache.BulkInvalidations.Should().Be(0);
         _audit.ReceivedCalls().Should().BeEmpty();
     }
 
@@ -500,13 +537,13 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
             Arg.Is<string>(text => text.Contains("new-sha", StringComparison.Ordinal)), _actorUserId,
             Arg.Any<Guid?>(), "DocumentVersion");
         result.Should().Contain("v1.0");
-        _invalidator.Received(1).InvalidateAll();
+        _cache.BulkInvalidations.Should().Be(1);
     }
 
     // ── GitHub sync — touch-only path (no content change) ────────────────────
 
     [HumansFact]
-    public async Task SyncDocumentAsync_AlreadyCurrent_TouchesAndInvokesInvalidator()
+    public async Task SyncDocumentAsync_AlreadyCurrent_TouchesAndEvictsCache()
     {
         var document = await SeedDocumentAsync("Privacy", folderPath: "privacy/", currentCommitSha: "same-sha");
         StubGitHubFolder("privacy/", "es-content", "same-sha", "No-op commit");
@@ -515,7 +552,7 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
             document.Id, Xunit.TestContext.Current.CancellationToken);
 
         result.Should().BeNull();
-        _invalidator.Received(1).InvalidateAll();
+        _cache.BulkInvalidations.Should().Be(1);
         _audit.ReceivedCalls().Should().BeEmpty();
     }
 
@@ -556,6 +593,27 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
             : "A new required legal document has been published. Please review and sign it.");
     }
 
+    [HumansFact]
+    public async Task SyncDocumentAsync_NewVersion_EvictsCacheBeforeNoticeFanout()
+    {
+        // A recipient following the notice must find the new version, so the writer
+        // evicts before it fans out, not after it returns.
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        StubActiveUser();
+        var document = await SeedDocumentAsync("Privacy", folderPath: "privacy/", currentCommitSha: "sha-1");
+        StubGitHubFolder("privacy/", "new-es-content", "sha-2", "Initial");
+        long? evictionsAtFanout = null;
+        Notifier.When(n => n.SendAsync(Arg.Any<NotificationSource>(), Arg.Any<NotificationClass>(),
+                Arg.Any<NotificationPriority>(), Arg.Any<string>(), Arg.Any<IReadOnlyList<Guid>>(),
+                Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<string?>(),
+                Arg.Any<string?>(), Arg.Any<CancellationToken>()))
+            .Do(_ => evictionsAtFanout ??= _cache.BulkInvalidations);
+
+        await _service.SyncDocumentAsync(document.Id, ct);
+
+        evictionsAtFanout.Should().Be(1);
+    }
+
     [HumansTheory]
     [Xunit.InlineData(false, false)]
     [Xunit.InlineData(true, false)]
@@ -574,7 +632,7 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
                 State = id == inactiveId ? UserState.Rejected : UserState.Active
             },
             [], [], [], UserFixtures.Profile(), [])).ToList();
-        _userService.GetAllUserInfosAsync(Arg.Any<CancellationToken>()).Returns((IReadOnlyCollection<UserInfo>)users);
+        _userService.GetAllUserInfosAsync(Arg.Any<CancellationToken>()).Returns(users);
         var document = await SeedDocumentAsync("Privacy", folderPath: "privacy/", currentCommitSha: "sha-1");
         if (update)
         {
@@ -630,7 +688,7 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
 
         result.Should().Contain("v1.0");
 
-        await using var verifyCtx = LegalDbFactory.CreateDbContext();
+        await using var verifyCtx = await LegalDbFactory.CreateDbContextAsync(Xunit.TestContext.Current.CancellationToken);
         var version = await verifyCtx.DocumentVersions
             .AsNoTracking()
             .SingleAsync(v => v.LegalDocumentId == document.Id, Xunit.TestContext.Current.CancellationToken);
@@ -643,8 +701,8 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
             Arg.Any<string>(), nameof(LegalDocumentSyncService), version.Id, "DocumentVersion");
         await _gitHub.Received(1).GetFileContentAsync("privacy/doc.md", Arg.Any<CancellationToken>());
 
-        await AssertFanout(NotificationSource.LegalDocumentPublished, received: true);
-        await AssertFanout(NotificationSource.ReConsentRequired, received: false);
+        await AssertFanoutAsync(NotificationSource.LegalDocumentPublished, received: true);
+        await AssertFanoutAsync(NotificationSource.ReConsentRequired, received: false);
     }
 
     [HumansFact]
@@ -670,15 +728,15 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
 
         result.Should().Contain("v2.0");
 
-        await using var verifyCtx = LegalDbFactory.CreateDbContext();
+        await using var verifyCtx = await LegalDbFactory.CreateDbContextAsync(Xunit.TestContext.Current.CancellationToken);
         var newVersion = await verifyCtx.DocumentVersions
             .AsNoTracking()
             .SingleAsync(v => v.CommitSha == "sha-2", Xunit.TestContext.Current.CancellationToken);
         newVersion.RequiresReConsent.Should().BeTrue(
             because: "every non-initial version invalidates prior consent");
 
-        await AssertFanout(NotificationSource.ReConsentRequired, received: true);
-        await AssertFanout(NotificationSource.LegalDocumentPublished, received: false);
+        await AssertFanoutAsync(NotificationSource.ReConsentRequired, received: true);
+        await AssertFanoutAsync(NotificationSource.LegalDocumentPublished, received: false);
     }
 
     [HumansFact]
@@ -686,7 +744,7 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
     {
         var document = await SeedDocumentAsync("Privacy", folderPath: "privacy/");
         _gitHub.DiscoverLanguageFilesAsync("privacy/", Arg.Any<CancellationToken>())
-            .Returns((IReadOnlyDictionary<string, string>)new Dictionary<string, string>(StringComparer.Ordinal)
+            .Returns(new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 ["en"] = "privacy/doc-en.md"
             });
@@ -696,7 +754,7 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*No canonical Spanish file*");
 
-        await using var verifyCtx = LegalDbFactory.CreateDbContext();
+        await using var verifyCtx = await LegalDbFactory.CreateDbContextAsync(Xunit.TestContext.Current.CancellationToken);
         (await verifyCtx.DocumentVersions
                 .AsNoTracking()
                 .AnyAsync(v => v.LegalDocumentId == document.Id, Xunit.TestContext.Current.CancellationToken))
@@ -714,16 +772,16 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
         Func<Task> sync = () => _service.SyncDocumentAsync(document.Id, Xunit.TestContext.Current.CancellationToken);
 
         await sync.Should().ThrowAsync<InvalidOperationException>().WithMessage("*canonical Spanish content*");
-        await using var verify = LegalDbFactory.CreateDbContext();
+        await using var verify = await LegalDbFactory.CreateDbContextAsync(Xunit.TestContext.Current.CancellationToken);
         (await verify.DocumentVersions.CountAsync(Xunit.TestContext.Current.CancellationToken)).Should().Be(0);
         (await verify.LegalDocuments.SingleAsync(d => d.Id == document.Id, Xunit.TestContext.Current.CancellationToken))
             .CurrentCommitSha.Should().Be("old-sha");
         _audit.ReceivedCalls().Should().BeEmpty();
-        _invalidator.ReceivedCalls().Should().BeEmpty();
+        _cache.BulkInvalidations.Should().Be(0);
         Notifier.ReceivedCalls().Should().BeEmpty();
     }
 
-    private Task AssertFanout(NotificationSource source, bool received)
+    private Task AssertFanoutAsync(NotificationSource source, bool received)
     {
         var call = received ? Notifier.Received(1) : Notifier.DidNotReceive();
         return call.SendAsync(
@@ -760,14 +818,14 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
             profile: profile,
             communicationPreferences: []);
         _userService.GetAllUserInfosAsync(Arg.Any<CancellationToken>())
-            .Returns((IReadOnlyCollection<UserInfo>)[user]);
+            .Returns([user]);
     }
 
     private void StubGitHubFolder(string folderPath, string content, string sha, string commitMessage)
     {
         var canonicalPath = $"{folderPath}doc.md";
         _gitHub.DiscoverLanguageFilesAsync(folderPath, Arg.Any<CancellationToken>())
-            .Returns((IReadOnlyDictionary<string, string>)new Dictionary<string, string>(StringComparer.Ordinal) { ["es"] = canonicalPath });
+            .Returns(new Dictionary<string, string>(StringComparer.Ordinal) { ["es"] = canonicalPath });
         _gitHub.GetFileContentAsync(canonicalPath, Arg.Any<CancellationToken>())
             .Returns(new GitHubFileContent(content, sha, $"commit-{sha}"));
         _gitHub.GetCommitMessageAsync($"commit-{sha}", Arg.Any<CancellationToken>())

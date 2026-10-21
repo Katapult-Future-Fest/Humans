@@ -5,7 +5,6 @@ using Humans.Agent.Services.Preload;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
-using Humans.Agent.Contracts;
 
 namespace Humans.Agent.Tests;
 
@@ -155,7 +154,7 @@ public class AgentFeatureSpecReaderTests
     /// <summary>
     /// Walks up from the test binaries to the repo root. Inlined for the same reason
     /// <see cref="AgentSectionDocReaderTests"/> inlines it: this project needs the one member,
-    /// not the harness around it (design §15 step 8).
+    /// not the harness around it.
     /// </summary>
     private static string LocateRepoRoot()
     {

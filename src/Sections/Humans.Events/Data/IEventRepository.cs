@@ -76,6 +76,8 @@ internal interface IEventRepository : IRepository
     Task<Dictionary<EventStatus, int>> GetModerationStatusCountsAsync(CancellationToken ct = default);
     Task<IReadOnlyList<Event>> GetEventsByStatusAsync(EventStatus status, CancellationToken ct = default);
     Task<Event?> GetEventForModerationAsync(Guid eventId, CancellationToken ct = default);
+    /// <summary>Read-only load with Category, EventVenue and moderation history; never pass the result to a save.</summary>
+    Task<Event?> GetEventWithDetailsAsync(Guid eventId, CancellationToken ct = default);
     Task<IReadOnlyList<CampEventOverlap>> GetActiveCampEventsAsync(CancellationToken ct = default);
     /// <summary>Persists the (already-transitioned) event + appends the moderation action in one transaction.</summary>
     Task SaveEventAndModerationActionAsync(Event guideEvent, EventModerationAction action, CancellationToken ct = default);
@@ -108,4 +110,12 @@ internal interface IEventRepository : IRepository
     /// is retained — see the retention reason on the section's erasure declaration.
     /// </summary>
     Task<int> ClearSubmitterHostForUserAsync(Guid userId, CancellationToken ct = default);
+
+    // ── Account merge ─────────────────────────────────────────────────────
+    /// <summary>
+    /// Re-points the source's submissions, favourites and preference at the target in one save.
+    /// A source favourite the target already covers is deleted; when both have a preference the
+    /// target's wins and the source row stays as archived history. Idempotent.
+    /// </summary>
+    Task ReassignToUserAsync(Guid sourceUserId, Guid targetUserId, NodaTime.Instant updatedAt, CancellationToken ct = default);
 }

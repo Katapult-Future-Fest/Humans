@@ -32,7 +32,7 @@ namespace Humans.Shifts.Tests.Infrastructure;
 /// A trimmed <em>copy</em> of <c>Humans.Application.Tests</c>' <c>ServiceTestHarness</c>,
 /// not a share: the moved tests make 169 <c>SaveAllAsync</c>, 56 <c>SeedUser</c> and 55
 /// <c>SeedTeam</c> calls, which is Teams' "copy the harness" rather than Budget's "own
-/// three members" (design §15 step 8). The Google-integration and Camps section pairs are
+/// three members". The Google-integration and Camps section pairs are
 /// dropped — no Shifts test touches them.
 ///
 /// <para>
@@ -76,9 +76,7 @@ public abstract class ShiftsTestHarness : IDisposable
 
     private protected IAuditLogService AuditLog { get; } = Substitute.For<IAuditLogService>();
     private protected INotificationEmitter Notifier { get; } = Substitute.For<INotificationEmitter>();
-    private protected IShiftAuthorizationInvalidator ShiftAuthInvalidator { get; } = Substitute.For<IShiftAuthorizationInvalidator>();
     private protected IAdminAuthorizationService AdminAuthorization { get; } = Substitute.For<IAdminAuthorizationService>();
-    private protected IEarlyEntryInvalidator EarlyEntryInvalidator { get; } = Substitute.For<IEarlyEntryInvalidator>();
 
     protected ShiftsTestHarness(Instant? now = null)
     {
@@ -179,20 +177,20 @@ public abstract class ShiftsTestHarness : IDisposable
         var settingsService = Substitute.For<ISettingsService>();
 
         settingsService.GetEventSettingsByIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>())
-            .Returns(ci =>
+            .Returns(async ci =>
             {
                 var id = ci.Arg<Guid>();
                 var local = ShiftsDb.EventSettings.Local.FirstOrDefault(e => e.Id == id)
-                    ?? ShiftsDb.EventSettings.FirstOrDefault(e => e.Id == id);
-                return Task.FromResult(local is null ? null : ToEventSettingsInfo(local));
+                    ?? await ShiftsDb.EventSettings.FirstOrDefaultAsync(e => e.Id == id, ci.Arg<CancellationToken>());
+                return local is null ? null : ToEventSettingsInfo(local);
             });
 
         settingsService.GetActiveEventSettingsAsync(Arg.Any<CancellationToken>())
-            .Returns(_ =>
+            .Returns(async ci =>
             {
                 var local = ShiftsDb.EventSettings.Local.FirstOrDefault(e => e.IsActive)
-                    ?? ShiftsDb.EventSettings.FirstOrDefault(e => e.IsActive);
-                return Task.FromResult(local is null ? null : ToEventSettingsInfo(local));
+                    ?? await ShiftsDb.EventSettings.FirstOrDefaultAsync(e => e.IsActive, ci.Arg<CancellationToken>());
+                return local is null ? null : ToEventSettingsInfo(local);
             });
 
         return new EventCalendarResolver(settingsService);
@@ -238,11 +236,11 @@ public abstract class ShiftsTestHarness : IDisposable
             });
 
         svc.GetUserInfoAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>())
-            .Returns(callInfo =>
+            .Returns(async ValueTask<UserInfo?> (callInfo) =>
             {
                 var id = callInfo.Arg<Guid>();
-                var user = Db.Users.FirstOrDefault(u => u.Id == id);
-                return new ValueTask<UserInfo?>(user?.ToUserInfo());
+                var user = await Db.Users.FirstOrDefaultAsync(u => u.Id == id, callInfo.Arg<CancellationToken>());
+                return user?.ToUserInfo();
             });
 
         return svc;

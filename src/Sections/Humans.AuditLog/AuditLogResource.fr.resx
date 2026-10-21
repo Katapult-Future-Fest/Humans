@@ -232,6 +232,7 @@
   <data name="Enum_AuditAction_ExpenseHoldedRequeued" xml:space="preserve"><value>Dépense remise en file d’attente pour Holded</value></data>
   <data name="Enum_AuditAction_ExpenseLineDeclined" xml:space="preserve"><value>Ligne de dépense refusée</value></data>
   <data name="Enum_AuditAction_ExpenseLineDeclineUndone" xml:space="preserve"><value>Refus de la ligne de dépense annulé</value></data>
+  <data name="Enum_AuditAction_DataMigrationApplied" xml:space="preserve"><value>Migration de données appliquée</value></data>
   <data name="Enum_AuditAction_HoldedExpenseAccountCreated" xml:space="preserve"><value>Compte de dépenses Holded créé</value></data>
   <data name="Enum_AuditAction_HoldedExpenseAccountLinked" xml:space="preserve"><value>Compte de dépenses Holded associé</value></data>
   <data name="Enum_AuditAction_HoldedExpenseAccountActiveChanged" xml:space="preserve"><value>État actif du compte de dépenses Holded modifié</value></data>
@@ -244,12 +245,15 @@
   <data name="Enum_AuditAction_SepaBankLineSkipped" xml:space="preserve"><value>Ligne bancaire SEPA ignorée</value></data>
   <data name="Enum_AuditAction_CityPlanningPlacementOpened" xml:space="preserve"><value>Période d’affectation urbaine ouverte</value></data>
   <data name="Enum_AuditAction_CityPlanningPlacementClosed" xml:space="preserve"><value>Période d’affectation urbaine fermée</value></data>
+  <data name="Enum_AuditAction_CityPlanningPlacementOverrideCleared" xml:space="preserve"><value>Forçage manuel de l’affectation urbaine retiré</value></data>
   <data name="Enum_AuditAction_CityPlanningContainerPlacementOpened" xml:space="preserve"><value>Période d’installation urbaine des conteneurs ouverte</value></data>
   <data name="Enum_AuditAction_CityPlanningContainerPlacementClosed" xml:space="preserve"><value>Période d’installation urbaine des conteneurs fermée</value></data>
   <data name="Enum_AuditAction_CityPlanningLimitZoneUpdated" xml:space="preserve"><value>Zone limite d’urbanisme mise à jour</value></data>
   <data name="Enum_AuditAction_CityPlanningLimitZoneDeleted" xml:space="preserve"><value>Zone limite d’urbanisme supprimée</value></data>
   <data name="Enum_AuditAction_CityPlanningOfficialZonesUpdated" xml:space="preserve"><value>Mise à jour des zones officielles d'urbanisme</value></data>
   <data name="Enum_AuditAction_CityPlanningOfficialZonesDeleted" xml:space="preserve"><value>Zones officielles d'urbanisme supprimées</value></data>
+  <data name="Enum_AuditAction_CityPlanningPlacementDatesUpdated" xml:space="preserve"><value>Dates de placement d'urbanisme mises à jour</value></data>
+  <data name="Enum_AuditAction_CityPlanningRegistrationInfoUpdated" xml:space="preserve"><value>Informations d'inscription d'urbanisme mises à jour</value></data>
   <data name="Enum_AuditAction_ExpenseCreatedOnBehalf" xml:space="preserve"><value>Dépense créée au nom d’une autre personne</value></data>
   <data name="Enum_AuditAction_ExpenseEditedOnBehalf" xml:space="preserve"><value>Dépense modifiée au nom d’une autre personne</value></data>
   <data name="Enum_AuditAction_ExpensePayeeIbanUpdated" xml:space="preserve"><value>IBAN du bénéficiaire de la dépense mis à jour</value></data>
@@ -294,6 +298,7 @@
   <data name="Enum_AuditAction_StorePaymentMethodBackfilled" xml:space="preserve"><value>Mode de paiement de la boutique renseigné rétroactivement</value></data>
   <data name="Enum_AuditAction_HoldedCreditorBound" xml:space="preserve"><value>Créancier Holded associé</value></data>
   <data name="Enum_AuditAction_HoldedCreditorUnbound" xml:space="preserve"><value>Créancier Holded dissocié</value></data>
+  <data name="Enum_AuditAction_HoldedCreditorAccountNumChanged" xml:space="preserve"><value>Compte créancier Holded modifié</value></data>
   <data name="Enum_AuditAction_HoldedCategoryAccountProvisioned" xml:space="preserve"><value>Compte de catégorie Holded provisionné</value></data>
   <data name="Enum_AuditAction_CampaignCreated" xml:space="preserve"><value>Campagne créée</value></data>
   <data name="Enum_AuditAction_CampaignUpdated" xml:space="preserve"><value>Campagne mise à jour</value></data>

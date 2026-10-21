@@ -32,13 +32,7 @@ public sealed class EventsModerationControllerTests
     {
         var moderatorId = Guid.NewGuid();
         var settingsId = Guid.NewGuid();
-        var guideEvent = new Event
-        {
-            Id = Guid.NewGuid(),
-            CampId = isCampEvent ? Guid.NewGuid() : null,
-            Title = "Approved event",
-            Status = EventStatus.Approved
-        };
+        var guideEvent = MakeEvent(isCampEvent ? Guid.NewGuid() : null, EventStatus.Approved) with { Title = "Approved event" };
         _guide.GetEventForModerationAsync(guideEvent.Id, Arg.Any<CancellationToken>()).Returns(guideEvent);
         _guide.GetGuideSettingsAsync(Arg.Any<CancellationToken>()).Returns(new EventGuideSettingsView(
             Guid.NewGuid(), settingsId, Instant.MinValue, Instant.MaxValue, Instant.MaxValue, 100,
@@ -62,26 +56,15 @@ public sealed class EventsModerationControllerTests
 
         result.Should().BeOfType<ViewResult>();
         controller.ModelState[nameof(model.RecurrenceDays)]!.Errors.Should().ContainSingle();
-        guideEvent.Title.Should().Be("Approved event");
-        await _guide.DidNotReceive().AdminUpdateAsync(Arg.Any<Event>(), Arg.Any<Guid>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
+        await _guide.DidNotReceive().AdminUpdateAsync(
+            Arg.Any<Guid>(), Arg.Any<EventEdit>(), Arg.Any<Guid>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
     }
 
     [HumansFact]
     public async Task Approve_pending_event_applies_the_approval_with_submitter_edit_url()
     {
         var moderatorId = Guid.NewGuid();
-        var guideEvent = new Event
-        {
-            Id = Guid.NewGuid(),
-            SubmitterUserId = Guid.NewGuid(),
-            CategoryId = Guid.NewGuid(),
-            GuideSharedVenueId = Guid.NewGuid(),
-            Title = "Pending event",
-            Description = "Description",
-            StartAt = Instant.FromUtc(2026, 8, 1, 18, 0),
-            DurationMinutes = 60,
-            Status = EventStatus.Pending,
-        };
+        var guideEvent = MakeEvent(null, EventStatus.Pending) with { Title = "Pending event" };
         _guide.GetEventForModerationAsync(guideEvent.Id, Arg.Any<CancellationToken>()).Returns(guideEvent);
         _users.GetUserInfoAsync(moderatorId, Arg.Any<CancellationToken>())
             .Returns(new ValueTask<UserInfo?>(UserInfoFor(moderatorId)));
@@ -97,21 +80,108 @@ public sealed class EventsModerationControllerTests
             $"/Events/Submit/{guideEvent.Id}/Edit", Arg.Any<CancellationToken>());
     }
 
+    [HumansTheory]
+    [Xunit.InlineData(true, "A reason is required when rejecting an event.")]
+    [Xunit.InlineData(false, "A reason is required when requesting edits.")]
+    public async Task Missing_reason_refused_by_the_service_shows_the_reason_message(bool reject, string expected)
+    {
+        var moderatorId = Guid.NewGuid();
+        var guideEvent = MakeEvent(null, EventStatus.Pending) with { Title = "Pending event" };
+        _guide.GetEventForModerationAsync(guideEvent.Id, Arg.Any<CancellationToken>()).Returns(guideEvent);
+        _guide.ApplyModerationAsync(guideEvent.Id, moderatorId, Arg.Any<EventModerationActionType>(), Arg.Any<string?>(),
+                Arg.Any<string?>(), Arg.Any<CancellationToken>())
+            .Returns(ModerationOutcome.ReasonRequired);
+        _users.GetUserInfoAsync(moderatorId, Arg.Any<CancellationToken>())
+            .Returns(new ValueTask<UserInfo?>(UserInfoFor(moderatorId)));
+        var controller = BuildController(moderatorId, guideEvent.Id);
+        var form = new ModerationActionFormModel { EventId = guideEvent.Id, Reason = " " };
+
+        var result = reject ? await controller.Reject(form) : await controller.RequestEdit(form);
+
+        result.Should().BeOfType<RedirectToActionResult>().Which.ActionName.Should().Be("Index");
+        controller.TempData[Humans.Base.Constants.TempDataKeys.ErrorMessage].Should().Be(expected);
+    }
+
+    [HumansFact]
+    public async Task Non_pending_event_refused_by_the_service_shows_the_pending_message()
+    {
+        var moderatorId = Guid.NewGuid();
+        var guideEvent = MakeEvent(null, EventStatus.Approved) with { Title = "Approved event" };
+        _guide.GetEventForModerationAsync(guideEvent.Id, Arg.Any<CancellationToken>()).Returns(guideEvent);
+        _guide.ApplyModerationAsync(guideEvent.Id, moderatorId, Arg.Any<EventModerationActionType>(), Arg.Any<string?>(),
+                Arg.Any<string?>(), Arg.Any<CancellationToken>())
+            .Returns(ModerationOutcome.NotPending);
+        _users.GetUserInfoAsync(moderatorId, Arg.Any<CancellationToken>())
+            .Returns(new ValueTask<UserInfo?>(UserInfoFor(moderatorId)));
+        var controller = BuildController(moderatorId, guideEvent.Id);
+
+        var result = await controller.Approve(new ModerationActionFormModel { EventId = guideEvent.Id });
+
+        result.Should().BeOfType<RedirectToActionResult>().Which.ActionName.Should().Be("Index");
+        controller.TempData[Humans.Base.Constants.TempDataKeys.ErrorMessage].Should().Be("This event is not in a pending state.");
+    }
+
+    [HumansFact]
+    public async Task Unrelated_service_exception_propagates_instead_of_a_refusal_message()
+    {
+        var moderatorId = Guid.NewGuid();
+        var guideEvent = MakeEvent(null, EventStatus.Pending) with { Title = "Pending event" };
+        _guide.GetEventForModerationAsync(guideEvent.Id, Arg.Any<CancellationToken>()).Returns(guideEvent);
+        _guide.ApplyModerationAsync(guideEvent.Id, moderatorId, Arg.Any<EventModerationActionType>(), Arg.Any<string?>(),
+                Arg.Any<string?>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromException<ModerationOutcome>(new InvalidOperationException("connection is not open")));
+        _users.GetUserInfoAsync(moderatorId, Arg.Any<CancellationToken>())
+            .Returns(new ValueTask<UserInfo?>(UserInfoFor(moderatorId)));
+        var controller = BuildController(moderatorId, guideEvent.Id);
+
+        var act = () => controller.Approve(new ModerationActionFormModel { EventId = guideEvent.Id });
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("connection is not open");
+        controller.TempData.ContainsKey(Humans.Base.Constants.TempDataKeys.ErrorMessage).Should().BeFalse();
+    }
+
+    [HumansTheory]
+    [Xunit.InlineData(EventStatus.Rejected, true)]
+    [Xunit.InlineData(EventStatus.ResubmitRequested, true)]
+    [Xunit.InlineData(EventStatus.Pending, false)]
+    [Xunit.InlineData(EventStatus.Draft, false)]
+    public void EventInfo_IsResubmission_only_after_moderation_sent_it_back(EventStatus status, bool expected)
+        => MakeEvent(null, status).IsResubmission.Should().Be(expected);
+
     [HumansFact]
     public async Task Withdraw_approved_event_records_the_moderator()
     {
         var moderatorId = Guid.NewGuid();
-        var guideEvent = new Event { Id = Guid.NewGuid(), Title = "Approved event", Status = EventStatus.Approved };
+        var guideEvent = MakeEvent(null, EventStatus.Approved) with { Title = "Approved event" };
         _guide.GetEventForModerationAsync(guideEvent.Id, Arg.Any<CancellationToken>()).Returns(guideEvent);
         _users.GetUserInfoAsync(moderatorId, Arg.Any<CancellationToken>())
             .Returns(new ValueTask<UserInfo?>(UserInfoFor(moderatorId)));
 
+        _guide.ModeratorWithdrawAsync(guideEvent.Id, moderatorId, Arg.Any<CancellationToken>()).Returns(true);
         var controller = BuildController(moderatorId, guideEvent.Id);
 
         await controller.Withdraw(new ModerationActionFormModel { EventId = guideEvent.Id });
 
-        await _guide.Received(1).ModeratorWithdrawAsync(guideEvent, moderatorId, Arg.Any<CancellationToken>());
-        await _guide.DidNotReceive().WithdrawEventAsync(Arg.Any<Event>(), Arg.Any<CancellationToken>());
+        await _guide.Received(1).ModeratorWithdrawAsync(guideEvent.Id, moderatorId, Arg.Any<CancellationToken>());
+        await _guide.DidNotReceive().WithdrawEventAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>());
+        controller.TempData["SuccessMessage"].Should().NotBeNull();
+    }
+
+    [HumansFact]
+    public async Task Withdraw_leaves_the_status_rule_to_the_service_and_reports_its_refusal()
+    {
+        var moderatorId = Guid.NewGuid();
+        var guideEvent = MakeEvent(null, EventStatus.Rejected) with { Title = "Rejected event" };
+        _guide.GetEventForModerationAsync(guideEvent.Id, Arg.Any<CancellationToken>()).Returns(guideEvent);
+        _users.GetUserInfoAsync(moderatorId, Arg.Any<CancellationToken>())
+            .Returns(new ValueTask<UserInfo?>(UserInfoFor(moderatorId)));
+        _guide.ModeratorWithdrawAsync(guideEvent.Id, moderatorId, Arg.Any<CancellationToken>()).Returns(false);
+        var controller = BuildController(moderatorId, guideEvent.Id);
+
+        await controller.Withdraw(new ModerationActionFormModel { EventId = guideEvent.Id });
+
+        await _guide.Received(1).ModeratorWithdrawAsync(guideEvent.Id, moderatorId, Arg.Any<CancellationToken>());
+        controller.TempData["ErrorMessage"].Should().NotBeNull();
     }
 
     [HumansFact]
@@ -165,10 +235,8 @@ public sealed class EventsModerationControllerTests
         var categoryId = Guid.NewGuid();
         var venueId = Guid.NewGuid();
         var settings = BurnFixtures.Burn(year: 2026);
-        var guideEvent = new Event
+        var guideEvent = MakeEvent(isCampEvent ? Guid.NewGuid() : null, EventStatus.Pending) with
         {
-            Id = Guid.NewGuid(),
-            CampId = isCampEvent ? Guid.NewGuid() : null,
             CategoryId = categoryId,
             GuideSharedVenueId = venueId,
             StartAt = Instant.FromUtc(2026, 8, 1, 12, 0),
@@ -224,6 +292,12 @@ public sealed class EventsModerationControllerTests
         controller.Url.Action(Arg.Any<UrlActionContext>()).Returns($"/Events/Submit/{eventId}/Edit");
         return controller;
     }
+
+    private static EventInfo MakeEvent(Guid? campId, EventStatus status) => new(
+        Guid.NewGuid(), campId, campId == null ? Guid.NewGuid() : null, Guid.NewGuid(), Guid.NewGuid(),
+        "Music", "music", false, null, "Test Event", "Description", null, null,
+        Instant.FromUtc(2026, 8, 1, 18, 0), 60, false, null, null, status,
+        Instant.FromUtc(2026, 7, 1, 0, 0), Instant.FromUtc(2026, 7, 1, 0, 0), []);
 
     private static UserInfo UserInfoFor(Guid userId) => UserInfo.Create(
         new User { Id = userId, DisplayName = "Moderator", PreferredLanguage = "en", CreatedAt = Instant.MinValue },

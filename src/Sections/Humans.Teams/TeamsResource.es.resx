@@ -234,33 +234,6 @@
   <data name="Teams_TeamAdmin_MemberRemoved" xml:space="preserve">
     <value>Miembro eliminado del equipo.</value>
   </data>
-  <data name="Teams_TeamAdmin_InvalidDriveUrl" xml:space="preserve">
-    <value>Por favor, introduzca una URL válida de carpeta de Google Drive.</value>
-  </data>
-  <data name="Teams_TeamAdmin_ServiceAccount" xml:space="preserve">
-    <value>Cuenta de servicio: {0}</value>
-    <comment>{0} = service account email</comment>
-  </data>
-  <data name="Teams_TeamAdmin_InvalidGroupEmail" xml:space="preserve">
-    <value>Por favor, introduzca una dirección de correo válida de Google Group.</value>
-  </data>
-  <data name="Teams_TeamAdmin_GroupLinked" xml:space="preserve">
-    <value>Google Group “{0}” vinculado correctamente.</value>
-    <comment>{0} = group name</comment>
-  </data>
-  <data name="Teams_TeamAdmin_GroupLinkFailed" xml:space="preserve">
-    <value>No se ha podido vincular el Google Group.</value>
-  </data>
-  <data name="Teams_TeamAdmin_ResourceUnlinked" xml:space="preserve">
-    <value>Recurso desvinculado del equipo.</value>
-  </data>
-  <data name="Teams_TeamAdmin_ResourceSynced" xml:space="preserve">
-    <value>Permisos del recurso sincronizados correctamente.</value>
-  </data>
-  <data name="Teams_TeamAdmin_ResourceSyncFailed" xml:space="preserve">
-    <value>Error al sincronizar los permisos del recurso: {0}</value>
-    <comment>{0} = error message</comment>
-  </data>
   <data name="Teams_AdminTeams_Title" xml:space="preserve">
     <value>Administración de equipos</value>
   </data>
@@ -388,39 +361,6 @@
   <data name="Teams_TeamAdmin_RejectionReason" xml:space="preserve">
     <value>Motivo del rechazo (obligatorio)</value>
   </data>
-  <data name="Teams_TeamAdmin_Resources" xml:space="preserve">
-    <value>Recursos</value>
-  </data>
-  <data name="Teams_TeamAdmin_ServiceAccountTitle" xml:space="preserve">
-    <value>Cuenta de servicio</value>
-  </data>
-  <data name="Teams_TeamAdmin_ShareWithServiceAccount" xml:space="preserve">
-    <value>Para vincular un recurso de Google, primero debe compartirlo con la cuenta de servicio:</value>
-  </data>
-  <data name="Teams_TeamAdmin_Copy" xml:space="preserve">
-    <value>Copiar</value>
-  </data>
-  <data name="Teams_TeamAdmin_DriveFolders" xml:space="preserve">
-    <value>Carpetas de Drive</value>
-  </data>
-  <data name="Teams_TeamAdmin_DriveFoldersHelp" xml:space="preserve">
-    <value>Comparta la carpeta con este correo como Editor</value>
-  </data>
-  <data name="Teams_TeamAdmin_GoogleGroups" xml:space="preserve">
-    <value>Google Groups</value>
-  </data>
-  <data name="Teams_TeamAdmin_GoogleGroupsHelp" xml:space="preserve">
-    <value>Añada este correo como Administrador del grupo</value>
-  </data>
-  <data name="Teams_TeamAdmin_LinkedResources" xml:space="preserve">
-    <value>Recursos vinculados</value>
-  </data>
-  <data name="Teams_TeamAdmin_LastSynced" xml:space="preserve">
-    <value>Última sincronización</value>
-  </data>
-  <data name="Teams_TeamAdmin_NoResources" xml:space="preserve">
-    <value>Aún no hay recursos vinculados a este equipo. Utilice los formularios a continuación para vincular una carpeta de Google Drive o un Google Group.</value>
-  </data>
   <data name="Teams_TeamDetail_TeamCoordinators" xml:space="preserve">
     <value>Coordinadores</value>
   </data>
@@ -534,10 +474,6 @@
   <data name="Teams_Tree_Subtitle" xml:space="preserve"><value>Cada departamento y los equipos que lo forman.</value></data>
   <data name="Teams_SyncStatus" xml:space="preserve"><value>Estado de sincronización</value></data>
   <data name="Teams_SystemTeams" xml:space="preserve"><value>Equipos del sistema</value></data>
-  <data name="Teams_TeamAdminResources_Title" xml:space="preserve">
-    <value>Gestionar recursos - {0}</value>
-    <comment>{0} = team name</comment>
-  </data>
   <data name="Teams_TeamAdminMembers_Title" xml:space="preserve">
     <value>Gestionar miembros - {0}</value>
     <comment>{0} = team name</comment>
@@ -585,4 +521,29 @@
   <data name="Teams_RemoveMember_SystemTeam" xml:space="preserve"><value>Los miembros de un equipo gestionado por el sistema no se pueden eliminar manualmente.</value></data>
   <data name="Teams_RemoveMember_Permission" xml:space="preserve"><value>No tienes permiso para eliminar miembros de este equipo.</value></data>
   <data name="Teams_RemoveMember_NotMember" xml:space="preserve"><value>Esta persona no es miembro de este equipo.</value></data>
+  <data name="Teams_SendMessage_FromTeam" xml:space="preserve">
+    <value>Enviar un mensaje a {0} desde {1}</value>
+  </data>
+  <data name="Teams_SendMessage_FromTeamNotice" xml:space="preserve">
+    <value>Estás enviando en nombre de {0}. Las respuestas se enviarán a {1}.</value>
+  </data>
+  <data name="Teams_SendMessage_Breadcrumb" xml:space="preserve">
+    <value>Enviar mensaje</value>
+  </data>
+  <data name="Teams_SendMessage_MessageLabel" xml:space="preserve">
+    <value>Mensaje</value>
+  </data>
+  <data name="Teams_SendMessage_IncludeContactInfo" xml:space="preserve">
+    <value>Incluir mi información de contacto</value>
+  </data>
+  <data name="Teams_SendMessage_IncludeContactInfoHelp" xml:space="preserve">
+    <value>Tu nombre y correo electrónico se incluirán para que puedan responderte directamente.</value>
+  </data>
+  <data name="Teams_SendMessage_Send" xml:space="preserve">
+    <value>Enviar mensaje</value>
+  </data>
+  <data name="Teams_SendMessage_Success" xml:space="preserve">
+    <value>Tu mensaje ha sido enviado a {0}.</value>
+  </data>
+  <data name="Teams_SendMessage_OptedOut" xml:space="preserve"><value>Esta persona ha decidido no recibir mensajes.</value></data>
 </root>

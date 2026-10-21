@@ -16,10 +16,12 @@ section** it belongs to (ledger mirror, sync, `/Holded` admin screen) has its ow
 
 - A **Purchase Document** in Holded is the org's incoming invoice/expense record. Expenses
   creates one per approved expense report, **booked to its 629 expense account at creation**
-  (`items[].account`); tags are never written (dead v1 workaround). The list read carries
-  `notes` (null when absent or blank) so Finance can tell a document the push wrote twice from
-  a legitimately repeated line; `DeletePurchaseDocumentAsync` and `DeleteContactAsync` are the
-  two deletes, used only by Finance's duplicate removal.
+  (`items[].account`); tags are never written (dead v1 workaround). Only the single GET
+  (`GetPurchaseDocumentAsync`) returns `notes` (null when absent or blank) — the v2 list never
+  does (verified live 2026-10-21) — which is how Finance confirms a document the push wrote
+  twice before deleting it; `DeletePurchaseDocumentAsync` and `DeleteContactAsync` are the
+  two deletes, used only by Finance: both by its duplicate removal, and the contact delete also
+  to retract a creditor contact minted by a run that lost the member's binding race.
 - A **Sales Document** is the org's outgoing revenue record, in two kinds behind one
   `HoldedSalesDocumentKind`: a full `invoice` (identified contact required) and a
   `sales-receipt` (*factura simplificada*, no contact). They share one payload shape and one
@@ -64,11 +66,15 @@ section** it belongs to (ledger mirror, sync, `/Holded` admin screen) has its ow
   7.5% is `s_iva_75`.
 - Post-issuance corrections are a *factura rectificativa* in Holded, never a mutation of the
   issued document — the same reason there is no doc-update endpoint below.
+- Contacts are **create-only**: `UpsertContactAsync` POSTs and never PUTs. v2's contact PUT is a
+  full replacement (every omitted field, `supplier_record` included, resets), so a partial update
+  mints the contact a second creditor account.
 - There is **no tag/doc-update endpoint in v2**; recategorizing a pushed doc is done inside
   Holded (reclassify the line) and the ledger mirror picks the correction up.
-- The one delete is `DELETE /api/v2/contacts/{id}`, which retracts a creditor contact minted by a
-  run that lost the member's binding race; a 404 (already gone) is success. The route is not
-  documented in this repo; unverified against Holded's published reference.
+- The two deletes are `DELETE /api/v2/purchases/{id}` and `DELETE /api/v2/contacts/{id}`. A 404
+  on the contact delete (already gone) is success, logged at Error; a 404 on the purchase delete
+  throws like any other 4xx. Holded refuses to delete a purchase document that carries a payment.
+  The routes are not documented in this repo; unverified against Holded's published reference.
 
 ## Cross-Section Dependencies
 

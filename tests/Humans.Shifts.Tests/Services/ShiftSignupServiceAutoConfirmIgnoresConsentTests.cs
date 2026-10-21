@@ -52,8 +52,8 @@ public sealed class ShiftSignupServiceAutoConfirmIgnoresConsentTests : ShiftsTes
         var roleAssignmentService = Substitute.For<IRoleAssignmentService>();
         var serviceProvider = new ServiceLocatorBuilder()
             .With(teamService)
-            .With<ITeamService>(teamService)
-            .With<IRoleAssignmentService>(roleAssignmentService)
+            .With(teamService)
+            .With(roleAssignmentService)
             .With(_users)
             .Build();
 
@@ -65,10 +65,10 @@ public sealed class ShiftSignupServiceAutoConfirmIgnoresConsentTests : ShiftsTes
             AdminAuthorization,
             serviceProvider,
             new MemoryCache(new MemoryCacheOptions()),
-            Substitute.For<IShiftViewInvalidator>(),
+            new ShiftViewProbe().Cache,
             NewCalendarResolver(),
             Clock,
-            NSubstitute.Substitute.For<Humans.EarlyEntry.Contracts.IEarlyEntryInvalidator>(), Microsoft.Extensions.Logging.Abstractions.NullLogger<ShiftManagementService>.Instance);
+            NullLogger<ShiftManagementService>.Instance);
 
         _repo = new ShiftRepository(ShiftsDbFactory, ShiftsDb, Clock);
         var localizer = Substitute.For<IStringLocalizer<ShiftsResource>>();
@@ -85,8 +85,7 @@ public sealed class ShiftSignupServiceAutoConfirmIgnoresConsentTests : ShiftsTes
             AuditLog,
             Substitute.For<INotificationEmitter>(),
             AdminAuthorization,
-            Substitute.For<IShiftViewInvalidator>(),
-            Substitute.For<IEarlyEntryInvalidator>(),
+            new ShiftViewProbe().Cache,
             serviceProvider,
             Clock,
             NullLogger<ShiftSignupService>.Instance,
@@ -97,25 +96,9 @@ public sealed class ShiftSignupServiceAutoConfirmIgnoresConsentTests : ShiftsTes
     [HumansFact]
     public async Task SignUp_PublicRota_UserMissingConsents_ReturnsConfirmed()
     {
+        // Shifts never reads the Consent Coordinator review (it is Consent's, and Shifts does not
+        // reference it), so the review's approval cannot change this outcome either way.
         Assert.True(_userInfo.HasRequiredNameFields);
-        Assert.False(_userInfo.IsApproved);
-        var (_, shift) = SeedShiftScenario(SignupPolicy.Public);
-        await SaveAllAsync(TestContext.Current.CancellationToken);
-
-        var result = await _service.SignUpAsync(_userId, shift.Id, _userId);
-
-        Assert.True(result.Success);
-        Assert.Equal(SignupStatus.Confirmed, Saved(result).Status);
-    }
-
-    [HumansFact]
-    public async Task SignUp_PublicRota_ApprovedUser_ReturnsConfirmed()
-    {
-        _users.GetUserInfoAsync(_userId, Arg.Any<CancellationToken>())
-            .Returns(_userInfo with
-            {
-                Profile = _userInfo.Profile! with { IsApproved = true, ConsentCheckStatus = ConsentCheckStatus.Cleared },
-            });
         var (_, shift) = SeedShiftScenario(SignupPolicy.Public);
         await SaveAllAsync(TestContext.Current.CancellationToken);
 

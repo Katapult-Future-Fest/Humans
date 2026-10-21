@@ -11,7 +11,11 @@ namespace Humans.Tickets.Services.Stores;
 /// <see cref="GetEventSummaryAsync"/> — the one high-read, low-churn vendor call; every
 /// other member forwards straight through to the keyed inner, uncached.
 /// </summary>
-internal sealed class CachingTicketVendorService : ITicketVendorService, ITicketVendorCacheInvalidator
+/// <remarks>
+/// An order pull for an event (the ticket sync's first vendor read) evicts that event's
+/// cached summary, so the summary is never older than the orders the sync last pulled.
+/// </remarks>
+internal sealed class CachingTicketVendorService : ITicketVendorService
 {
     private static readonly Duration EventSummaryCacheTtl = Duration.FromMinutes(15);
 
@@ -25,7 +29,7 @@ internal sealed class CachingTicketVendorService : ITicketVendorService, ITicket
     {
         _scopeFactory = scopeFactory;
         _eventSummaries = new EventSummaryCache(
-            (eventId, ct) => WithInner(inner => inner.GetEventSummaryAsync(eventId, ct)),
+            (eventId, ct) => WithInnerAsync(inner => inner.GetEventSummaryAsync(eventId, ct)),
             clock, EventSummaryCacheTtl, logger);
     }
 
@@ -39,46 +43,46 @@ internal sealed class CachingTicketVendorService : ITicketVendorService, ITicket
             $"Vendor event summary load for '{eventId}' returned no result.");
     }
 
-    public Task<IReadOnlyList<VendorOrderDto>> GetOrdersAsync(
-        Instant? since, string eventId, CancellationToken ct = default) =>
-        WithInner(inner => inner.GetOrdersAsync(since, eventId, ct));
+    public async Task<IReadOnlyList<VendorOrderDto>> GetOrdersAsync(
+        Instant? since, string eventId, CancellationToken ct = default)
+    {
+        var orders = await WithInnerAsync(inner => inner.GetOrdersAsync(since, eventId, ct));
+        _eventSummaries.DeleteKey(eventId);
+        return orders;
+    }
 
     public Task<IReadOnlyList<VendorTicketDto>> GetIssuedTicketsAsync(
         Instant? since, string eventId, CancellationToken ct = default) =>
-        WithInner(inner => inner.GetIssuedTicketsAsync(since, eventId, ct));
+        WithInnerAsync(inner => inner.GetIssuedTicketsAsync(since, eventId, ct));
 
     public Task<IReadOnlyList<VendorCheckInDto>> GetCheckInsAsync(
         Instant? since, string eventId, CancellationToken ct = default) =>
-        WithInner(inner => inner.GetCheckInsAsync(since, eventId, ct));
+        WithInnerAsync(inner => inner.GetCheckInsAsync(since, eventId, ct));
 
     public Task<IReadOnlyList<string>> GenerateDiscountCodesAsync(
         DiscountCodeSpec spec, CancellationToken ct = default) =>
-        WithInner(inner => inner.GenerateDiscountCodesAsync(spec, ct));
+        WithInnerAsync(inner => inner.GenerateDiscountCodesAsync(spec, ct));
 
     public Task<VoidIssuedTicketResult> VoidIssuedTicketAsync(
         string vendorTicketId, bool voidToHold, CancellationToken ct = default) =>
-        WithInner(inner => inner.VoidIssuedTicketAsync(vendorTicketId, voidToHold, ct));
+        WithInnerAsync(inner => inner.VoidIssuedTicketAsync(vendorTicketId, voidToHold, ct));
 
     public Task<VendorTicketDto> IssueTicketAsync(
         IssueTicketRequest request, CancellationToken ct = default) =>
-        WithInner(inner => inner.IssueTicketAsync(request, ct));
+        WithInnerAsync(inner => inner.IssueTicketAsync(request, ct));
 
     public Task CreateCheckInAsync(
         string vendorTicketId, Instant occurredAt, CancellationToken ct = default) =>
-        WithInner(inner => inner.CreateCheckInAsync(vendorTicketId, occurredAt, ct));
+        WithInnerAsync(inner => inner.CreateCheckInAsync(vendorTicketId, occurredAt, ct));
 
-    /// <summary>Drops the cached vendor event summary keyed on <paramref name="vendorEventId"/>.</summary>
-    public void InvalidateEventSummary(string vendorEventId) =>
-        _eventSummaries.DeleteKey(vendorEventId);
-
-    private async Task<TResult> WithInner<TResult>(Func<ITicketVendorService, Task<TResult>> action)
+    private async Task<TResult> WithInnerAsync<TResult>(Func<ITicketVendorService, Task<TResult>> action)
     {
         await using var scope = _scopeFactory.CreateAsyncScope();
         var inner = scope.ServiceProvider.GetRequiredKeyedService<ITicketVendorService>(TicketVendorServiceKeys.InnerServiceKey);
         return await action(inner);
     }
 
-    private async Task WithInner(Func<ITicketVendorService, Task> action)
+    private async Task WithInnerAsync(Func<ITicketVendorService, Task> action)
     {
         await using var scope = _scopeFactory.CreateAsyncScope();
         var inner = scope.ServiceProvider.GetRequiredKeyedService<ITicketVendorService>(TicketVendorServiceKeys.InnerServiceKey);

@@ -1,4 +1,3 @@
-using System.Text;
 using Humans.Shifts.Domain;
 using Humans.Auth.Contracts;
 using Humans.Teams.Domain;
@@ -47,8 +46,8 @@ public sealed class ShiftSignupServiceCoverageGapTests : ShiftsTestHarness
 
         var serviceProvider = new ServiceLocatorBuilder()
             .With(_teamService)
-            .With<ITeamService>(_teamService)
-            .With<IRoleAssignmentService>(roleAssignmentService)
+            .With(_teamService)
+            .With(roleAssignmentService)
             .Build();
 
         var shiftRepo = new ShiftRepository(ShiftsDbFactory, ShiftsDb, Clock);
@@ -58,10 +57,10 @@ public sealed class ShiftSignupServiceCoverageGapTests : ShiftsTestHarness
             AdminAuthorization,
             serviceProvider,
             new MemoryCache(new MemoryCacheOptions()),
-            Substitute.For<IShiftViewInvalidator>(),
+            new ShiftViewProbe().Cache,
             NewCalendarResolver(),
             Clock,
-            NSubstitute.Substitute.For<Humans.EarlyEntry.Contracts.IEarlyEntryInvalidator>(), Microsoft.Extensions.Logging.Abstractions.NullLogger<ShiftManagementService>.Instance);
+            NullLogger<ShiftManagementService>.Instance);
 
         var signupRepo = new ShiftRepository(ShiftsDbFactory, ShiftsDb, Clock);
         _service = new ShiftSignupService(
@@ -72,8 +71,7 @@ public sealed class ShiftSignupServiceCoverageGapTests : ShiftsTestHarness
             AuditLog,
             _notificationService,
             AdminAuthorization,
-            Substitute.For<IShiftViewInvalidator>(),
-            Substitute.For<IEarlyEntryInvalidator>(),
+            new ShiftViewProbe().Cache,
             serviceProvider,
             Clock,
             NullLogger<ShiftSignupService>.Instance,
@@ -112,6 +110,49 @@ public sealed class ShiftSignupServiceCoverageGapTests : ShiftsTestHarness
             Arg.Any<string?>(),
             Arg.Any<string?>(),
             Arg.Any<CancellationToken>());
+    }
+
+    [HumansTheory]
+    [Xunit.InlineData(false, false)]
+    [Xunit.InlineData(true, false)]
+    [Xunit.InlineData(true, true)]
+    public async Task Bail_CoverageAlertsRequireConfirmedSignup(bool range, bool confirmed)
+    {
+        var (_, rota, shift, userA, _) = await SeedScenarioAsync(
+            minVolunteers: 2, maxVolunteers: 5);
+        rota.Period = RotaPeriod.Build;
+        shift.IsAllDay = true;
+        shift.DayOffset = -2;
+        var signup = await ShiftsDb.ShiftSignups.FirstAsync(
+            s => s.UserId == userA, Xunit.TestContext.Current.CancellationToken);
+        signup.Status = confirmed ? SignupStatus.Confirmed : SignupStatus.Pending;
+        signup.SignupBlockId = Guid.NewGuid();
+        await ShiftsDb.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+        var coordinatorId = Guid.NewGuid();
+        _teamService.GetTeamAsync(rota.TeamId, Arg.Any<CancellationToken>())
+            .Returns(BuildTeamInfoWithCoordinator(rota.TeamId, coordinatorId));
+
+        if (range)
+        {
+            var result = await _service.BailRangeAsync(signup.SignupBlockId.Value, userA);
+            result.ErrorKey.Should().BeNull();
+        }
+        else
+        {
+            var result = await _service.BailAsync(signup.Id, userA, reason: null);
+            result.Success.Should().BeTrue();
+        }
+
+        signup.Status.Should().Be(SignupStatus.Bailed);
+        // A pending withdrawal leaves staffing unchanged. A confirmed withdrawal
+        // reduces it below the minimum. Both still produce an ordinary change notice.
+        var sources = _notificationService.ReceivedCalls()
+            .Select(call => (NotificationSource)call.GetArguments()[0]!).ToList();
+        sources.Should().Contain(NotificationSource.ShiftSignupChange);
+        if (confirmed)
+            sources.Should().ContainSingle(source => source == NotificationSource.ShiftCoverageGap);
+        else
+            sources.Should().NotContain(NotificationSource.ShiftCoverageGap);
     }
 
     [HumansFact]

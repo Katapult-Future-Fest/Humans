@@ -1,11 +1,11 @@
 using AwesomeAssertions;
 using Humans.MailerLite.Services.Audiences;
+using Humans.MailerLite.Tests.Infrastructure;
 using Humans.Shifts.Contracts;
 using Humans.Tickets.Contracts;
 using NodaTime;
 using NSubstitute;
 using Humans.Users.Contracts;
-using Humans.Testing;
 using Xunit;
 
 namespace Humans.MailerLite.Tests.Audiences;
@@ -25,7 +25,7 @@ public class TicketNoShiftsAudienceTests
             ticketHolders: [userA, userB, userD],
             shiftCommitted: [userB, userD]);
 
-        var members = await audience.ComputeMemberUserIdsAsync(Xunit.TestContext.Current.CancellationToken);
+        var members = await audience.ComputeMemberUserIdsAsync(TestContext.Current.CancellationToken);
 
         members.Should().BeEquivalentTo([userA]);
     }
@@ -37,7 +37,7 @@ public class TicketNoShiftsAudienceTests
             ticketHolders: [],
             shiftCommitted: []);
 
-        var members = await audience.ComputeMemberUserIdsAsync(Xunit.TestContext.Current.CancellationToken);
+        var members = await audience.ComputeMemberUserIdsAsync(TestContext.Current.CancellationToken);
 
         members.Should().BeEmpty();
     }
@@ -73,7 +73,7 @@ public class TicketNoShiftsAudienceTests
             shiftCommitted: [],
             summaryOverrides: new Dictionary<Guid, ShiftUserSummary> { [userA] = summary });
 
-        var members = await audience.ComputeMemberUserIdsAsync(Xunit.TestContext.Current.CancellationToken);
+        var members = await audience.ComputeMemberUserIdsAsync(TestContext.Current.CancellationToken);
 
         members.Should().BeEquivalentTo([userA]);
     }
@@ -107,7 +107,7 @@ public class TicketNoShiftsAudienceTests
         var users = Substitute.For<IUserService>();
         users.GetAllUserInfosAsync(Arg.Any<CancellationToken>()).Returns(new List<UserInfo>());
 
-        return new TicketNoShiftsAudience(tickets, shiftView, users);
+        return new TicketNoShiftsAudience(tickets, shiftView, users, MarketingPreferenceStubs.For());
     }
 
     private static IReadOnlyList<TicketOrderInfo> OrdersForTicketHolders(IEnumerable<Guid> userIds) =>

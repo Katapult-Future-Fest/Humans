@@ -80,7 +80,7 @@ Status is computed on the dashboard based on Volunteers team presence and profil
         │              │
    [Suspended]  ┌──────▼──────────┐
                 │ Rejected?       │
-                │ (RejectedAt set)│
+                │ (State=Rejected)│
                 └──────┬──────────┘
                        │
                 ┌─Yes──┴──No───┐
@@ -138,9 +138,9 @@ Only controllers a non-Active user must still reach are exempt wholesale:
 - **GovernanceApplications**, **Issues**, **Notifications** — any logged-in user. `Issues` inherited the exemption from `Feedback` when Issues replaced it (nobodies-collective/Humans#977): the Help widget renders for any authenticated user, so someone stuck mid-onboarding or on the status wall must still be able to report that they are stuck
 - **Survey** — tokenised survey answering; invited non-Active users must reach it (`[AllowAnonymous]`)
 
-**Profile** and **ProfileEmails** are not exempt wholesale — only specific own-profile actions are (edit, privacy/download-data/deletion-request, dietary/medical, communication preferences, notifications settings, and email management). Other Profile/ProfileEmails actions still require `UserState == Active`.
+**Profile** and **ProfileEmails** are not exempt wholesale — only specific own-profile actions are (view, edit, medical, and email management), plus the own-data actions other sections serve: My Data, data download and deletion request (Consent, Gdpr), Cantina's own-dietary form, communication preferences and own outbox (Email), Workspace identity set (GoogleIntegration), and the ticket not-attending declaration (Tickets). Other Profile/ProfileEmails actions still require `UserState == Active`.
 
-`Deleted`/`Merged` accounts are walled off before any of the above: only `Account`, `Language`, and `User/Status` reach them — none of the other exemptions apply, so a lingering cookie can't be used to edit an anonymized profile.
+`Deleted`/`Merged` accounts are walled off before any of the above: only `Account`, `Language`, and `Gdpr/Status` reach them — none of the other exemptions apply, so a lingering cookie can't be used to edit an anonymized profile.
 
 Role-gated app controllers are reached only after the `UserState == Active` gate passes; `[AllowAnonymous]`/API-key controllers use anonymous pass-through.
 
@@ -156,7 +156,7 @@ The path to becoming an active volunteer:
 Sign Up (Google OAuth)
     │
     ▼
-Complete Profile (optional: select tier + application inline)
+Complete Profile (optional: tier application via Governance, in parallel)
     │
     ▼
 Sign Required Legal Documents (Volunteers team docs)
@@ -225,7 +225,7 @@ Triggered by:
 ```
 Triggered by:
   - A ConsentCoordinator, Board member, or Admin rejects the signup
-  - Profile.RejectionReason set, RejectedAt set
+  - Consent's review records RejectionReason and RejectedAt; Users stores UserState.Rejected
   - Human is notified, cannot become Volunteer unless rejection is reversed
 ```
 
@@ -249,7 +249,7 @@ System sync removes user from team
 
 ### Restoration Flow
 When a user signs the missing documents:
-1. `ConsentController.Submit` writes the `ConsentRecord` (it no longer triggers a per-user team sync)
+1. `ConsentController.Submit` writes the `ConsentRecord` (it triggers no per-user team sync)
 2. `SystemTeamSyncJob` re-adds the user to the Volunteers team on its next run (name + consents)
 3. Google Drive permissions and Group memberships are restored
 4. App access is unaffected throughout — it follows `UserState == Active`, not Volunteers membership

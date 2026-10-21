@@ -1,6 +1,8 @@
 using Humans.Base.Attributes;
 using Humans.Base.Enums;
+using Humans.Gdpr.Contracts;
 using Humans.Teams.Contracts;
+using Humans.Teams.Data;
 using Humans.Teams.Domain;
 using NodaTime;
 
@@ -81,16 +83,21 @@ internal sealed record TeamEarlyEntryGrantInfo(
 /// return the section's entities. Internal because nothing outside the assembly calls any of
 /// it — the cross-section half is <see cref="ITeamService"/> and <see cref="ITeamWrite"/>, which this
 /// inherits via <see cref="ITeamManagement"/> so the section's controllers and its caching
-/// decorator keep one injection
-/// (design §15 step 5b, Notifications' shape).
+/// decorator keep one injection.
 /// </summary>
 /// <remarks>
-/// The interface survives internalisation for the reason step 5 records: the caching decorator
+/// The interface survives internalisation because the caching decorator
 /// needs the seam, and MA0053 seals the concrete <c>TeamService</c> so NSubstitute cannot
 /// stand in for it.
 /// </remarks>
 internal interface ITeamManagementService : ITeamManagement
 {
+    /// <summary>GDPR export slices; <c>CachingTeamService</c> is the registered contributor.</summary>
+    Task<IReadOnlyList<UserDataSlice>> ContributeForUserAsync(Guid userId, CancellationToken ct);
+
+    /// <summary>GDPR erasure; reached through <c>CachingTeamService</c>, which evicts after it.</summary>
+    Task EraseForUserAsync(Guid userId, CancellationToken ct);
+
     /// <summary>
     /// Creates a new team.
     /// </summary>
@@ -102,18 +109,6 @@ internal interface ITeamManagementService : ITeamManagement
         string? googleGroupPrefix = null,
         bool isHidden = false,
         CancellationToken cancellationToken = default);
-
-    /// <summary>
-    /// Gets a team entity by its slug (Teams-internal use; external sections
-    /// should use <see cref="ITeamService.GetTeamBySlugAsync"/> for the
-    /// <see cref="TeamInfo"/> projection).
-    /// </summary>
-    Task<Team?> GetTeamEntityBySlugAsync(string slug, CancellationToken cancellationToken = default);
-
-    /// <summary>
-    /// Gets a team by its ID.
-    /// </summary>
-    Task<Team?> GetTeamByIdAsync(Guid teamId, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Updates a team's details, returning expected validation or unique-constraint refusals.
@@ -464,11 +459,11 @@ internal enum TeamJoinOutcome
 
 internal sealed record TeamUpdateResult(
     Team? Team = null,
-    Humans.Teams.Data.TeamUpdateConflict Conflict = Humans.Teams.Data.TeamUpdateConflict.None,
+    TeamUpdateConflict Conflict = TeamUpdateConflict.None,
     string? ErrorMessage = null,
     string? GroupWarning = null)
 {
-    public bool Succeeded => Team is not null && Conflict == Humans.Teams.Data.TeamUpdateConflict.None && ErrorMessage is null;
+    public bool Succeeded => Team is not null && Conflict == TeamUpdateConflict.None && ErrorMessage is null;
 
     // Non-interactive seed/compensation callers must not silently discard a refusal.
     public void RequireSuccess()

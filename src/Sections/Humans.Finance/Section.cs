@@ -1,6 +1,5 @@
 using Humans.Base.Caching;
 using Humans.Base.Interfaces.Caching;
-using Microsoft.Extensions.Logging;
 using Humans.Base.Interfaces;
 using Humans.Gdpr.Contracts;
 using Humans.Finance.Contracts;
@@ -8,6 +7,7 @@ using Humans.Finance.Data;
 using Humans.Finance.Services;
 using Humans.Base.Hosting;
 using Humans.Email.Contracts;
+using Humans.Users.Contracts;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -20,10 +20,8 @@ namespace Humans.Finance;
 /// <remarks>
 /// The Holded HTTP client is <em>not</em> registered here. <c>IHoldedClient</c> belongs to the
 /// Holded section, which registers it; Finance consumes it through
-/// <c>Humans.Holded.Contracts</c>. <c>HoldedSyncJob</c> is not registered here either, and is
-/// not this section's: it is a shim over Holded's <c>IHoldedNightlySync</c>, which calls this
-/// section's <c>IHoldedFinanceWrite.SyncAsync</c> first, and it lives in
-/// <c>src/Sections/Humans.Holded/Jobs/</c>.
+/// <c>Humans.Holded.Contracts</c>. The purchase-doc sync's nightly job, <c>HoldedDocSyncJob</c>, is
+/// this section's (<c>Jobs/</c>); the ledger mirror's <c>HoldedSyncJob</c> is Holded's.
 /// </remarks>
 public sealed class Section : ISection
 {
@@ -63,12 +61,26 @@ public sealed class Section : ISection
         // project's Jobs/ (nobodies-collective/Humans#1185).
         services.AddScoped<ISepaBankBooking>(sp => sp.GetRequiredService<Service>());
         services.AddScoped<Jobs.SepaBankBookingJob>();
+        services.AddScoped<Jobs.HoldedDocSyncJob>();
         // Owns the user-scoped holded_creditor_contacts table → GDPR export contributor (design-rules §8a).
         services.AddScoped<IUserDataContributor>(sp => sp.GetRequiredService<Service>());
+
+        // finance_payment_details: the member IBAN other sections read and write, its export,
+        // erasure and account-merge fold (Users decomposition commit 1).
+        services.AddScoped<IPaymentDetailsRepository, PaymentDetailsRepository>();
+        services.AddScoped<PaymentDetailsService>();
+        services.AddScoped<IPaymentDetailsManagement>(sp => sp.GetRequiredService<PaymentDetailsService>());
+        services.AddScoped<IFinanceService>(sp => sp.GetRequiredService<PaymentDetailsService>());
+        services.AddScoped<IFinanceWrite>(sp => sp.GetRequiredService<PaymentDetailsService>());
+        services.AddScoped<IUserDataContributor>(sp => sp.GetRequiredService<PaymentDetailsService>());
+        services.AddScoped<IUserMerge>(sp => sp.GetRequiredService<PaymentDetailsService>());
 
         // Finance owns its email copy and its gallery samples; Email keeps the mechanics
         // (memory/architecture/email-templates-live-in-sender.md).
         services.AddScoped<FinanceEmails>();
         services.AddScoped<IEmailPreviewContributor, FinanceEmailPreviews>();
+
+        // /Finance/CashFlow: reads Budget and Tickets through their public contracts; no tables.
+        services.AddScoped<CashFlowService>();
     }
 }

@@ -10,7 +10,7 @@
     <markdown-editor name="description" id="description" value="@Model.Description" rows="3" />
 </div>
 
-@await Html.PartialAsync("_EmailComposer", new Humans.Base.Models.EmailComposerViewModel
+@await Html.PartialAsync("_EmailComposer", new EmailComposerViewModel
 {
     SubjectName = "emailSubject",
     SubjectValue = Model.EmailSubject,
@@ -22,7 +22,7 @@
     BodyRows = 10,
     BodyRequired = true,
     BodyHelpText = "You can use {{Code}} for the code and {{Name}} for the human's name in the subject or body.",
-    Category = nameof(Humans.Users.Contracts.MessageCategory.CampaignCodes),
+    Category = nameof(Humans.Email.Contracts.MessageCategory.CampaignCodes),
     RecipientSummary = "Each wave's recipients, chosen when you send it",
 })
 

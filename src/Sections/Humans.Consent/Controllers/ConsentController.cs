@@ -63,9 +63,6 @@ internal sealed class ConsentController(
         if (user is null)
             return NotFound();
 
-        if (await IsStubProfileAsync(user.Id))
-            return RedirectToProfileEditForStub();
-
         if (!model.ExplicitConsent)
         {
             return await RedisplayUncheckedConsentAsync(model.DocumentVersionId, user.Id);
@@ -80,14 +77,18 @@ internal sealed class ConsentController(
                 user.Id, model.DocumentVersionId, model.ExplicitConsent,
                 ipAddress, userAgent);
 
+            // The service's Stub gate refuses a profile without its legal names.
+            if (string.Equals(result.ErrorKey, "StubProfile", StringComparison.Ordinal))
+                return RedirectToProfileEditForStub();
+
             if (!result.Success)
             {
                 SetConsentSubmitFailureFlash(result);
                 return RedirectToAction(nameof(Index));
             }
 
-            // Peer-call: ConsentService does not call into Onboarding (avoids inverted arrow).
-            await onboardingService.SetConsentCheckPendingIfEligibleAsync(user.Id);
+            // ConsentService does not call into Onboarding (avoids inverted arrow); report the signature.
+            await onboardingService.ConsentSignedAsync(user.Id);
 
             SetConsentSubmitSuccessFlash(result);
         }

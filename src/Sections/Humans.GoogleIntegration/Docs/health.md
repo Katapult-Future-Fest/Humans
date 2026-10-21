@@ -29,13 +29,13 @@ pages render for a resource or a person.
 | Question shape | Asked by | Answered by |
 |---|---|---|
 | "This person joined/left this team — update Google, later" | Teams | `IGoogleSyncOutboxService.AddAsync` / `AddRangeAsync` |
-| "Make sure this team has its Group" / "Reconcile this one resource now" | Teams | `IGoogleSyncWrite.EnsureTeamGroupAsync` / `SyncSingleResourceAsync` |
+| "Make sure this team has its Group" | Teams | `IGoogleSyncWrite.EnsureTeamGroupAsync` |
 | "Grant this person the team's resources now" | Teams (system-team sync), the outbox processor | `IGoogleSyncWrite.AddUserToTeamResourcesAsync` |
 | "Create a Drive folder under X" / "Re-check this folder's access soon" / "Can the service account read X?" | Workgroups | `IGoogleSyncWrite.CreateSubfolderAsync` / `RequestSyncAsync`, `IGoogleSyncService.IsFolderReachableAsync` |
 | "Reconcile every group" (the system-team sync) | Teams | `IGoogleGroupSync.ReconcileAllAsync` |
 | "Who is supposed to be in group X?" — asked *by* this section | answered by Teams and Camps | `IGoogleGroupMembershipSource.GetExpectedAsync` |
 | "Who is supposed to have access to Drive folder X, at what level?" — asked *by* this section | answered by Teams and Workgroups | `IGoogleDriveAccessSource.GetExpectedAccessAsync` |
-| "Which resources does this team have?" / "Link, unlink, change level, deactivate" | Teams' pages and this section's sync page | `ITeamResourceService` (reads) / `ITeamResourceWrite` (mutations) |
+| "Which resources does this team have?" | Teams' pages, Users, Monitor | `ITeamResourceService` (reads); linking, unlinking and per-resource sync are this section's own team-resources page |
 | "Provision `name@nobodies.team` for this person" | Teams' team-admin page, this section's person page | `IEmailProvisioningService.ProvisionNobodiesEmailAsync` |
 | "What happened in these Drive folders since T?" | Monitor | `IGoogleDriveActivityClient` + `ITeamResourceService.GetActiveDriveFoldersAsync` |
 | "Translate this text" | Surveys | `IGoogleTranslationService.TranslateAsync` |
@@ -59,8 +59,7 @@ The shapes imply:
 
 - **A `Contracts/` folder** carrying the cross-section interfaces above and the DTO/enum
   vocabulary, and nothing else. Each interface names one shape; the cross-section reads sit
-  on `IGoogleSyncService` / `ITeamResourceService`, the writes on `IGoogleSyncWrite` /
-  `ITeamResourceWrite`, and everything only this section calls on the internal
+  on `IGoogleSyncService` / `ITeamResourceService`, the writes on `IGoogleSyncWrite`, and everything only this section calls on the internal
   `IGoogleSyncManagement` / `ITeamResourceManagement`.
 - **One outbox service + one processor**: remember, then drain. The processor owns the
   retry and permanent-failure rules and marks the person's Google email valid once Google
@@ -187,9 +186,9 @@ The shapes imply:
   signature overloads are forbidden by standing policy D13
   (`memory/process/debt-sweep-standing-policy.md`); jobs re-register at startup and a job
   queued across a signature change is dropped.
-- **Sync writes to Users** — marking the person's Google email valid/rejected is Users'
-  data, written through Users' own `TrySetGoogleEmailStatusFromSyncAsync` — a narrow
-  public write, not a leak.
+- **Sync verdicts stay in-section** — marking the person's Google identity valid/rejected
+  writes GoogleIntegration's own `google_workspace_identities` (Users decomposition
+  commit 15); the former cross-section write into Users is gone.
 - **Paired DI registrations per client type** (real vs stub) chosen by
   `hasGoogleCredentials` in `Section.cs`; the stubs are the test doubles for the whole
   section and are deliberately not in the test project.

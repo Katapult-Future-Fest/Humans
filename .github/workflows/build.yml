@@ -68,6 +68,8 @@ env:
     RideshareDbContext:src/Sections/Humans.Rideshare
     PreapprovalsDbContext:src/Sections/Humans.Preapprovals
     WorkgroupsDbContext:src/Sections/Humans.Workgroups
+    CantinaDbContext:src/Sections/Humans.Cantina
+    GrantsDbContext:src/Sections/Humans.Grants
 
 jobs:
   build:

@@ -1,7 +1,7 @@
 <!-- freshness:triggers
   src/Sections/Humans.Notifications/**
   src/Sections/Humans.Notifications.Contracts/**
-  src/Sections/Humans.Users/Domain/CommunicationPreference.cs
+  src/Sections/Humans.Email/Domain/CommunicationPreference.cs
   src/Sections/Humans.Notifications/Jobs/CleanupNotificationsJob.cs
 -->
 <!-- freshness:flag-on-change
@@ -61,7 +61,7 @@ Callers decide resolution scope:
 - `SendAsync` -- individual users, one notification per user
 - `SendToRoleAsync` -- shared notification for all users with a role
 
-Dispatch checks `CommunicationPreference.InboxEnabled` and suppresses informational notifications when disabled. Actionable notifications are always delivered.
+Dispatch checks `CommunicationPreference.InboxEnabled` and suppresses informational notifications when disabled. Actionable notifications skip preference reads entirely on both known-recipient and role-broadcast paths, so a preference lookup failure cannot block delivery. Informational delivery still requires a successful preference read.
 
 ## UI Components
 
@@ -135,6 +135,8 @@ All authenticated users can access their own notifications. No role-based restri
 | PreapprovalFileBy | Actionable | The beneficiary | System | Pre-approval issued, released, reminded, or its deadline moved; resolved when the grant leaves Open |
 | PreapprovalApplicationReceived | Actionable | The program's managers | System | Someone applies to a pre-approval program; resolved on approve or decline |
 | PreapprovalGrantDecided | Informational (Actionable when a revoked grant already has an expense report) | The beneficiary | System | Pre-approval declined, revoked, or its amount changed |
+| GrantReceived | Informational | The grant holder | System | A grant issued to the person, or its notice resent |
+| GrantRevoked | Informational | The former holder | System | A grant the person held was revoked |
 
 ## Related Features
 

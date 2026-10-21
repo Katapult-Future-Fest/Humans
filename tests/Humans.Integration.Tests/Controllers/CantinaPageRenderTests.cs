@@ -45,6 +45,7 @@ public class CantinaPageRenderTests(HumansTestDatabase database) : IntegrationTe
     [
         ("/Cantina/Roster", "Cantina weekly roster"),   // Cantina_Roster_PageTitle
         ("/Cantina/Roster/Day", "humans on site"),      // Cantina_Day_TotalOnSite
+        ("/Cantina/Dietary", "Dietary info"),           // Cantina_Dietary_PageTitle
     ];
 
     [HumansFact(Timeout = 120000)]
@@ -114,7 +115,7 @@ public class CantinaPageRenderTests(HumansTestDatabase database) : IntegrationTe
         // Admin/CantinaAdmin never sees the roster. Worth pinning at the move because the
         // controller is now an internal type in another assembly, routed through
         // SectionControllerFeatureProvider, while CantinaAdminOrAdmin stayed in Shell's
-        // AuthorizationPolicyExtensions (design §8's asymmetry).
+        // AuthorizationPolicyExtensions.
         //
         // The shape is a 302 to Program.cs's AccessDeniedPath, not the bare 403 the invariants
         // doc claimed before this move — cookie authentication's DenyAnonymousAuthorization
@@ -151,7 +152,7 @@ public class CantinaPageRenderTests(HumansTestDatabase database) : IntegrationTe
         token.Should().NotBeNullOrEmpty();
         await Client.PostAsync("/Language/SetLanguage", new FormUrlEncodedContent(
             [
-                new KeyValuePair<string, string>("__RequestVerificationToken", token!),
+                new KeyValuePair<string, string>("__RequestVerificationToken", token),
                 new KeyValuePair<string, string>("culture", "es"),
             ]), ct);
 

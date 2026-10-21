@@ -5,6 +5,7 @@ using Humans.Base.Extensions;
 using Humans.Teams.Contracts;
 using Humans.Teams.Domain;
 using Humans.Base.Enums;
+using Humans.Gdpr.Contracts;
 using Microsoft.Extensions.DependencyInjection;
 using NodaTime;
 using Humans.Users.Contracts;
@@ -24,7 +25,7 @@ namespace Humans.Teams.Services;
 internal sealed class CachingTeamService(
     IServiceScopeFactory scopeFactory,
     ILogger<CachingTeamService> logger) : TrackedCache<Guid, TeamInfo>("Team.TeamInfo", warmOnStartup: true, logger),
-    ITeamManagementService, ITeamSeeding, IUserMerge, IEntityNameContributor
+    ITeamManagementService, ITeamSeeding, IUserMerge, IUserDataContributor, IEntityNameContributor
 {
     public const string InnerServiceKey = "team-inner";
 
@@ -93,12 +94,6 @@ internal sealed class CachingTeamService(
         CancellationToken cancellationToken = default) =>
         MutateAsync(inner => inner.CreateTeamAsync(
             name, description, requiresApproval, parentTeamId, googleGroupPrefix, isHidden, cancellationToken));
-
-    public Task<Team?> GetTeamEntityBySlugAsync(string slug, CancellationToken cancellationToken = default) =>
-        WithInner(inner => inner.GetTeamEntityBySlugAsync(slug, cancellationToken));
-
-    public Task<Team?> GetTeamByIdAsync(Guid teamId, CancellationToken cancellationToken = default) =>
-        WithInner(inner => inner.GetTeamByIdAsync(teamId, cancellationToken));
 
     public async Task<TeamInfo?> GetTeamAsync(
         Guid teamId,
@@ -223,16 +218,16 @@ internal sealed class CachingTeamService(
     // invalidation. Pure pass-throughs.
 
     public Task<IReadOnlyList<TeamEarlyEntryGrantInfo>> GetEarlyEntryGrantsForTeamAsync(Guid teamId, CancellationToken ct = default)
-        => WithInner(inner => inner.GetEarlyEntryGrantsForTeamAsync(teamId, ct));
+        => WithInnerAsync(inner => inner.GetEarlyEntryGrantsForTeamAsync(teamId, ct));
 
     public Task AddEarlyEntryGrantAsync(Guid teamId, Guid userId, LocalDate entryDate, string projectName, Guid actorUserId, CancellationToken ct = default)
-        => WithInner(inner => inner.AddEarlyEntryGrantAsync(teamId, userId, entryDate, projectName, actorUserId, ct));
+        => WithInnerAsync(inner => inner.AddEarlyEntryGrantAsync(teamId, userId, entryDate, projectName, actorUserId, ct));
 
     public Task EditEarlyEntryGrantAsync(Guid teamId, Guid grantId, LocalDate entryDate, string projectName, Guid actorUserId, CancellationToken ct = default)
-        => WithInner(inner => inner.EditEarlyEntryGrantAsync(teamId, grantId, entryDate, projectName, actorUserId, ct));
+        => WithInnerAsync(inner => inner.EditEarlyEntryGrantAsync(teamId, grantId, entryDate, projectName, actorUserId, ct));
 
     public Task RemoveEarlyEntryGrantAsync(Guid teamId, Guid grantId, Guid actorUserId, CancellationToken ct = default)
-        => WithInner(inner => inner.RemoveEarlyEntryGrantAsync(teamId, grantId, actorUserId, ct));
+        => WithInnerAsync(inner => inner.RemoveEarlyEntryGrantAsync(teamId, grantId, actorUserId, ct));
 
     public Task DeleteTeamAsync(Guid teamId, Guid actorUserId, CancellationToken cancellationToken = default) =>
         MutateAsync(inner => inner.DeleteTeamAsync(teamId, actorUserId, cancellationToken));
@@ -274,17 +269,17 @@ internal sealed class CachingTeamService(
     public Task<IReadOnlyList<TeamJoinRequestSnapshot>> GetPendingRequestsForTeamAsync(
         Guid teamId,
         CancellationToken cancellationToken = default) =>
-        WithInner(inner => inner.GetPendingRequestsForTeamAsync(teamId, cancellationToken));
+        WithInnerAsync(inner => inner.GetPendingRequestsForTeamAsync(teamId, cancellationToken));
 
     public Task<IReadOnlyList<TeamJoinRequestSnapshot>> GetPendingRequestsForUserAsync(
         Guid userId, CancellationToken cancellationToken = default) =>
-        WithInner(inner => inner.GetPendingRequestsForUserAsync(userId, cancellationToken));
+        WithInnerAsync(inner => inner.GetPendingRequestsForUserAsync(userId, cancellationToken));
 
     public Task<TeamJoinRequestSnapshot?> GetUserPendingRequestAsync(
         Guid teamId,
         Guid userId,
         CancellationToken cancellationToken = default) =>
-        WithInner(inner => inner.GetUserPendingRequestAsync(teamId, userId, cancellationToken));
+        WithInnerAsync(inner => inner.GetUserPendingRequestAsync(teamId, userId, cancellationToken));
 
     public async Task<bool> IsUserCoordinatorOfTeamAsync(
         Guid teamId,
@@ -334,7 +329,7 @@ internal sealed class CachingTeamService(
         int page,
         int pageSize,
         CancellationToken cancellationToken = default) =>
-        WithInner(inner => inner.GetAdminTeamListAsync(page, pageSize, cancellationToken));
+        WithInnerAsync(inner => inner.GetAdminTeamListAsync(page, pageSize, cancellationToken));
 
     public Task<TeamMember> AddMemberToTeamAsync(
         Guid teamId,
@@ -469,7 +464,7 @@ internal sealed class CachingTeamService(
     public Task EnqueueGoogleResyncForUserTeamsAsync(
         Guid userId,
         CancellationToken cancellationToken = default) =>
-        WithInner(inner => inner.EnqueueGoogleResyncForUserTeamsAsync(userId, cancellationToken));
+        WithInnerAsync(inner => inner.EnqueueGoogleResyncForUserTeamsAsync(userId, cancellationToken));
 
     /// <inheritdoc />
     public async Task<IReadOnlyDictionary<Guid, TeamInfo>> GetTeamsWithParentsAsync(
@@ -496,8 +491,7 @@ internal sealed class CachingTeamService(
     // ==========================================================================
     // ITeamSeeding — the dev/demo fixture surface. Explicit implementations: the
     // Teams-internal members of the same names return this section's entities, which
-    // cannot leave the assembly, so these overloads differ only in their projection
-    // (design §15 step 5b).
+    // cannot leave the assembly, so these overloads differ only in their projection.
     // ==========================================================================
 
     async Task<TeamInfo> ITeamSeeding.CreateTeamAsync(
@@ -601,11 +595,6 @@ internal sealed class CachingTeamService(
         return result;
     }
 
-    public void RemoveMemberFromAllTeamsCache(Guid userId)
-    {
-        InvalidateTeamsCache();
-    }
-
     public void InvalidateActiveTeamsCache() => InvalidateTeamsCache();
 
     /// <summary>
@@ -624,7 +613,7 @@ internal sealed class CachingTeamService(
 
     public Task<IReadOnlyList<TeamRoleReconciliationMembership>> GetActiveMembershipsForRoleReconciliationAsync(
         CancellationToken cancellationToken = default) =>
-        WithInner(inner => inner.GetActiveMembershipsForRoleReconciliationAsync(cancellationToken));
+        WithInnerAsync(inner => inner.GetActiveMembershipsForRoleReconciliationAsync(cancellationToken));
 
     public Task<int> ApplyMemberRoleChangesAsync(
         IReadOnlyCollection<(Guid TeamMemberId, TeamMemberRole Role)> changes,
@@ -649,7 +638,7 @@ internal sealed class CachingTeamService(
     {
         try
         {
-            await WithInnerMerge(inner => inner.ReassignAsync(
+            await WithInnerMergeAsync(inner => inner.ReassignAsync(
                 mergedFromUserId, mergedToUserId, actorUserId, now, ct));
         }
         finally
@@ -657,6 +646,31 @@ internal sealed class CachingTeamService(
             InvalidateTeamsCache();
         }
     }
+
+    // Static table: the erasure-coverage architecture test reads it from an uninitialized instance.
+    private static readonly IReadOnlyDictionary<string, string?> Erasure =
+        new Dictionary<string, string?>(StringComparer.Ordinal)
+        {
+            [TeamService.TeamMemberships] =
+                "Partially retained: the membership row (team, role, joined/left dates, keyed to " +
+                "the user id the Users section tombstones) is the association's record of who " +
+                "worked on what — Ley Orgánica 1/2002 Art. 14, GDPR Art. 17(3)(b). Every still-" +
+                "active membership is ended immediately.",
+            [TeamService.TeamJoinRequests] = null,
+            [TeamService.TeamEarlyEntry] = null
+        };
+
+    public IReadOnlyDictionary<string, string?> ErasureDeclaration => Erasure;
+
+    public Task<IReadOnlyList<UserDataSlice>> ContributeForUserAsync(Guid userId, CancellationToken ct) =>
+        WithInnerAsync(inner => inner.ContributeForUserAsync(userId, ct));
+
+    /// <summary>
+    /// Erasure ends the human's memberships, role assignments and join requests, so the
+    /// team graph is evicted here, even when a later step of the inner erase throws.
+    /// </summary>
+    public Task EraseForUserAsync(Guid userId, CancellationToken ct) =>
+        MutateAsync(inner => inner.EraseForUserAsync(userId, ct));
 
     private async Task<IReadOnlyDictionary<Guid, TeamInfo>> GetTeamsByIdAsync(CancellationToken ct)
     {
@@ -673,7 +687,7 @@ internal sealed class CachingTeamService(
     /// </summary>
     protected override async Task WarmAllAsync(CancellationToken ct)
     {
-        var teams = await WithInner(inner => inner.GetTeamsAsync(ct));
+        var teams = await WithInnerAsync(inner => inner.GetTeamsAsync(ct));
 
         // No defensive Clear() — InvalidateTeamsCache already emptied the cache
         // before flipping the warmed flag to false (or the cache is empty on first
@@ -704,7 +718,7 @@ internal sealed class CachingTeamService(
         var invalidate = true;
         try
         {
-            var result = await WithInner(action);
+            var result = await WithInnerAsync(action);
             invalidate = changed?.Invoke(result) ?? true;
             return result;
         }
@@ -719,7 +733,7 @@ internal sealed class CachingTeamService(
     {
         try
         {
-            await WithInner(action);
+            await WithInnerAsync(action);
         }
         finally
         {
@@ -727,21 +741,21 @@ internal sealed class CachingTeamService(
         }
     }
 
-    private async Task<TResult> WithInner<TResult>(Func<ITeamManagementService, Task<TResult>> action)
+    private async Task<TResult> WithInnerAsync<TResult>(Func<ITeamManagementService, Task<TResult>> action)
     {
         await using var scope = scopeFactory.CreateAsyncScope();
         var inner = scope.ServiceProvider.GetRequiredKeyedService<ITeamManagementService>(InnerServiceKey);
         return await action(inner);
     }
 
-    private async Task WithInner(Func<ITeamManagementService, Task> action)
+    private async Task WithInnerAsync(Func<ITeamManagementService, Task> action)
     {
         await using var scope = scopeFactory.CreateAsyncScope();
         var inner = scope.ServiceProvider.GetRequiredKeyedService<ITeamManagementService>(InnerServiceKey);
         await action(inner);
     }
 
-    private async Task WithInnerMerge(Func<IUserMerge, Task> action)
+    private async Task WithInnerMergeAsync(Func<IUserMerge, Task> action)
     {
         await using var scope = scopeFactory.CreateAsyncScope();
         var inner = scope.ServiceProvider.GetRequiredKeyedService<IUserMerge>(InnerServiceKey);

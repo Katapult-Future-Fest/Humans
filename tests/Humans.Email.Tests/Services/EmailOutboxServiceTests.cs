@@ -48,7 +48,7 @@ public sealed class EmailOutboxServiceTests
                 return "recipient@example.org";
             });
         var action = discard ? AuditAction.EmailOutboxDiscarded : AuditAction.EmailOutboxRetried;
-        _audit.LogAsync(action, nameof(EmailOutboxMessage), id, Arg.Any<string>(), _actorId, null, null)
+        _audit.LogAsync(action, nameof(EmailOutboxMessage), id, Arg.Any<string>(), _actorId)
             .Returns(_ => { committed.Should().BeTrue(); return Task.CompletedTask; });
 
         if (discard)
@@ -58,7 +58,7 @@ public sealed class EmailOutboxServiceTests
 
         await _audit.Received(1).LogAsync(action, nameof(EmailOutboxMessage), id,
             Arg.Is<string>(description => !description.Contains("recipient@example.org", StringComparison.Ordinal)),
-            _actorId, null, null);
+            _actorId);
     }
 
     [HumansTheory]
@@ -70,13 +70,13 @@ public sealed class EmailOutboxServiceTests
         _settingsStore.SetValueAsync(SettingKeys.IsEmailSendingPaused, paused ? "true" : "false",
             Arg.Any<CancellationToken>()).Returns(_ => { committed = true; return Task.CompletedTask; });
         var action = paused ? AuditAction.EmailSendingPaused : AuditAction.EmailSendingResumed;
-        _audit.LogAsync(action, "EmailSending", Guid.Empty, Arg.Any<string>(), _actorId, null, null)
+        _audit.LogAsync(action, "EmailSending", Guid.Empty, Arg.Any<string>(), _actorId)
             .Returns(_ => { committed.Should().BeTrue(); return Task.CompletedTask; });
 
         await _service.SetEmailPausedAsync(paused, _actorId, Xunit.TestContext.Current.CancellationToken);
 
         await _audit.Received(1).LogAsync(action, "EmailSending", Guid.Empty,
-            Arg.Any<string>(), _actorId, null, null);
+            Arg.Any<string>(), _actorId);
     }
 
     [HumansTheory]
@@ -172,6 +172,44 @@ public sealed class EmailOutboxServiceTests
         slice.SectionName.Should().Be(EmailOutboxService.EmailOutbox);
         System.Text.Json.JsonSerializer.Serialize(slice.Data)
             .Should().Contain("human@example.org");
+    }
+
+    [HumansFact]
+    public async Task ContributeForIdentityChainAsync_ExportsRowsLeftOnArchivedAccounts()
+    {
+        var survivor = Guid.NewGuid();
+        var archivedA = Guid.NewGuid();
+        var archivedB = Guid.NewGuid();
+        var older = BuildMessage(_now - Duration.FromDays(2), archivedA);
+        older.RecipientEmail = "older@example.org";
+        var newer = BuildMessage(_now - Duration.FromDays(1), archivedB);
+        newer.RecipientEmail = "newer@example.org";
+        _repo.GetForUserAsync(archivedA, Arg.Any<CancellationToken>()).Returns([older]);
+        _repo.GetForUserAsync(archivedB, Arg.Any<CancellationToken>()).Returns([newer]);
+
+        var slices = await _service.ContributeForIdentityChainAsync(
+            survivor, [survivor, archivedA, archivedB], Xunit.TestContext.Current.CancellationToken);
+
+        var slice = slices.Should().ContainSingle().Subject;
+        slice.SectionName.Should().Be(EmailOutboxService.EmailOutboxMergedAccounts);
+        var json = System.Text.Json.JsonSerializer.Serialize(slice.Data);
+        json.IndexOf("newer@example.org", StringComparison.Ordinal)
+            .Should().BeLessThan(json.IndexOf("older@example.org", StringComparison.Ordinal), "newest first");
+        // The survivor's own rows already come from ContributeForUserAsync.
+        await _repo.DidNotReceive().GetForUserAsync(survivor, Arg.Any<CancellationToken>());
+        _service.ErasureDeclaration.Should().ContainKey(EmailOutboxService.EmailOutboxMergedAccounts);
+    }
+
+    [HumansFact]
+    public async Task ContributeForIdentityChainAsync_UnmergedAccount_ContributesNothing()
+    {
+        var survivor = Guid.NewGuid();
+
+        var slices = await _service.ContributeForIdentityChainAsync(
+            survivor, [survivor], Xunit.TestContext.Current.CancellationToken);
+
+        slices.Should().BeEmpty();
+        await _repo.DidNotReceive().GetForUserAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>());
     }
 
     [HumansFact]

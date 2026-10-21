@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using Humans.Expenses.Contracts;
 using Humans.Finance.Contracts;
 using Humans.Finance.Models;
 using Humans.Finance.Services;
@@ -14,8 +15,8 @@ namespace Humans.Finance.Controllers;
 
 /// <summary>
 /// Finance's own pages: the Holded connector, account provisioning, the unmatched-document queue,
-/// creditor accounts and SEPA payouts. Budget's admin surface shares the <c>Finance</c> route
-/// prefix from its own <c>BudgetAdminController</c>.
+/// creditor accounts, SEPA payouts and cash flow. Budget's admin surface shares the <c>Finance</c>
+/// route prefix from its own <c>BudgetAdminController</c>.
 /// </summary>
 [Authorize(Policy = PolicyNames.FinanceAdminOrAdmin)]
 [Route("Finance")]
@@ -23,8 +24,28 @@ internal sealed class FinanceController(
     IUserService userService,
     IHoldedFinanceManagement holdedFinance,
     IHoldedFinanceAdminService holdedConnector,
+    IExpenseReportService expenseReports,
+    CashFlowService cashFlow,
     ILogger<FinanceController> logger) : HumansControllerBase(userService)
 {
+    [HttpGet("CashFlow")]
+    public async Task<IActionResult> CashFlow(string period = "monthly")
+    {
+        try
+        {
+            var model = await cashFlow.GetActiveYearCashFlowAsync(period, HttpContext.RequestAborted);
+            if (model is not null) return View(model);
+            SetInfo("No active budget year.");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogError(ex, "Error loading cash flow view");
+            SetError("Failed to load cash flow data.");
+        }
+        // The budget overview at /Finance, served by Budget's BudgetAdminController.
+        return RedirectToAction("Index", "BudgetAdmin");
+    }
+
     /// <summary>The connector index: what Finance's half of the Holded integration is doing, and a
     /// way into every screen that already covers a piece of it. Cache reads only — see
     /// <see cref="IHoldedFinanceAdminService.GetConnectorOverviewAsync"/>.</summary>
@@ -315,24 +336,38 @@ internal sealed class FinanceController(
     [HttpGet("Creditors/{accountNum:int}")]
     public async Task<IActionResult> CreditorStatement(int accountNum)
     {
+        if (GetCurrentUserId() is not { } viewerUserId) return Challenge();
         var ledger = await holdedFinance.GetCreditorLedgerAsync(accountNum, HttpContext.RequestAborted);
         if (ledger is null) return NotFound();
 
-        // Controllers assemble and sort the presentation model. The running balance accumulates
-        // oldest-first from the account's first line (credit = owed to the member, debit = paid
-        // out); the page then shows newest activity first, lines within an entry in order.
-        var running = 0m;
+        // The finance-admin review queue is every submitted report; the ones booked to this
+        // supplier account are the other side of the ledger, newest approval first.
+        var reports = (await expenseReports.GetReviewQueueAsync(viewerUserId, isFinanceAdmin: true, HttpContext.RequestAborted))
+            .Where(r => r.HoldedSupplierAccountNum == accountNum)
+            .OrderByDescending(r => r.ApprovedAt ?? r.SubmittedAt ?? r.CreatedAt)
+            .ToList();
+
+        // The running balance is the service's (CreditorLedgerLine.RunningBalance); the page
+        // shows newest activity first, lines within an entry in order.
+        var memberName = string.IsNullOrWhiteSpace(ledger.Contact?.Name) ? "member" : ledger.Contact.Name;
         var lines = ledger.Lines
-            .OrderBy(l => l.Date)
-            .ThenBy(l => l.EntryNumber)
-            .ThenBy(l => l.Line)
-            .Select(l => new CreditorStatementLineVm(l, running += l.Credit - l.Debit))
-            .ToList()
+            .Select(l => new CreditorStatementLineVm(l, l.RunningBalance, StatementDescription(l, memberName)))
             .OrderByDescending(r => r.Line.Date)
             .ThenByDescending(r => r.Line.EntryNumber)
             .ThenBy(r => r.Line.Line)
             .ToList();
-        return View(new CreditorStatementVm(ledger, lines));
+        return View(new CreditorStatementVm(ledger, lines, reports));
+    }
+
+    // Holded labels a payment with the purchase it settles; shown that way, a payment reads like a
+    // second purchase. A payment shows as money moving between the association and the member.
+    private static string? StatementDescription(CreditorLedgerLine line, string memberName)
+    {
+        if (!string.Equals(line.Type, "payment", StringComparison.OrdinalIgnoreCase))
+            return line.Description;
+        return line.Debit > 0
+            ? $"Payment: NCA → {memberName}"
+            : $"Payment: {memberName} → NCA";
     }
 
     [HttpPost("Creditors/Bind")]

@@ -15,6 +15,7 @@ using Humans.CityPlanning.Data;
 using Humans.CityPlanning.Services;
 using Humans.Containers.Contracts;
 using Humans.Teams.Contracts;
+using Humans.Settings.Contracts;
 using Humans.Users.Contracts;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Identity;
@@ -43,6 +44,7 @@ public sealed class CityPlanningApiControllerTests : CityPlanningTestBase
     private readonly ITeamService _teamService = Substitute.For<ITeamService>();
     private readonly ILogger<CityPlanningApiController> _logger = Substitute.For<ILogger<CityPlanningApiController>>();
     private readonly IClientProxy _allClients = Substitute.For<IClientProxy>();
+    private readonly ISettingsService _settings = ActiveEvent(2026);
     private readonly CityPlanningService _service;
     private readonly Guid _userId = Guid.NewGuid();
     private readonly Guid _campSeasonId = Guid.NewGuid();
@@ -57,7 +59,7 @@ public sealed class CityPlanningApiControllerTests : CityPlanningTestBase
         _service = new CityPlanningService(
             new CityPlanningRepository(CityPlanningDbFactory), Clock,
             Options.Create(new CityPlanningOptions { CityPlanningTeamSlug = "city-planning" }),
-            _campService, _teamService, Substitute.For<IUserService>(), Substitute.For<IAuditLogService>());
+            _campService, _teamService, Substitute.For<IUserService>(), Substitute.For<IAuditLogService>(), _settings);
         _authorization = MapAdminAuthorization(_service);
     }
 
@@ -194,12 +196,37 @@ public sealed class CityPlanningApiControllerTests : CityPlanningTestBase
         _containers.ReceivedCalls().Should().ContainSingle();
     }
 
+    [HumansFact]
+    public async Task GetContainers_CanEditIsThePlaceRequirementPerContainerForTheRouteYear()
+    {
+        const int year = 2025;
+        var editableCampId = Guid.NewGuid();
+        var editable = new ContainerDto(Guid.NewGuid(), editableCampId, "Mine", null, [], Instant.MinValue, Instant.MinValue);
+        var other = new ContainerDto(Guid.NewGuid(), Guid.NewGuid(), "Theirs", null, [], Instant.MinValue, Instant.MinValue);
+        _containers.GetAllAsync(Arg.Any<CancellationToken>()).Returns([editable, other]);
+        _containers.GetPlacementsByYearAsync(year, Arg.Any<CancellationToken>()).Returns([]);
+        _campService.GetCampsForYearAsync(year, Arg.Any<CancellationToken>()).Returns([]);
+        _authorization = Substitute.For<IAuthorizationService>();
+        _authorization.AuthorizeAsync(Arg.Any<ClaimsPrincipal>(), Arg.Any<object>(), Arg.Any<IEnumerable<IAuthorizationRequirement>>())
+            .Returns(call => call.ArgAt<object>(1) is ContainerAuthorizationTarget { Year: year } target
+                && target.CampId == editableCampId
+                && call.ArgAt<IEnumerable<IAuthorizationRequirement>>(2).Single() == ContainerOperationRequirement.Place
+                    ? AuthorizationResult.Success() : AuthorizationResult.Failed());
+
+        var result = await CreateController().GetContainers(year, TestContext.Current.CancellationToken);
+
+        var rows = result.Should().BeOfType<OkObjectResult>().Which.Value
+            .Should().BeAssignableTo<IEnumerable<ContainerWithPlacementApiDto>>().Subject.ToList();
+        rows.Single(r => r.Id == editable.Id).CanEdit.Should().BeTrue();
+        rows.Single(r => r.Id == other.Id).CanEdit.Should().BeFalse();
+    }
+
     private const string Square = """{"type":"Polygon","coordinates":[[[0,0],[0,1],[1,1],[0,0]]]}""";
 
     [HumansFact]
     public async Task RestoreCampPolygon_UserWhoIsNotMapAdmin_IsForbiddenAndWritesNothing()
     {
-        var ct = Xunit.TestContext.Current.CancellationToken;
+        var ct = TestContext.Current.CancellationToken;
         await _service.SaveCampPolygonAsync(_campSeasonId, Square, 10, Guid.NewGuid(), cancellationToken: ct);
         var historyId = (await CityPlanningDb.CampPolygonHistories.SingleAsync(ct)).Id;
 
@@ -212,7 +239,7 @@ public sealed class CityPlanningApiControllerTests : CityPlanningTestBase
     [HumansFact]
     public async Task RestoreCampPolygon_CityPlanningTeamMemberWithNoRole_Restores()
     {
-        var ct = Xunit.TestContext.Current.CancellationToken;
+        var ct = TestContext.Current.CancellationToken;
         var teamId = Guid.NewGuid();
         _teamService.GetTeamsAsync(Arg.Any<CancellationToken>()).Returns(new Dictionary<Guid, TeamInfo>
         {
@@ -235,7 +262,7 @@ public sealed class CityPlanningApiControllerTests : CityPlanningTestBase
     [HumansFact]
     public async Task RestoreCampPolygon_HistoryIdFromAnotherSeason_IsNotFoundAndWritesNothing()
     {
-        var ct = Xunit.TestContext.Current.CancellationToken;
+        var ct = TestContext.Current.CancellationToken;
         _teamService.GetTeamsAsync(Arg.Any<CancellationToken>()).Returns(new Dictionary<Guid, TeamInfo>
         {
             [Guid.NewGuid()] = new(
@@ -254,10 +281,32 @@ public sealed class CityPlanningApiControllerTests : CityPlanningTestBase
         (await CityPlanningDb.CampPolygonHistories.CountAsync(ct)).Should().Be(1);
     }
 
+    // peterdrier/Humans#2102: the map's state GET used to create the year's settings row.
+    [HumansFact]
+    public async Task GetState_NoSettingsRow_ReturnsOkAndWritesNothing()
+    {
+        _campService.GetCampsForYearAsync(2026, Arg.Any<CancellationToken>()).Returns(Array.Empty<CampInfo>());
+
+        var result = await CreateController().GetState(TestContext.Current.CancellationToken);
+
+        result.Should().BeOfType<OkObjectResult>();
+        (await CityPlanningDb.CityPlanningSettings.AsNoTracking().CountAsync(TestContext.Current.CancellationToken)).Should().Be(0);
+    }
+
+    [HumansFact]
+    public async Task GetState_NoActiveEvent_IsNotFound()
+    {
+        _settings.GetActiveEventSettingsAsync(Arg.Any<CancellationToken>()).Returns((EventSettingsInfo?)null);
+
+        var result = await CreateController().GetState(TestContext.Current.CancellationToken);
+
+        result.Should().BeOfType<NotFoundResult>();
+    }
+
     [HumansFact]
     public async Task ExportGeoJson_UserWhoIsNotMapAdmin_IsForbidden()
     {
-        var result = await CreateController().ExportGeoJson(null, Xunit.TestContext.Current.CancellationToken);
+        var result = await CreateController().ExportGeoJson(null, TestContext.Current.CancellationToken);
 
         result.Should().BeOfType<ForbidResult>();
     }
@@ -265,7 +314,7 @@ public sealed class CityPlanningApiControllerTests : CityPlanningTestBase
     [HumansFact]
     public async Task SaveCampPolygon_BroadcastsTheSavedShapeToEveryConnectedMap()
     {
-        var ct = Xunit.TestContext.Current.CancellationToken;
+        var ct = TestContext.Current.CancellationToken;
 
         var result = await CreateController(RoleNames.CampAdmin).SaveCampPolygon(
             _campSeasonId, new SaveCampPolygonRequest(Square, 10), ct);
@@ -285,11 +334,11 @@ public sealed class CityPlanningApiControllerTests : CityPlanningTestBase
     {
         var result = await CreateController(RoleNames.CampAdmin).SaveCampPolygon(
             _campSeasonId, new SaveCampPolygonRequest(geoJson, 10),
-            Xunit.TestContext.Current.CancellationToken);
+            TestContext.Current.CancellationToken);
 
         result.Should().BeOfType<BadRequestResult>();
-        (await CityPlanningDb.CampPolygons.CountAsync(Xunit.TestContext.Current.CancellationToken)).Should().Be(0);
-        (await CityPlanningDb.CampPolygonHistories.CountAsync(Xunit.TestContext.Current.CancellationToken)).Should().Be(0);
+        (await CityPlanningDb.CampPolygons.CountAsync(TestContext.Current.CancellationToken)).Should().Be(0);
+        (await CityPlanningDb.CampPolygonHistories.CountAsync(TestContext.Current.CancellationToken)).Should().Be(0);
         _allClients.ReceivedCalls().Should().BeEmpty();
         var warning = _logger.ReceivedCalls().Single(c => string.Equals(c.GetMethodInfo().Name, "Log", StringComparison.Ordinal));
         warning.GetArguments()[0].Should().Be(LogLevel.Warning);
@@ -302,18 +351,18 @@ public sealed class CityPlanningApiControllerTests : CityPlanningTestBase
     {
         var result = await CreateController(RoleNames.CampAdmin).SaveCampPolygon(
             _campSeasonId, new SaveCampPolygonRequest(Square, -1),
-            Xunit.TestContext.Current.CancellationToken);
+            TestContext.Current.CancellationToken);
 
         result.Should().BeOfType<BadRequestResult>();
-        (await CityPlanningDb.CampPolygons.CountAsync(Xunit.TestContext.Current.CancellationToken)).Should().Be(0);
-        (await CityPlanningDb.CampPolygonHistories.CountAsync(Xunit.TestContext.Current.CancellationToken)).Should().Be(0);
+        (await CityPlanningDb.CampPolygons.CountAsync(TestContext.Current.CancellationToken)).Should().Be(0);
+        (await CityPlanningDb.CampPolygonHistories.CountAsync(TestContext.Current.CancellationToken)).Should().Be(0);
         _allClients.ReceivedCalls().Should().BeEmpty();
     }
 
     [HumansFact]
     public async Task RestoreCampPolygon_NegativeHistoricArea_ReturnsBadRequestWithoutWritingOrBroadcasting()
     {
-        var ct = Xunit.TestContext.Current.CancellationToken;
+        var ct = TestContext.Current.CancellationToken;
         var history = new Humans.CityPlanning.Domain.CampPolygonHistory
         {
             CampSeasonId = _campSeasonId,
@@ -336,8 +385,8 @@ public sealed class CityPlanningApiControllerTests : CityPlanningTestBase
     [HumansFact]
     public async Task SaveCampPolygon_BroadcastFails_TheSaveStandsAndTheCallerGetsOk()
     {
-        var ct = Xunit.TestContext.Current.CancellationToken;
-        _allClients.SendCoreAsync(default!, default!, default)
+        var ct = TestContext.Current.CancellationToken;
+        _allClients.SendCoreAsync(default!, default!)
             .ThrowsAsyncForAnyArgs(new InvalidOperationException("hub down"));
 
         var result = await CreateController(RoleNames.CampAdmin).SaveCampPolygon(
@@ -348,11 +397,11 @@ public sealed class CityPlanningApiControllerTests : CityPlanningTestBase
     }
 
     [HumansTheory]
-    [Xunit.InlineData(false)]
-    [Xunit.InlineData(true)]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task PolygonWrite_BroadcastPreparationFailure_ReturnsSavedResult(bool restore)
     {
-        var ct = Xunit.TestContext.Current.CancellationToken;
+        var ct = TestContext.Current.CancellationToken;
         Guid historyId = default;
         if (restore)
         {
@@ -385,7 +434,7 @@ public sealed class CityPlanningApiControllerTests : CityPlanningTestBase
             _campSeasonId, new SaveCampPolygonRequest(Square, 10), cancellation.Token);
 
         await act.Should().ThrowAsync<OperationCanceledException>();
-        (await CityPlanningDb.CampPolygons.SingleAsync(Xunit.TestContext.Current.CancellationToken)).GeoJson.Should().Be(Square);
+        (await CityPlanningDb.CampPolygons.SingleAsync(TestContext.Current.CancellationToken)).GeoJson.Should().Be(Square);
     }
 
     private static async Task CancelBroadcastAsync(CancellationTokenSource cancellation)

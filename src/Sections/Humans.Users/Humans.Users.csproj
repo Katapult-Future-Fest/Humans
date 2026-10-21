@@ -7,7 +7,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="Humans.Users.Tests" />
-    <!-- The one assembly allowed to see many sections (design §5). -->
+    <!-- The one assembly allowed to see many sections. -->
     <InternalsVisibleTo Include="Humans.Integration.Tests" />
     <!-- Shell-level tests over the moved controllers. -->
     <InternalsVisibleTo Include="Humans.Web.Tests" />
@@ -20,7 +20,7 @@
     <InternalsVisibleTo Include="Humans.Email.Tests" />
     <!--
       Three unmoved sections' harnesses seed this section's rows through an in-memory
-      UsersDbContext (Teams' two-way pattern, design §15 step 8). Each drops out at the lane
+      UsersDbContext (Teams' two-way pattern). Each drops out at the lane
       that stops its harness building another section's context directly.
     -->
     <InternalsVisibleTo Include="Humans.Camps.Tests" />
@@ -60,15 +60,14 @@
     -->
     <ProjectReference Include="..\Humans.Users.Contracts\Humans.Users.Contracts.csproj" />
     <ProjectReference Include="..\Humans.Camps.Contracts\Humans.Camps.Contracts.csproj" />
-    <ProjectReference Include="..\Humans.Campaigns\Humans.Campaigns.csproj" />
     <!--
       Outbound section references, all acyclic — none of these names a Humans.Users
       type. Note the reverse direction is sanctioned and
       deliberate: consumers reference *this* project for IUserService's write surface
       (Peter, 2026-08-14). IUserService itself sits on Humans.Users.Contracts, not here —
       seven Base files inject it and Humans.Users references Base, so a section-resident
-      IUserService is a cycle (design §15 step 5b: "a consumer in Base forces
-      Humans.<Section>.Contracts"). No consumer needed a new ProjectReference.
+      IUserService is a cycle (a consumer in Base forces
+      Humans.<Section>.Contracts). No consumer needed a new ProjectReference.
         AuditLog      — every write path records an audit entry.
         Auth          — role assignment on provisioning and merge.
         Consent       — profile completeness gates on the consent state.
@@ -124,6 +123,11 @@
       component moves to the leaf.
     -->
     <ProjectReference Include="..\Humans.Shifts\Humans.Shifts.csproj" />
+    <!--
+      Humans.Cantina: ICantinaService (Contracts/ folder), read by SectionThingsToDo to pair the
+      medical prompt with the dietary nudge. Acyclic: Cantina references Users.Contracts only.
+    -->
+    <ProjectReference Include="..\Humans.Cantina\Humans.Cantina.csproj" />
     <ProjectReference Include="..\Humans.Teams.Contracts\Humans.Teams.Contracts.csproj" />
     <ProjectReference Include="..\Humans.Tickets.Contracts\Humans.Tickets.Contracts.csproj" />
   </ItemGroup>
@@ -143,7 +147,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- The section owns its documentation (design §7a); keep it visible in Solution Explorer. -->
+    <!-- The section owns its documentation; keep it visible in Solution Explorer. -->
     <None Include="**\*.md" />
   </ItemGroup>
 

@@ -13,6 +13,7 @@ using Humans.Tickets.Data;
 using Humans.Tickets.Domain;
 using Humans.Tickets.Services.Dtos;
 using Humans.Gdpr.Contracts;
+using Humans.Governance.Contracts;
 
 namespace Humans.Tickets.Services;
 
@@ -27,11 +28,18 @@ internal sealed class TicketQueryService(
     IUserService userService,
     IUserEmailService userEmailService,
     ITeamService teamService,
+    IGovernanceService governanceService,
     ISettingsService settingsService,
-    ITicketCacheInvalidator cacheInvalidator,
     IAuditLogService auditLog,
-    IClock clock) : ITicketManagement, IUserDataContributor
+    IClock clock,
+    IEventParticipationManagement participations) : ITicketManagement
 {
+    public Task<IReadOnlyList<EventParticipationInfo>> GetParticipationsAsync(Guid userId, CancellationToken ct = default) =>
+        participations.GetParticipationsAsync(userId, ct);
+
+    public Task<IReadOnlyList<EventParticipationInfo>> GetAllParticipationsAsync(CancellationToken ct = default) =>
+        participations.GetAllParticipationsAsync(ct);
+
     private async Task<int> ComputeUserTicketCountAsync(Guid userId, CancellationToken ct)
     {
         // Attendees only — buyers don't count for themselves.
@@ -112,7 +120,8 @@ internal sealed class TicketQueryService(
         var totalStripeFees = totals.TotalStripeFees;
         var totalAppFees = totals.TotalApplicationFees;
         var ticketsSold = totals.TicketsSold;
-        var netRevenue = revenue - totalStripeFees - totalAppFees;
+        // Fee VAT and withheld tax are kept by Stripe like the fees, so they reduce the payout too.
+        var netRevenue = revenue - totalStripeFees - totalAppFees - totals.TotalFeeTax - totals.TotalWithheldTax;
         var grossAvgPrice = ticketsSold > 0 ? revenue / ticketsSold : 0;
         var unmatchedCount = totals.UnmatchedOrderCount;
 
@@ -179,6 +188,8 @@ internal sealed class TicketQueryService(
             Revenue = revenue,
             TotalStripeFees = totalStripeFees,
             TotalApplicationFees = totalAppFees,
+            TotalFeeTax = totals.TotalFeeTax,
+            TotalWithheldTax = totals.TotalWithheldTax,
             NetRevenue = netRevenue,
             GrossAveragePrice = grossAvgPrice,
             UnmatchedOrderCount = unmatchedCount,
@@ -389,6 +400,8 @@ internal sealed class TicketQueryService(
                     StripeFees = paid.Sum(o => o.StripeFee ?? 0m) + refundedRows.Sum(r => r.StripeFee ?? 0m),
                     ApplicationFees = paid.Sum(o => o.ApplicationFee ?? 0m)
                                       + refundedRows.Sum(r => r.ApplicationFee ?? 0m),
+                    FeeTax = paid.Sum(o => o.FeeTax ?? 0m) + refundedRows.Sum(r => r.FeeTax ?? 0m),
+                    WithheldTax = paid.Sum(o => o.WithheldTax ?? 0m) + refundedRows.Sum(r => r.WithheldTax ?? 0m),
                     RefundedGross = refundedRows.Sum(r => r.TotalAmount),
                 };
             })
@@ -576,9 +589,8 @@ internal sealed class TicketQueryService(
         HashSet<Guid> notAttendingSet = [];
         if (activeEvent is not null && activeEvent.Year > 0)
         {
-            var participations = await userService.GetAllParticipationsForYearAsync(activeEvent.Year, ct);
-            notAttendingSet = participations
-                .Where(ep => ep.Status == ParticipationStatus.NotAttending)
+            notAttendingSet = (await participations.GetAllParticipationsAsync(ct))
+                .Where(ep => ep.Year == activeEvent.Year && ep.Status == ParticipationStatus.NotAttending)
                 .Select(ep => ep.UserId)
                 .ToHashSet();
         }
@@ -613,6 +625,7 @@ internal sealed class TicketQueryService(
         }
 
         var usersById = allUsers.ToDictionary(u => u.Id);
+        var tiers = await governanceService.GetMembershipTiersAsync(ct);
 
         var rows = candidateIds
             .Where(id => usersById.TryGetValue(id, out var u) && u.Profile is not null)
@@ -629,7 +642,7 @@ internal sealed class TicketQueryService(
                     Name = user.BurnerName,
                     Email = email ?? string.Empty,
                     TeamNames = teamNames ?? [],
-                    Tier = user.Profile!.MembershipTier,
+                    Tier = tiers.GetValueOrDefault(id, MembershipTier.Volunteer),
                 };
             })
             .ToList();
@@ -908,7 +921,9 @@ internal sealed class TicketQueryService(
                 CheckedInAt: a.CheckedInAt);
         }).ToList(),
         StripeFee: o.StripeFee,
-        ApplicationFee: o.ApplicationFee);
+        ApplicationFee: o.ApplicationFee,
+        FeeTax: o.FeeTax,
+        WithheldTax: o.WithheldTax);
 
     public async Task<IReadOnlyList<UserDataSlice>> ContributeForUserAsync(
         Guid userId, CancellationToken ct)
@@ -949,24 +964,21 @@ internal sealed class TicketQueryService(
         "tombstones, MatchedUserId is dropped, and the free text on their ticket-transfer " +
         "requests is cleared.";
 
-    private static readonly IReadOnlyDictionary<string, string?> Erasure =
+    /// <summary>
+    /// The section's erasure declaration, served by the caching decorator as
+    /// <c>IUserDataContributor.ErasureDeclaration</c>.
+    /// </summary>
+    internal static readonly IReadOnlyDictionary<string, string?> Erasure =
         new Dictionary<string, string?>(StringComparer.Ordinal)
         {
             [TicketOrders] = SalesRecordRetention,
             [TicketAttendeeMatches] = SalesRecordRetention
         };
 
-    public IReadOnlyDictionary<string, string?> ErasureDeclaration => Erasure;
-
     public async Task EraseForUserAsync(Guid userId, CancellationToken ct)
     {
         await ticketRepository.EraseUserPiiAsync(userId, ct);
         await ticketTransferRepository.ErasePiiForUserAsync(userId, ct);
-
-        // The order projection is a warmed singleton with no TTL and carries the
-        // buyer/attendee names and emails just tombstoned — without this the erased
-        // identity keeps being served from memory until the process restarts.
-        cacheInvalidator.InvalidateAll();
     }
 
     public Task<IReadOnlyList<OrderDriftRow>> GetOrderDriftAsync(CancellationToken ct = default) =>

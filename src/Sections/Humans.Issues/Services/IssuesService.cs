@@ -3,11 +3,9 @@ using System.Globalization;
 using System.Resources;
 using Microsoft.Extensions.Caching.Memory;
 using NodaTime;
-using Humans.Base.Caching;
 using Humans.Base.Extensions;
 using Humans.AuditLog.Contracts;
 using Humans.Base.Interfaces;
-using Humans.Base.Interfaces.Caching;
 using Humans.Email.Contracts;
 using Humans.Gdpr.Contracts;
 using Humans.Notifications.Contracts;
@@ -33,8 +31,6 @@ internal sealed class IssuesService(
     INotificationEmitter notifications,
     INotificationAutoResolve notificationInbox,
     IAuditLogService audit,
-    INavBadgeCacheInvalidator navBadge,
-    IIssuesBadgeCacheInvalidator issuesBadge,
     IMemoryCache cache,
     IClock clock,
     IFileStorage fileStorage,
@@ -43,6 +39,7 @@ internal sealed class IssuesService(
     ILogger<IssuesService> logger) : IIssuesService, IUserDataContributor
 {
     internal const string Issues = "Issues";
+    internal const string IssueComments = "IssueComments";
 
     private static readonly TimeSpan BadgeCacheDuration = TimeSpan.FromMinutes(2);
     private static readonly ResourceManager NoticeResources = new(typeof(IssuesResource));
@@ -202,8 +199,7 @@ internal sealed class IssuesService(
             }
             throw;
         }
-        navBadge.Invalidate();
-        issuesBadge.InvalidateMany(
+        EvictBadgeCounts(
             await ResolveBadgeUserIdsAsync(reporterUserId, section, null, ct));
 
         await DispatchSubmittedNotificationAsync(issue, ct);
@@ -486,10 +482,9 @@ internal sealed class IssuesService(
             await ResolveSubmittedNotificationsAsync(issue, senderUserId, ct);
         }
 
-        navBadge.Invalidate();
         if (statusChangedToOpen || resolveWithComment)
         {
-            issuesBadge.InvalidateMany(
+            EvictBadgeCounts(
                 await ResolveBadgeUserIdsAsync(issue.ReporterUserId, issue.Section, null, ct));
         }
 
@@ -574,8 +569,7 @@ internal sealed class IssuesService(
             if (newStatus.IsTerminal())
                 await ResolveSubmittedNotificationsAsync(issue, actorUserId, ct);
 
-            navBadge.Invalidate();
-            issuesBadge.InvalidateMany(
+            EvictBadgeCounts(
                 await ResolveBadgeUserIdsAsync(issue.ReporterUserId, issue.Section, null, ct));
 
             return IssueMutationResult.Success();
@@ -606,9 +600,17 @@ internal sealed class IssuesService(
                 ? (users1!.TryGetValue(newAssigneeUserId.Value, out var nu) ? nu.BurnerName : newAssigneeUserId.Value.ToString())
                 : "Unassigned";
 
+            // Only an active member may be assigned — the same set the assignee picker offers.
             // Store the resolved id: a merged-away assignee id would point the issue at a tombstone.
-            if (newAssigneeUserId is { } requested && users1!.TryGetValue(requested, out var resolved))
+            if (newAssigneeUserId is { } requested)
+            {
+                if (!users1!.TryGetValue(requested, out var resolved) || !resolved.IsActive)
+                {
+                    logger.LogWarning("Issue {IssueId} assignee update rejected: {UserId} is not an active member", issueId, requested);
+                    return IssueMutationResult.Refused("Only an active member can be assigned.");
+                }
                 newAssigneeUserId = resolved.Id;
+            }
             if (issue.AssigneeUserId == newAssigneeUserId) return IssueMutationResult.Success();
 
             issue.AssigneeUserId = newAssigneeUserId;
@@ -664,8 +666,7 @@ internal sealed class IssuesService(
             await LogAuditAsync(
                 AuditAction.IssueSectionChanged, issueId, actorUserId,
                 $"section: {oldSection} → {nextSection}");
-            navBadge.Invalidate();
-            issuesBadge.InvalidateMany(
+            EvictBadgeCounts(
                 await ResolveBadgeUserIdsAsync(issue.ReporterUserId, newSection, previousSection, ct));
 
             return IssueMutationResult.Success();
@@ -678,6 +679,12 @@ internal sealed class IssuesService(
     {
         return MutateAsync(issueId, viewer, "SetGitHubIssueNumber", "Failed to link GitHub issue.", async issue =>
         {
+            if (githubIssueNumber is <= 0)
+            {
+                logger.LogWarning("Issue {IssueId} rejected nonpositive GitHub issue number {IssueNumber}", issueId, githubIssueNumber);
+                return IssueMutationResult.Refused("GitHub issue numbers must be positive.");
+            }
+
             if (issue.GitHubIssueNumber == githubIssueNumber) return IssueMutationResult.Success();
 
             issue.GitHubIssueNumber = githubIssueNumber;
@@ -686,7 +693,7 @@ internal sealed class IssuesService(
 
             await LogAuditAsync(
                 AuditAction.IssueGitHubLinked, issueId, actorUserId,
-                $"GitHub link: {(githubIssueNumber.HasValue ? githubIssueNumber.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "(cleared)")}");
+                $"GitHub link: {(githubIssueNumber.HasValue ? githubIssueNumber.Value.ToString(CultureInfo.InvariantCulture) : "(cleared)")}");
 
             return IssueMutationResult.Success();
         }, ct);
@@ -722,7 +729,7 @@ internal sealed class IssuesService(
 
     public async Task<int> GetActionableCountForViewerAsync(IssueViewer viewer, CancellationToken ct = default)
     {
-        var cacheKey = CacheKeys.IssuesBadge(viewer.UserId);
+        var cacheKey = BadgeCacheKey(viewer.UserId);
         return await cache.GetOrCreateAsync(cacheKey, async entry =>
         {
             entry.AbsoluteExpirationRelativeToNow = BadgeCacheDuration;
@@ -732,6 +739,14 @@ internal sealed class IssuesService(
             var sections = routing.SectionsForRoles(viewer.Roles);
             return await repo.CountActionableAsync(sections, viewer.UserId, ct);
         });
+    }
+
+    /// <summary>Cache key for one viewer's actionable count; this service is its only reader and evicter.</summary>
+    internal static string BadgeCacheKey(Guid userId) => $"NavBadge:Issues:{userId:N}";
+
+    private void EvictBadgeCounts(IEnumerable<Guid> userIds)
+    {
+        foreach (var id in userIds) cache.Remove(BadgeCacheKey(id));
     }
 
     /// <summary>Users whose badge count may shift on an issue mutation: reporter + admins + role-holders for current &amp; previous sections.</summary>
@@ -789,7 +804,6 @@ internal sealed class IssuesService(
             "PurgeExpiredAsync: deleted {Count} issues older than {Cutoff} (retention {Days}d)",
             deleted, cutoff, RetentionPeriod.Days);
 
-        navBadge.Invalidate();
         return deleted;
     }
 
@@ -802,7 +816,8 @@ internal sealed class IssuesService(
         var issues = new List<Issue>();
         foreach (var id in userIds)
             issues.AddRange(await repo.GetForUserExportAsync(id, ct));
-        var shaped = issues.Select(i => new
+        var distinctIssues = issues.DistinctBy(i => i.Id).ToList();
+        var shaped = distinctIssues.Where(i => userIds.Contains(i.ReporterUserId)).Select(i => new
         {
             i.Title,
             i.Description,
@@ -822,7 +837,19 @@ internal sealed class IssuesService(
             })
         }).ToList();
 
-        return [new UserDataSlice(Issues, shaped)];
+        var comments = distinctIssues
+            .Where(i => !userIds.Contains(i.ReporterUserId))
+            .SelectMany(i => i.Comments)
+            .Where(c => c.SenderUserId is { } senderId && userIds.Contains(senderId))
+            .OrderBy(c => c.CreatedAt)
+            .Select(c => new
+            {
+                c.IssueId,
+                c.Content,
+                CreatedAt = c.CreatedAt.ToIso8601()
+            }).ToList();
+
+        return [new UserDataSlice(Issues, shaped), new UserDataSlice(IssueComments, comments)];
     }
 
     // ─── IUserDataContributor (GDPR erasure) ───
@@ -830,11 +857,10 @@ internal sealed class IssuesService(
     private static readonly IReadOnlyDictionary<string, string?> Erasure =
         new Dictionary<string, string?>(StringComparer.Ordinal)
         {
-            [Issues] =
-                "Partially retained: issues the person reported are deleted outright, comments " +
-                "and screenshots with them. A comment they left on someone else's issue is that " +
-                "issue's content and stays, with the authorship detached (SenderUserId nulled) — " +
-                "GDPR Art. 17(3)(b), since removing it would gut another human's thread."
+            [Issues] = null, // Own issues, comments and screenshots are deleted outright.
+            [IssueComments] =
+                "Partially retained: comments on other people's issues remain as that issue's content, " +
+                "with authorship detached (SenderUserId nulled), per GDPR Art. 17(3)(b)."
         };
 
     public IReadOnlyDictionary<string, string?> ErasureDeclaration => Erasure;
@@ -844,13 +870,14 @@ internal sealed class IssuesService(
     {
         var ownIssues = await repo.GetForUserExportAsync(userId, ct);
         var badgeUserIds = new HashSet<Guid> { userId };
-        foreach (var section in ownIssues.Select(i => i.Section).Distinct(StringComparer.Ordinal))
+        foreach (var section in ownIssues.Where(i => i.ReporterUserId == userId)
+                     .Select(i => i.Section).Distinct(StringComparer.Ordinal))
         {
             badgeUserIds.UnionWith(await ResolveBadgeUserIdsAsync(userId, section, previousSection: null, ct));
         }
 
         var screenshotKeys = await repo.EraseForUserAsync(userId, ct);
-        issuesBadge.InvalidateMany(badgeUserIds);
+        EvictBadgeCounts(badgeUserIds);
 
         // The screenshots are the reporter's own uploads — they go with the rows.
         await DeleteScreenshotsAsync(screenshotKeys);

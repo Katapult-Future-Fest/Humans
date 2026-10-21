@@ -63,4 +63,35 @@
   <data name="Cantina_Matrix_OtherIntolerance" xml:space="preserve"><value>Other intolerance</value></data>
   <data name="Cantina_Matrix_OtherIntoleranceText" xml:space="preserve"><value>Other intolerance text</value></data>
   <data name="Cantina_Matrix_Totals" xml:space="preserve"><value>TOTALS</value></data>
+  <data name="Cantina_Dietary_DietaryPreference_Label" xml:space="preserve"><value>Preferència alimentària</value></data>
+  <data name="Cantina_Dietary_DietaryPreference_Omnivore" xml:space="preserve"><value>Omnívor/a</value></data>
+  <data name="Cantina_Dietary_DietaryPreference_Vegetarian" xml:space="preserve"><value>Vegetarià/ana</value></data>
+  <data name="Cantina_Dietary_DietaryPreference_Vegan" xml:space="preserve"><value>Vegà/ana</value></data>
+  <data name="Cantina_Dietary_DietaryPreference_Pescatarian" xml:space="preserve"><value>Pescetarià/ana</value></data>
+  <data name="Cantina_Dietary_Allergies_Label" xml:space="preserve"><value>Al·lèrgies</value></data>
+  <data name="Cantina_Dietary_AllergyOther_Label" xml:space="preserve"><value>Una altra al·lèrgia — descriu-la</value></data>
+  <data name="Cantina_Dietary_Intolerances_Label" xml:space="preserve"><value>Intoleràncies</value></data>
+  <data name="Cantina_Dietary_IntoleranceOther_Label" xml:space="preserve"><value>Una altra intolerància — descriu-la</value></data>
+  <data name="Cantina_Dietary_Allergy_Dairy" xml:space="preserve"><value>Lactis</value></data>
+  <data name="Cantina_Dietary_Allergy_Egg" xml:space="preserve"><value>Ou</value></data>
+  <data name="Cantina_Dietary_Allergy_Peanut" xml:space="preserve"><value>Cacauet</value></data>
+  <data name="Cantina_Dietary_Allergy_Sesame" xml:space="preserve"><value>Sèsam</value></data>
+  <data name="Cantina_Dietary_Allergy_Shellfish" xml:space="preserve"><value>Marisc</value></data>
+  <data name="Cantina_Dietary_Allergy_Soy" xml:space="preserve"><value>Soja</value></data>
+  <data name="Cantina_Dietary_Allergy_Treenut" xml:space="preserve"><value>Fruits secs</value></data>
+  <data name="Cantina_Dietary_Allergy_WheatGluten" xml:space="preserve"><value>Blat/Gluten</value></data>
+  <data name="Cantina_Dietary_Intolerance_Gluten" xml:space="preserve"><value>Gluten</value></data>
+  <data name="Cantina_Dietary_Intolerance_Histamine" xml:space="preserve"><value>Histamina</value></data>
+  <data name="Cantina_Dietary_Intolerance_Lactose" xml:space="preserve"><value>Lactosa</value></data>
+  <data name="Cantina_Dietary_AllergyOther_Required" xml:space="preserve"><value>Descriu l’altra al·lèrgia.</value></data>
+  <data name="Cantina_Dietary_IntoleranceOther_Required" xml:space="preserve"><value>Descriu l’altra intolerància.</value></data>
+  <data name="Cantina_Dietary_BreadcrumbNavigation" xml:space="preserve"><value>Ruta de navegació</value></data>
+  <data name="Cantina_Dietary_PageTitle" xml:space="preserve"><value>Informació alimentària</value></data>
+  <data name="Cantina_Dietary_Saved" xml:space="preserve"><value>S’ha desat la teva informació alimentària.</value></data>
+  <data name="Cantina_Dietary_SaveFailed" xml:space="preserve"><value>No s’ha pogut desar la informació alimentària.</value></data>
+  <data name="Cantina_Dietary_LoadFailed" xml:space="preserve"><value>No s’ha pogut carregar la informació alimentària.</value></data>
+  <data name="Cantina_Dietary_OptionalHint" xml:space="preserve"><value>Opcional. Ajuda la cantina a planificar els àpats dels torns llargs i mai no afecta les teves inscripcions als torns.</value></data>
+  <data name="Cantina_Dietary_DeclineButton" xml:space="preserve"><value>Prefereixo no respondre</value></data>
+  <data name="Cantina_Dietary_Declined" xml:space="preserve"><value>Entesos: no et tornarem a preguntar per la teva informació alimentària. La pots afegir aquí quan vulguis.</value></data>
+  <data name="Cantina_Dietary_DeclinedNotice" xml:space="preserve"><value>Has triat no compartir la teva informació alimentària, així que no te la demanarem. La pots omplir quan vulguis.</value></data>
 </root>

@@ -1,3 +1,4 @@
+using Humans.Cantina.Contracts;
 using Humans.Shifts.Domain;
 using Humans.Shifts.Services.Dtos;
 using Humans.Shifts.Services;
@@ -6,6 +7,7 @@ using Humans.Shifts.Tests.Infrastructure;
 using Humans.Users.Contracts;
 using Humans.Users.Domain;
 using Humans.Shifts.Helpers;
+using Humans.Settings.Contracts;
 using NodaTime;
 using NSubstitute;
 using Xunit;
@@ -33,6 +35,7 @@ public class ShiftVolunteerSearchBuilderTests
 
     private readonly IBurnSettingsService _burnSettings = Substitute.For<IBurnSettingsService>();
     private readonly IUserService _userService = Substitute.For<IUserService>();
+    private readonly ICantinaService _cantina = Substitute.For<ICantinaService>();
     private readonly IShiftRowView _shiftView = Substitute.For<IShiftRowView>();
     private readonly IShiftSignupService _signupService = Substitute.For<IShiftSignupService>();
     private readonly IVolunteerTrackingManagement _tracking = Substitute.For<IVolunteerTrackingManagement>();
@@ -49,10 +52,12 @@ public class ShiftVolunteerSearchBuilderTests
         _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<Guid, UserInfo>());
         _tracking.GetAvailableForDayAsync(Arg.Any<Guid>(), Arg.Any<int>(), Arg.Any<CancellationToken>()).Returns([]);
+        _cantina.GetDietaryProfilesAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<Guid, DietaryProfileInfo>());
     }
 
     private ShiftVolunteerSearchBuilder BuildSut() =>
-        new(_burnSettings, _userService, _shiftView, _signupService, _tracking);
+        new(_burnSettings, _userService, _cantina, _shiftView, _signupService, _tracking);
 
     [HumansFact]
     public async Task SearchReads_PreserveCancellationAcrossEventAndCandidateLookups()
@@ -88,8 +93,8 @@ public class ShiftVolunteerSearchBuilderTests
         Assert.True(row.HasOverlap); // 12:00–16:00 overlaps the 10:00–14:00 target.
 
         // Active burn already in hand — no extra GetByIdAsync round trip.
-        await _burnSettings.DidNotReceiveWithAnyArgs().GetByIdAsync(default, default);
-        await _signupService.DidNotReceiveWithAnyArgs().GetByUserAsync(default, default);
+        await _burnSettings.DidNotReceiveWithAnyArgs().GetByIdAsync(default);
+        await _signupService.DidNotReceiveWithAnyArgs().GetByUserAsync(default);
         await _tracking.Received(1).GetAvailableForDayAsync(ActiveBurnId, 1);
     }
 
@@ -104,7 +109,9 @@ public class ShiftVolunteerSearchBuilderTests
         SetCachedSignups(MakeSignup(ActiveBurnId, dayOffset: 1, new LocalTime(10, 0), Duration.FromHours(4)));
         _signupService.GetByUserAsync(_candidateId, PastBurnId).Returns(
         [
-            MakeSignup(PastBurnId, dayOffset: 1, new LocalTime(20, 0), Duration.FromHours(2)),
+            ShiftUserSummaryProjection.ToSummary(
+                MakeSignup(PastBurnId, dayOffset: 1, new LocalTime(20, 0), Duration.FromHours(2)),
+                ToCalendar(PastBurn)),
         ]);
 
         var result = await BuildSut().BuildForShiftAsync(target, "ann", canViewMedical: false);
@@ -160,6 +167,22 @@ public class ShiftVolunteerSearchBuilderTests
     }
 
     [HumansFact]
+    public async Task DietaryBadge_ComesFromCantina()
+    {
+        var target = MakeShift(ActiveBurnId, dayOffset: 1, new LocalTime(10, 0), Duration.FromHours(4));
+        SetCachedSignups();
+        _cantina.GetDietaryProfilesAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<Guid, DietaryProfileInfo>
+            {
+                [_candidateId] = new(_candidateId, "Vegan", [], null, [], null),
+            });
+
+        var result = await BuildSut().BuildForShiftAsync(target, "ann", canViewMedical: false);
+
+        Assert.Equal("Vegan", Assert.Single(result.Results).DietaryPreference);
+    }
+
+    [HumansFact]
     public async Task BlankQuery_ShortCircuitsBeforeAnyBurnLookup()
     {
         var result = await BuildSut().BuildForShiftAsync(
@@ -175,7 +198,7 @@ public class ShiftVolunteerSearchBuilderTests
         _shiftView.GetUsersAsync(Arg.Any<IEnumerable<Guid>>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<Guid, ShiftUserView>
             {
-                [_candidateId] = new(_candidateId, null, null, null, [], signups),
+                [_candidateId] = new(_candidateId, null, null, null, [], signups, ToCalendar(ActiveBurn)),
             });
 
     private void StubCandidateMedicalConditions(string medicalConditions) =>
@@ -194,7 +217,17 @@ public class ShiftVolunteerSearchBuilderTests
                 })
             });
 
-    private static Shift MakeShift(Guid burnId, int dayOffset, LocalTime start, Duration duration) =>
+    // The target as GetShiftByIdAsync hands it over: the shift's own fields plus its rota.
+    private static ShiftWithRota MakeShift(Guid burnId, int dayOffset, LocalTime start, Duration duration)
+    {
+        var rotaId = Guid.NewGuid();
+        return new ShiftWithRota(
+            new ShiftInfo(Guid.NewGuid(), rotaId, null, dayOffset, start, duration.TotalHours, 0, 5, false, false, dayOffset < 0),
+            new RotaInfo(rotaId, burnId, Guid.NewGuid(), "Rota", null, null,
+                ShiftPriority.Normal, SignupPolicy.Public, RotaPeriod.Event, true, []));
+    }
+
+    private static Shift MakeShiftEntity(Guid burnId, int dayOffset, LocalTime start, Duration duration) =>
         new()
         {
             Id = Guid.NewGuid(),
@@ -209,8 +242,25 @@ public class ShiftVolunteerSearchBuilderTests
         {
             Id = Guid.NewGuid(),
             Status = SignupStatus.Confirmed,
-            Shift = MakeShift(burnId, dayOffset, start, duration),
+            Shift = MakeShiftEntity(burnId, dayOffset, start, duration),
         };
+
+    private static EventSettingsInfo ToCalendar(BurnSettingsInfo burn) => new(
+        Id: burn.Id,
+        EventName: burn.EventName,
+        Year: burn.Year,
+        TimeZoneId: burn.TimeZoneId,
+        GateOpeningDate: burn.GateOpeningDate,
+        BuildStartOffset: burn.BuildStartOffset,
+        EventEndOffset: burn.EventEndOffset,
+        StrikeEndOffset: burn.StrikeEndOffset,
+        FirstCrewStartOffset: burn.FirstCrewStartOffset,
+        SetupWeekStartOffset: burn.SetupWeekStartOffset,
+        PreEventWeekStartOffset: burn.PreEventWeekStartOffset,
+        FinishingWeekendStartOffset: burn.FinishingWeekendStartOffset,
+        EarlyEntryCapacity: new Dictionary<int, int>(),
+        BarriosEarlyEntryAllocation: null,
+        EarlyEntryClose: null);
 
     private static BurnSettingsInfo MakeBurn(Guid id, string timeZoneId, LocalDate gateOpening) =>
         new(

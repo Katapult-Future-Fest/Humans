@@ -1,12 +1,9 @@
 @using Humans.Teams.Contracts
 @model Humans.Debug.Controllers.WidgetGalleryViewModel
 @using Humans.Base.Authorization
-@using Humans.Base.Interfaces
-@using Humans.Base.Models.Tables
 @using Humans.Shifts.Contracts
 @using Humans.Tickets.Contracts
 @using Humans.Base.Enums
-@using Microsoft.AspNetCore.Html
 @* The section tag-helper assemblies this catalog renders are opened in Views/_ViewImports.cshtml.
    AdminBreadcrumb, ChromeSlot, SectionNav and ThingsToDo live in Humans.Base (every section's
    _ViewImports opens it), so they render as ordinary <vc:> tag helpers here. Widgets owned by a
@@ -301,10 +298,10 @@
                     section contributes its own sample(s) via its existing <code>SectionChrome</code>
                     (<code>ISectionChrome</code>): Users (<code>&lt;vc:profile-card&gt;</code>,
                     <code>_ProfileCard</code>/<code>_HumanPopover</code>, <code>&lt;vc:human-summary&gt;</code>,
-                    <code>&lt;vc:communication-preferences-panel&gt;</code>,
-                    <code>&lt;vc:nobodies-email-badge&gt;</code>, <code>&lt;vc:membership-tier-badge&gt;</code>)
-                    and Shifts (the rota cards, <code>&lt;vc:dietary-missing-banner&gt;</code>) — no
-                    hand-written card for either of them here.
+                    and GoogleIntegration's <code>&lt;vc:nobodies-email-badge&gt;</code>), Email
+                    (<code>&lt;vc:communication-preferences-panel&gt;</code>), Shifts (the rota cards,
+                    <code>&lt;vc:dietary-missing-banner&gt;</code>) and Governance
+                    (<code>&lt;vc:membership-tier-badge&gt;</code>) — no hand-written card for any of them here.
                 </div>
                 <vc:chrome-slot name="@ChromeSlots.WidgetGallery" />
 
@@ -320,7 +317,7 @@
                         Badges showing volunteer event profile info — skills, quirks, dietary, languages, optional medical.
                     </div>
                     @ParamsBlock(
-                        ("@@model", "<code>VolunteerBadgesViewModel</code> (skills from VEP; dietary/medical from Profile)")
+                        ("@@model", "<code>VolunteerBadgesViewModel</code> (skills from VEP; dietary from Cantina, medical from Profile)")
                     )
                     @AuthLine("<code>ShowMedical=true</code> only when the viewer is allowed to see medical info — gate at the call site.")
                     <div class="wg-card-example @(Model.SampleVolunteerProfile is null ? "is-empty" : "")">
@@ -979,7 +976,7 @@
                         ("@@model", "<code>EmailComposerViewModel</code> — RecipientCount/RecipientSummary/RecipientUserId/WarnRecipientCount for the To: line, BodyName/BodyValue/BodyLabel/BodyRows/BodyRequired/BodyMaxLength/BodyHelpText/BodyPlaceholder/BodyLabelVisuallyHidden, optional SubjectName/SubjectValue/SubjectLabel/SubjectRequired/SubjectMaxLength, Category (a <code>MessageCategory</code> name — drives the placeholder unsubscribe footer in the preview), and PreviewSubjectName/PreviewModalId/IncludePreviewModal for hosts with more than one instance on a page or that inject this partial via AJAX (Feedback/Issues)")
                     )
                     <div class="wg-card-example">
-                        @await Html.PartialAsync("_EmailComposer", new Humans.Base.Models.EmailComposerViewModel
+                        @await Html.PartialAsync("_EmailComposer", new EmailComposerViewModel
                         {
                             SubjectName = "widget-gallery-email-subject",
                             SubjectValue = "A message from the gallery",
@@ -987,7 +984,7 @@
                             BodyName = "widget-gallery-email-body",
                             BodyValue = "**Hello** — this is a _preview_ of a human-composed email.",
                             BodyLabel = "Message",
-                            Category = nameof(Humans.Users.Contracts.MessageCategory.FacilitatedMessages),
+                            Category = nameof(Humans.Email.Contracts.MessageCategory.FacilitatedMessages),
                             RecipientCount = 42,
                             RecipientSummary = "Kitchen team rota volunteers",
                         })
@@ -1162,6 +1159,7 @@
                     <li><strong>My ticket stubs</strong> — <code>MyTicketStubsViewComponent</code> (<code>&lt;vc:my-ticket-stubs&gt;</code>): can't render standalone — fetches the viewer's owned-ticket holdings (<code>GetUserTicketHoldingsAsync</code>) plus their cross-source Early Entry date, and renders nothing without them. The stub it draws is the <code>vc:ticket-stub</code> card above. See the homepage <a href="/">dashboard</a>.</li>
                     <li><strong>Public coordinator popover</strong> — <code>_HumanPopoverPublic.cshtml</code>: context-bound — takes a <code>PublicPopoverViewModel</code> built by <code>ProfileViewController.PublicPopover</code> after gating that the target user is an active coordinator on a team where <code>IsPublicPage &amp;&amp; ShowCoordinatorsOnPublicPage</code>. The reduced popover (avatar + BurnerName + role labels) is served only via <code>[AllowAnonymous] /Profile/{id}/PublicPopover</code> on the public team page. See <code>_HumanPopover.cshtml</code> above for the authenticated equivalent.</li>
                     <li><strong>Events card</strong> — <code>EventsCardViewComponent</code> (<code>&lt;vc:events-card&gt;</code>): can't render standalone — needs a live camp id (or user id) whose approved events exist in the current edition, self-gates to authenticated viewers, and hides entirely when the <code>Features:Events</code> flag is off. Renders nothing without all three. See a barrio detail page under <a href="/Barrios">/Barrios</a> or a <a href="/Profile/Me">profile</a>.</li>
+                    <li><strong>Grants cards</strong>: <code>MyGrantsViewComponent</code>, <code>UserGrantsViewComponent</code>: internal slot parts (no <code>&lt;vc:&gt;</code> tag), invoked by Type only through the profile and admin human-detail user-part slots. Each renders only for its own audience (the signed-in person on their own profile; HumanAdmin, Board or Admin on the admin page) and nothing when the person holds no grants. See your <a href="/Profile/Me">profile</a> or <code>/Users/Admin/{id}</code>.</li>
                 </ul>
             </section>
 

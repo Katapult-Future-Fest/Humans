@@ -1,9 +1,10 @@
+using Humans.Cantina.Contracts;
 using Humans.Governance.Contracts;
 using Humans.Shifts.Services;
 using Humans.Shifts.Contracts;
 using Humans.Teams.Contracts;
 using Humans.Base.Constants;
-using Humans.Shifts.Domain;
+using Humans.Shifts.Services.Dtos;
 using Humans.Base.Enums;
 using NodaTime;
 using Humans.Users.Contracts;
@@ -23,6 +24,7 @@ internal sealed class ShiftAdminPageBuilder(
     IShiftManagement shiftManagement,
     IMembershipCalculator membership,
     IUserService userService,
+    ICantinaService cantina,
     ITeamService teamService)
 {
     public async Task<ShiftAdminViewModel> BuildAsync(ShiftAdminPageRequest request, CancellationToken ct = default)
@@ -60,12 +62,12 @@ internal sealed class ShiftAdminPageBuilder(
         };
     }
 
-    private async Task<(List<ShiftSignup> PendingSignups, int TotalSlots, int ConfirmedCount)> BuildStaffingSummaryAsync(
-        IReadOnlyList<Rota> rotas,
+    private async Task<(List<ShiftAdminPendingSignup> PendingSignups, int TotalSlots, int ConfirmedCount)> BuildStaffingSummaryAsync(
+        IReadOnlyList<ShiftAdminRota> rotas,
         bool incompleteOnboarding,
         CancellationToken ct)
     {
-        var pendingSignups = new List<ShiftSignup>();
+        var pendingSignups = new List<ShiftAdminPendingSignup>();
         var totalSlots = 0;
         var confirmedCount = 0;
 
@@ -73,9 +75,13 @@ internal sealed class ShiftAdminPageBuilder(
         {
             foreach (var shift in rota.Shifts)
             {
-                totalSlots += shift.MaxVolunteers;
-                confirmedCount += shift.ShiftSignups.Count(s => s.Status == SignupStatus.Confirmed);
-                pendingSignups.AddRange(shift.ShiftSignups.Where(s => s.Status == SignupStatus.Pending));
+                totalSlots += shift.Shift.MaxVolunteers;
+                confirmedCount += shift.ConfirmedCount;
+                pendingSignups.AddRange(shift.Signups
+                    .Where(s => s.Status == SignupStatus.Pending)
+                    .Select(s => new ShiftAdminPendingSignup(
+                        s.Id, s.UserId, s.SignupBlockId, s.CreatedAt,
+                        shift.Shift, shift.ConfirmedCount, rota.Rota.Name)));
             }
         }
 
@@ -85,8 +91,8 @@ internal sealed class ShiftAdminPageBuilder(
         return (pendingSignups, totalSlots, confirmedCount);
     }
 
-    private async Task<IReadOnlyList<ShiftSignup>> FilterToIncompleteOnboardingAsync(
-        IReadOnlyList<ShiftSignup> signups, CancellationToken ct)
+    private async Task<IReadOnlyList<ShiftAdminPendingSignup>> FilterToIncompleteOnboardingAsync(
+        IReadOnlyList<ShiftAdminPendingSignup> signups, CancellationToken ct)
     {
         if (signups.Count == 0) return signups;
 
@@ -105,22 +111,24 @@ internal sealed class ShiftAdminPageBuilder(
         var result = new Dictionary<Guid, VolunteerBadgesViewModel>();
         if (userIds.Count == 0) return result;
 
-        // Skills/Quirks/Languages come from the shift profile (VEP); dietary +
-        // medical from the person's Profile (cached UserInfo). Medical is gated
-        // here — populated only when the viewer holds MedicalDataViewer.
+        // Skills/Quirks/Languages come from the shift profile (VEP); dietary from
+        // Cantina; medical from the person's Profile (cached UserInfo). Medical is
+        // gated here — populated only when the viewer holds MedicalDataViewer.
         var userInfos = await userService.GetUserInfosAsync(userIds, ct);
+        var diets = await cantina.GetDietaryProfilesAsync(userIds, ct);
         foreach (var uid in userIds)
         {
             var vep = await shiftManagement.GetShiftProfileAsync(uid, ct);
             userInfos.TryGetValue(uid, out var info);
             var person = info?.Profile;
-            if (vep is null && person is null) continue;
+            diets.TryGetValue(uid, out var diet);
+            if (vep is null && person is null && diet is null) continue;
 
             result[uid] = new VolunteerBadgesViewModel(
                 Skills: vep?.Skills ?? [],
                 Quirks: vep?.Quirks ?? [],
                 Languages: vep?.Languages ?? [],
-                DietaryPreference: person?.DietaryPreference,
+                DietaryPreference: diet?.DietaryPreference,
                 MedicalConditions: canViewMedical ? person?.MedicalConditions : null,
                 ShowMedical: canViewMedical);
         }
@@ -140,10 +148,10 @@ internal sealed class ShiftAdminPageBuilder(
     }
 
     private static IReadOnlyList<Guid> GetRelevantUserIds(
-        IReadOnlyList<Rota> rotas,
-        IReadOnlyList<ShiftSignup> pendingSignups) =>
+        IReadOnlyList<ShiftAdminRota> rotas,
+        IReadOnlyList<ShiftAdminPendingSignup> pendingSignups) =>
         rotas.SelectMany(r => r.Shifts)
-            .SelectMany(s => s.ShiftSignups)
+            .SelectMany(s => s.Signups)
             .Select(su => su.UserId)
             .Concat(pendingSignups.Select(p => p.UserId))
             .Distinct()

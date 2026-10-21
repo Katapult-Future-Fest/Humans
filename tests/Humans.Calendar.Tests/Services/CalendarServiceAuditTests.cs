@@ -4,7 +4,6 @@ using Humans.Calendar.Data;
 using Humans.Calendar.Domain;
 using Humans.Calendar.Services;
 using Humans.Calendar.Services.Dtos;
-using Humans.Teams.Contracts;
 using Microsoft.Extensions.Logging.Abstractions;
 using NodaTime;
 using NodaTime.Testing;
@@ -36,6 +35,7 @@ public class CalendarServiceAuditTests
 
     private CalendarService CreateSut() => new(
         _repo,
+        CalendarServiceValidationTests.ActiveTeams(),
         new FakeClock(Now),
         _audit,
         NullLogger<CalendarService>.Instance);
@@ -146,7 +146,7 @@ public class CalendarServiceAuditTests
         await _audit.Received(1).LogAsync(
             AuditAction.CalendarOccurrenceCancelled, AuditEntityTypes.CalendarEvent, eventId,
             Arg.Any<string>(), actor,
-            null, null);
+            null);
     }
 
     [HumansFact]
@@ -172,6 +172,6 @@ public class CalendarServiceAuditTests
         await _audit.Received(1).LogAsync(
             AuditAction.CalendarOccurrenceOverridden, AuditEntityTypes.CalendarEvent, eventId,
             Arg.Any<string>(), actor,
-            null, null);
+            null);
     }
 }

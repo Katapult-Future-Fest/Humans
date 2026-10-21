@@ -3,7 +3,6 @@ using AwesomeAssertions;
 using Humans.Email.Contracts;
 using Humans.Surveys.Services;
 using Humans.Surveys.Tests.Infrastructure;
-using Humans.Users.Contracts;
 
 namespace Humans.Surveys.Tests.Services;
 
@@ -63,7 +62,7 @@ public sealed class SurveysEmailsTests
     [HumansFact]
     public void SurveyInvitation_blank_custom_copy_retains_standard_localized_wording()
     {
-        var msg = Create().SurveyInvitation("a@x.com", "Daniel", "Test Survey", "token", "en", " ", null);
+        var msg = Create().SurveyInvitation("a@x.com", "Daniel", "Test Survey", "token", "en", " ");
 
         msg.Subject.Should().Be("Please complete: Test Survey");
         msg.HtmlBody.Should().Contain(

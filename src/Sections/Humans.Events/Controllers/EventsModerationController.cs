@@ -94,14 +94,7 @@ internal sealed class EventsModerationController(
     [HttpPost("Reject")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Reject(ModerationActionFormModel model)
-    {
-        if (string.IsNullOrWhiteSpace(model.Reason))
-        {
-            SetError("A reason is required when rejecting an event.");
-            return RedirectToAction(nameof(Index));
-        }
-        return await ProcessActionAsync(model.EventId, EventModerationActionType.Rejected, model.Reason);
-    }
+        => await ProcessActionAsync(model.EventId, EventModerationActionType.Rejected, model.Reason);
 
     [HttpPost("Withdraw")]
     [ValidateAntiForgeryToken]
@@ -117,13 +110,11 @@ internal sealed class EventsModerationController(
             return RedirectToAction(nameof(Index), new { tab = EventStatus.Approved });
         }
 
-        if (guideEvent.Status != EventStatus.Approved)
+        if (!await guide.ModeratorWithdrawAsync(guideEvent.Id, moderator.Id))
         {
-            SetError("This event is not in an approved state.");
+            SetError("This event cannot be withdrawn in its current state.");
             return RedirectToAction(nameof(Index), new { tab = EventStatus.Approved });
         }
-
-        await guide.ModeratorWithdrawAsync(guideEvent, moderator.Id);
 
         logger.LogInformation("Moderator {UserId} withdrew event '{Title}' ({EventId})",
             moderator.Id, guideEvent.Title, model.EventId);
@@ -135,14 +126,7 @@ internal sealed class EventsModerationController(
     [HttpPost("RequestEdit")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> RequestEdit(ModerationActionFormModel model)
-    {
-        if (string.IsNullOrWhiteSpace(model.Reason))
-        {
-            SetError("A reason is required when requesting edits.");
-            return RedirectToAction(nameof(Index));
-        }
-        return await ProcessActionAsync(model.EventId, EventModerationActionType.ResubmitRequested, model.Reason);
-    }
+        => await ProcessActionAsync(model.EventId, EventModerationActionType.ResubmitRequested, model.Reason);
 
     // ─── Admin in-place edit (any event, any state, status preserved) ─────
 
@@ -239,15 +223,13 @@ internal sealed class EventsModerationController(
             return View("AdminEventForm", model);
         }
 
-        ApplyFormToEvent(guideEvent, model, isCampEvent, tz);
-
-        await guide.AdminUpdateAsync(guideEvent, moderator.Id, model.Note);
+        await guide.AdminUpdateAsync(eventId, BuildEdit(model, isCampEvent, tz), moderator.Id, model.Note);
 
         logger.LogInformation(
             "Moderator {UserId} edited event '{Title}' ({EventId}) in place; {Status} status preserved",
-            moderator.Id, guideEvent.Title, eventId, guideEvent.Status);
+            moderator.Id, model.Title, eventId, guideEvent.Status);
 
-        SetSuccess($"Event \"{guideEvent.Title}\" updated.");
+        SetSuccess($"Event \"{model.Title}\" updated.");
         return RedirectToAction(nameof(Index), new { tab = guideEvent.Status });
     }
 
@@ -296,25 +278,19 @@ internal sealed class EventsModerationController(
         model.TimeZoneId = burn.TimeZoneId;
     }
 
-    // Maps the posted form fields onto the event. Camp events carry a priority
-    // rank; individual events carry a venue and the all-day flag.
-    private void ApplyFormToEvent(Event guideEvent, AdminEventFormViewModel model, bool isCampEvent, DateTimeZone? tz)
+    // Parses the posted form into the edit. Camp events carry a priority rank;
+    // individual events carry a venue and the all-day flag.
+    private static EventEdit BuildEdit(AdminEventFormViewModel model, bool isCampEvent, DateTimeZone? tz)
     {
         var (startTime, durationMinutes) = Event.ResolveAllDaySchedule(
             !isCampEvent && model.IsAllDay, model.StartTime, model.DurationMinutes);
-        guideEvent.Title = model.Title;
-        guideEvent.Description = model.Description;
-        guideEvent.CategoryId = model.CategoryId;
-        guideEvent.StartAt = ToInstant(model.StartDate.Add(startTime), tz);
-        guideEvent.DurationMinutes = durationMinutes;
-        guideEvent.LocationNote = model.LocationNote;
-        guideEvent.Host = model.Host;
-        guideEvent.IsRecurring = model.IsRecurring;
-        guideEvent.RecurrenceDays = model.IsRecurring ? model.RecurrenceDays : null;
-        if (isCampEvent)
-            guideEvent.PriorityRank = model.PriorityRank;
-        else
-            guideEvent.GuideSharedVenueId = model.VenueId;
+        return new EventEdit(
+            model.CategoryId,
+            isCampEvent ? null : model.VenueId,
+            model.Title, model.Description,
+            ToInstant(model.StartDate.Add(startTime), tz), durationMinutes,
+            model.LocationNote, model.Host, model.IsRecurring, model.RecurrenceDays,
+            isCampEvent ? model.PriorityRank : null);
     }
 
     private async Task<IActionResult> ProcessActionAsync(Guid eventId, EventModerationActionType actionType, string? reason)
@@ -326,12 +302,6 @@ internal sealed class EventsModerationController(
         if (guideEvent == null)
         {
             SetError("Event not found.");
-            return RedirectToAction(nameof(Index));
-        }
-
-        if (guideEvent.Status != EventStatus.Pending)
-        {
-            SetError("This event is not in a pending state.");
             return RedirectToAction(nameof(Index));
         }
 
@@ -349,7 +319,20 @@ internal sealed class EventsModerationController(
             ? Url.Action("BarrioEdit", "Events", new { slug = campSlug, eventId }, Request.Scheme)!
             : Url.Action("Edit", "Events", new { eventId }, Request.Scheme)!;
 
-        await guide.ApplyModerationAsync(eventId, moderator.Id, actionType, reason, editUrl);
+        // ApplyModerationAsync owns the reason-required and pending-only rules.
+        var outcome = await guide.ApplyModerationAsync(eventId, moderator.Id, actionType, reason, editUrl);
+        if (outcome is ModerationOutcome.ReasonRequired)
+        {
+            SetError(actionType == EventModerationActionType.Rejected
+                ? "A reason is required when rejecting an event."
+                : "A reason is required when requesting edits.");
+            return RedirectToAction(nameof(Index));
+        }
+        if (outcome is ModerationOutcome.NotPending)
+        {
+            SetError("This event is not in a pending state.");
+            return RedirectToAction(nameof(Index));
+        }
 
         var actionLabel = actionType switch
         {

@@ -29,7 +29,7 @@ namespace Humans.Shifts;
 /// <remarks>
 /// Registrations are <c>ShiftsSectionExtensions.AddShiftsSection</c> verbatim, plus the
 /// <c>AddSectionDbContext&lt;ShiftsDbContext&gt;</c> line moved out of
-/// <c>InfrastructureServiceCollectionExtensions</c> (design §15 step 11).
+/// <c>InfrastructureServiceCollectionExtensions</c>.
 /// </remarks>
 public sealed class Section : ISection, IIssueQueueOwner
 {
@@ -44,11 +44,10 @@ public sealed class Section : ISection, IIssueQueueOwner
 
         // The three cross-section halves of IShiftManagement, registered onto the
         // same Scoped instance.
-        services.AddScoped<IShiftManagementService>(sp => sp.GetRequiredService<ShiftManagementService>());
+        services.AddScoped<IShiftService>(sp => sp.GetRequiredService<ShiftManagementService>());
         services.AddScoped<IShiftVolunteerProfiles>(sp => sp.GetRequiredService<ShiftManagementService>());
         services.AddScoped<IShiftSeeding>(sp => sp.GetRequiredService<ShiftManagementService>());
 
-        services.AddScoped<IShiftAuthorizationInvalidator>(sp => sp.GetRequiredService<ShiftManagementService>());
         services.AddScoped<IUserMerge>(sp => sp.GetRequiredService<ShiftManagementService>());
 
         // Cross-section DTO supplier so Events/Camps/Tickets/Notifications consume BurnSettingsInfo without Shifts-internal EventSettings.
@@ -82,7 +81,6 @@ public sealed class Section : ISection, IIssueQueueOwner
         services.AddSingleton<CachingShiftViewService>();
         services.AddSingleton<IShiftRowView>(sp => sp.GetRequiredService<CachingShiftViewService>());
         services.AddSingleton<IShiftView>(sp => sp.GetRequiredService<CachingShiftViewService>());
-        services.AddSingleton<IShiftViewInvalidator>(sp => sp.GetRequiredService<CachingShiftViewService>());
         // Settings fans out over this after an event-settings save; the same instance answers.
         services.AddSingleton<IEventSettingsChangeListener>(sp => sp.GetRequiredService<CachingShiftViewService>());
 
@@ -96,7 +94,7 @@ public sealed class Section : ISection, IIssueQueueOwner
         services.AddScoped<ShiftDashboardPageBuilder>();
         services.AddScoped<ShiftVolunteerSearchBuilder>();
 
-        // Workload — no service-level cache; invalidation rides on IShiftViewInvalidator.
+        // Workload — no service-level cache; invalidation rides on CachingShiftViewService.
         services.AddScoped<IWorkloadService, WorkloadService>();
 
         // Rota coordinator "email a rota".

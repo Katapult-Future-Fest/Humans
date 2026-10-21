@@ -21,7 +21,7 @@ public class OnboardingWidgetControllerNamesTests
     private readonly IOnboardingWidgetState _state = Substitute.For<IOnboardingWidgetState>();
     private readonly IProfileEditorService _profileEditor = Substitute.For<IProfileEditorService>();
     private readonly IShiftSignups _signups = Substitute.For<IShiftSignups>();
-    private readonly IShiftManagementService _shiftMgmt = Substitute.For<IShiftManagementService>();
+    private readonly IShiftService _shiftMgmt = Substitute.For<IShiftService>();
     private readonly ISettingsService _burnSettings = Substitute.For<ISettingsService>();
     private readonly IShiftView _shiftView = Substitute.For<IShiftView>();
     private readonly IConsentSubmission _consents = Substitute.For<IConsentSubmission>();
@@ -35,7 +35,7 @@ public class OnboardingWidgetControllerNamesTests
 
     public OnboardingWidgetControllerNamesTests()
     {
-        _profileEditor.SaveProfileAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<ProfileSaveRequest>(), Arg.Any<CancellationToken>())
+        _profileEditor.SaveProfileAsync(Arg.Any<Guid>(), Arg.Any<ProfileSaveRequest>(), Arg.Any<CancellationToken>())
             .Returns(new ProfileEditResult(true, Guid.NewGuid()));
         _localizer[Arg.Any<string>()].Returns(ci =>
             new LocalizedString(ci.Arg<string>(), ci.Arg<string>()));
@@ -113,7 +113,6 @@ public class OnboardingWidgetControllerNamesTests
         var userId = Guid.NewGuid();
         _profileEditor.SaveProfileAsync(
                 userId,
-                "Burner1",
                 Arg.Any<ProfileSaveRequest>(),
                 Arg.Any<CancellationToken>())
             .Returns(new ProfileEditResult(true, Guid.NewGuid()));
@@ -128,7 +127,6 @@ public class OnboardingWidgetControllerNamesTests
 
         await _profileEditor.Received(1).SaveProfileAsync(
             userId,
-            "Burner1",
             Arg.Is<ProfileSaveRequest>(r =>
                 r.FirstName == "First" &&
                 r.LastName == "Last" &&
@@ -140,8 +138,8 @@ public class OnboardingWidgetControllerNamesTests
     public async Task Names_Post_RefusalRetainsTheFormWithoutConsentCheck()
     {
         var userId = Guid.NewGuid();
-        _profileEditor.SaveProfileAsync(userId, Arg.Any<string>(), Arg.Any<ProfileSaveRequest>(), Arg.Any<CancellationToken>())
-            .Returns(new ProfileEditResult(false, ErrorKey: "Profile_DietaryMedical_AllergyOther_Required"));
+        _profileEditor.SaveProfileAsync(userId, Arg.Any<ProfileSaveRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ProfileEditResult(false, ErrorKey: "Profile_BurnerCVRequired"));
         var ctrl = BuildSut(userId);
 
         var result = await ctrl.Names(new NamesViewModel
@@ -150,17 +148,17 @@ public class OnboardingWidgetControllerNamesTests
         var view = Assert.IsType<ViewResult>(result);
         Assert.Equal("Burner", Assert.IsType<NamesViewModel>(view.Model).BurnerName);
         Assert.Equal("Onboarding_ProfileSaveFailed", Assert.Single(ctrl.ModelState[string.Empty]!.Errors).ErrorMessage);
-        await _onboardingService.DidNotReceiveWithAnyArgs().SetConsentCheckPendingIfEligibleAsync(default, default);
+        await _onboardingService.DidNotReceiveWithAnyArgs().ProfileSavedAsync(default);
     }
 
     [HumansFact]
-    public async Task Names_Post_TriggersOnboardingConsentCheck_AfterSave()
+    public async Task Names_Post_ReportsTheSaveToOnboarding()
     {
-        // The consent-check trigger is a controller peer-call after SaveProfileAsync,
-        // per no-leaf-to-director-callbacks — not inside the service.
+        // The controller reports the save after SaveProfileAsync, per
+        // no-leaf-to-director-callbacks — not inside the profile service.
         var userId = Guid.NewGuid();
         _profileEditor.SaveProfileAsync(
-                userId, Arg.Any<string>(), Arg.Any<ProfileSaveRequest>(), Arg.Any<CancellationToken>())
+                userId, Arg.Any<ProfileSaveRequest>(), Arg.Any<CancellationToken>())
             .Returns(new ProfileEditResult(true, Guid.NewGuid()));
 
         var ctrl = BuildSut(userId);
@@ -169,7 +167,7 @@ public class OnboardingWidgetControllerNamesTests
         await ctrl.Names(vm, TestContext.Current.CancellationToken);
 
         await _onboardingService.Received(1)
-            .SetConsentCheckPendingIfEligibleAsync(userId, Arg.Any<CancellationToken>());
+            .ProfileSavedAsync(userId, Arg.Any<CancellationToken>());
     }
 
     [HumansFact]
@@ -192,7 +190,7 @@ public class OnboardingWidgetControllerNamesTests
         Assert.Equal(nameof(OnboardingWidgetController.Index), redirect.ActionName);
 
         await _profileEditor.DidNotReceiveWithAnyArgs().SaveProfileAsync(
-            Guid.Empty, null!, null!, Arg.Any<CancellationToken>());
+            Guid.Empty, null!, Arg.Any<CancellationToken>());
     }
 
     [HumansFact]
@@ -218,7 +216,6 @@ public class OnboardingWidgetControllerNamesTests
 
         await _profileEditor.Received(1).SaveProfileAsync(
             userId,
-            "Burner1",
             Arg.Is<ProfileSaveRequest>(r =>
                 r.FirstName == "First" && r.LastName == "Last" && r.BurnerName == "Burner1"),
             Arg.Any<CancellationToken>());
@@ -271,10 +268,8 @@ public class OnboardingWidgetControllerNamesTests
 
         await _profileEditor.Received(1).SaveProfileAsync(
             userId,
-            "Drifted",
             Arg.Is<ProfileSaveRequest>(r =>
                 r.LastName == "NowSet" &&
-                r.DietaryPreference == null && r.Allergies == null && r.AllergyOtherText == null &&
                 r.City == "Madrid" &&
                 r.Bio == "existing bio"),
             Arg.Any<CancellationToken>());
@@ -292,6 +287,6 @@ public class OnboardingWidgetControllerNamesTests
         Assert.Equal(nameof(OnboardingWidgetController.Names), view.ViewName ?? nameof(OnboardingWidgetController.Names));
 
         await _profileEditor.DidNotReceiveWithAnyArgs().SaveProfileAsync(
-            Guid.Empty, null!, null!, Arg.Any<CancellationToken>());
+            Guid.Empty, null!, Arg.Any<CancellationToken>());
     }
 }

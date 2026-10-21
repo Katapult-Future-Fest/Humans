@@ -6,7 +6,7 @@ namespace Humans.GoogleIntegration.Contracts;
 
 /// <summary>
 /// The Google provisioning writes other sections make, alongside the read-only
-/// <see cref="IGoogleSyncService"/>: team-resource grants and removals, single-resource sync,
+/// <see cref="IGoogleSyncService"/>: team-resource grants and removals,
 /// team group provisioning, and Drive subfolder creation and sync requests. Everything else the
 /// sync service does is internal to <c>Humans.GoogleIntegration</c>.
 /// </summary>
@@ -33,16 +33,6 @@ public interface IGoogleSyncWrite : IApplicationService
     /// </summary>
     [ExternalWrite]
     Task<GroupLinkResult> EnsureTeamGroupAsync(Guid teamId, bool confirmReactivation = false, CancellationToken cancellationToken = default);
-
-    /// <summary>
-    /// Syncs a single Google resource by ID. Drive resources are reconciled here;
-    /// Google Group resources are routed through <see cref="IGoogleGroupSync"/>.
-    /// </summary>
-    [ExternalWrite]
-    Task<ResourceSyncDiff> SyncSingleResourceAsync(
-        Guid resourceId,
-        SyncAction action,
-        CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Creates a new Drive subfolder named <paramref name="name"/> directly
@@ -86,15 +76,15 @@ public enum GoogleResourceGrantOutcome
     Failed
 }
 
-/// <summary>Vendor acceptance and the exact email row attempted by team provisioning.</summary>
+/// <summary>Vendor acceptance and the exact Google identity address attempted by team provisioning.</summary>
 /// <param name="Outcome">Accepted only when at least one Drive grant succeeds and none fail.</param>
 /// <param name="UserId">Resolved owner of the attempted address.</param>
-/// <param name="GoogleEmailId">Attempted verified email row; required for Accepted.</param>
+/// <param name="GoogleEmail">Attempted Google identity address; required for Accepted.</param>
 /// <param name="Retryable">Whether any failed grant can be retried; local refusals are permanent.</param>
 /// <param name="ErrorMessage">Failure details for the outbox and operator diagnostics.</param>
 public sealed record GoogleResourceGrantResult(
     GoogleResourceGrantOutcome Outcome,
     Guid UserId,
-    Guid? GoogleEmailId = null,
+    string? GoogleEmail = null,
     bool Retryable = false,
     string? ErrorMessage = null);

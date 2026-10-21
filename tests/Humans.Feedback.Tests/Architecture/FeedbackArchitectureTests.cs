@@ -1,10 +1,8 @@
 using AwesomeAssertions;
-using Humans.Base.Interfaces.Caching;
 using Humans.Users.Contracts;
 using Humans.Teams.Contracts;
 using Humans.Feedback.Data;
 using FeedbackService = Humans.Feedback.Services.FeedbackService;
-using Humans.Feedback.Contracts;
 
 namespace Humans.Feedback.Tests.Architecture;
 
@@ -13,8 +11,7 @@ namespace Humans.Feedback.Tests.Architecture;
 /// (nobodies-collective/Humans#866, G5) plus the §15 repository pattern it already had
 /// (issue #549). Feedback is admin-review-only and low-traffic, so no caching decorator sits
 /// in front of the service — the service goes directly through
-/// <see cref="IFeedbackRepository"/> and invalidates the nav-badge cache via
-/// <see cref="INavBadgeCacheInvalidator"/> after successful writes.
+/// <see cref="IFeedbackRepository"/> and evicts its own nav-badge count after successful writes.
 /// </summary>
 public class FeedbackArchitectureTests
 {
@@ -24,16 +21,6 @@ public class FeedbackArchitectureTests
     // TakesRepository check covered by pattern G (positive wiring noise).
 
     [HumansFact]
-    public void FeedbackService_TakesNavBadgeInvalidator()
-    {
-        var ctor = typeof(FeedbackService).GetConstructors().Single();
-        var paramTypes = ctor.GetParameters().Select(p => p.ParameterType).ToList();
-
-        paramTypes.Should().Contain(typeof(INavBadgeCacheInvalidator),
-            because: "FeedbackService invalidates the nav-badge count cache after writes that can change it (status change / message post) — the dependency proves the wire is in place");
-    }
-
-    [HumansFact]
     public void FeedbackService_TakesCrossSectionServiceInterfaces()
     {
         var ctor = typeof(FeedbackService).GetConstructors().Single();
@@ -41,8 +28,10 @@ public class FeedbackArchitectureTests
 
         paramTypes.Should().Contain(typeof(IUserService),
             because: "Feedback resolves reporter / assignee / resolver display names via IUserService.GetUserInfosAsync — UserInfo.BurnerName implements the BurnerName-first fallback per memory/architecture/burnername-is-the-display-name.md");
-        paramTypes.Should().Contain(typeof(IUserEmailService),
-            because: "Feedback resolves the reporter's effective notification email via IUserEmailService.GetNotificationTargetEmailsAsync — no User.UserEmails navigation");
+        var deliveryParamTypes = typeof(Humans.Feedback.Services.FeedbackReplyDelivery)
+            .GetConstructors().Single().GetParameters().Select(p => p.ParameterType);
+        deliveryParamTypes.Should().Contain(typeof(IUserEmailService),
+            because: "Feedback's delivery pipeline resolves the reporter's effective notification email via IUserEmailService.GetNotificationTargetEmailsAsync — no User.UserEmails navigation");
         paramTypes.Should().Contain(typeof(ITeamService),
             because: "Feedback resolves assigned-team names via the cross-section ITeamService surface — no FeedbackReport.AssignedToTeam navigation at query time");
     }

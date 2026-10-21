@@ -3,6 +3,7 @@ using Microsoft.Extensions.Localization;
 using Humans.Base.Authorization;
 using System.Text.Json;
 using Humans.Camps.Contracts;
+using Humans.CityPlanning.Contracts;
 using Humans.CityPlanning.Services;
 using Humans.Containers.Contracts;
 using Humans.Base.Extensions;
@@ -50,12 +51,13 @@ internal sealed class CityPlanningApiController(
     public async Task<IActionResult> GetState(CancellationToken cancellationToken)
     {
         var settings = await cityPlanningService.GetSettingsAsync(cancellationToken);
+        if (settings is null) return NotFound(); // no active event
         var campPolygons = await cityPlanningService.GetCampPolygonsAsync(settings.Year, cancellationToken);
         var seasonsWithout = await cityPlanningService.GetCampSeasonsWithoutCampPolygonAsync(settings.Year, cancellationToken);
 
         return Ok(new
         {
-            isPlacementOpen = settings.IsPlacementOpen,
+            placementState = settings.PlacementState.ToString(),
             limitZoneGeoJson = settings.LimitZoneGeoJson,
             officialZonesGeoJson = settings.OfficialZonesGeoJson,
             campPolygons,
@@ -180,8 +182,8 @@ internal sealed class CityPlanningApiController(
             return Forbid();
         }
 
-        var settings = await cityPlanningService.GetSettingsAsync(cancellationToken);
-        var exportYear = year ?? settings.Year;
+        if ((year ?? (await cityPlanningService.GetSettingsAsync(cancellationToken))?.Year) is not { } exportYear)
+            return NotFound(); // no year given and no active event
         var geoJson = await cityPlanningService.ExportAsGeoJsonAsync(exportYear, cancellationToken);
 
         return Content(geoJson, "application/geo+json");
@@ -191,23 +193,20 @@ internal sealed class CityPlanningApiController(
     [HttpGet("containers/{year:int}")]
     public async Task<IActionResult> GetContainers(int year, CancellationToken cancellationToken)
     {
-        var userId = CurrentUserId();
-        var isMapAdmin = await IsMapAdminAsync();
-        var userCampId = await FindUserLeadCampIdAsync(userId, year, cancellationToken);
-        // Settings only for a year the caller leads a camp in: reading them creates the year's row.
-        var placementOpen = userCampId.HasValue &&
-            (await cityPlanningService.GetSettingsAsync(cancellationToken, year)).IsContainerPlacementOpen;
-
         var containers = await containerService.GetAllAsync(cancellationToken);
         var placements = await containerService.GetPlacementsByYearAsync(year, cancellationToken);
         var placementByContainerId = placements.ToDictionary(p => p.ContainerId, p => p);
         var camps = await campService.GetCampsForYearAsync(year, cancellationToken);
         var campNameById = camps.ToDictionary(c => c.Id, c => c.Seasons.First(s => s.Year == year).Name);
 
-        var result = containers.Select(c =>
+        var result = new List<ContainerWithPlacementApiDto>(containers.Count);
+        foreach (var c in containers)
         {
             placementByContainerId.TryGetValue(c.Id, out var placement);
-            return new ContainerWithPlacementApiDto(
+            // canEdit is the same Place rule the placement writes enforce.
+            var canEdit = (await authorizationService.AuthorizeAsync(
+                User, ContainerAuthorizationTarget.For(c, year), ContainerOperationRequirement.Place)).Succeeded;
+            result.Add(new ContainerWithPlacementApiDto(
                 c.Id,
                 c.Name,
                 c.Description,
@@ -217,8 +216,8 @@ internal sealed class CityPlanningApiController(
                 placement?.PlacementNotes,
                 placement?.PlacementImageUrl,
                 placement?.PlacementImageFileName,
-                isMapAdmin || (placementOpen && c.CampId == userCampId));
-        });
+                canEdit));
+        }
 
         return Ok(result);
     }

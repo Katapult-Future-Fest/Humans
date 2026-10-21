@@ -1,7 +1,7 @@
+using Humans.Email.Contracts;
 using Xunit;
 using AwesomeAssertions;
 using Humans.Email.Services;
-using Humans.Users.Contracts;
 using Microsoft.Extensions.Localization;
 using Microsoft.Extensions.Logging.Abstractions;
 using NSubstitute;
@@ -39,6 +39,18 @@ public sealed class EmailMessageFactoryTests
 
         msg.ReplyTo.Should().BeNull();
         msg.HtmlBody.Should().Contain("Email_FacilitatedMessage_NoContactInfo");
+    }
+
+    [HumansTheory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void FacilitatedMessage_WithReplyTo_RoutesRepliesThereWhateverTheContactChoice(bool includeContactInfo)
+    {
+        var msg = _factory.FacilitatedMessage(
+            "rcpt@x.com", "Rcpt", "Sender", "Hi", includeContactInfo, senderEmail: "sender@x.com", "en",
+            replyTo: "team@nobodies.team");
+
+        msg.ReplyTo.Should().Be("team@nobodies.team");
     }
 
     [HumansFact]

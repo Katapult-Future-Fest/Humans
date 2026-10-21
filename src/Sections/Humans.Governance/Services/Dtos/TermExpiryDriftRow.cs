@@ -1,4 +1,4 @@
-using Humans.Users.Contracts;
+using Humans.Governance.Contracts;
 using NodaTime;
 
 namespace Humans.Governance.Services.Dtos;

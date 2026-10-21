@@ -19,7 +19,7 @@
 
 ## Business Context
 
-Two new coordinator roles add structured safety and facilitation gates to the onboarding pipeline. The **Consent Coordinator** performs safety checks on new humans before they gain Volunteer access. The **Volunteer Coordinator** serves as a facilitation contact for onboarding humans and can assist with the review process. Both roles authorize the onboarding-review tools after the user has passed the `UserState == Active` access gate.
+Two new coordinator roles add structured safety and facilitation gates to the onboarding pipeline. The **Consent Coordinator** performs safety checks on new humans; the review is an audit annotation and does not gate Volunteer access. The **Volunteer Coordinator** serves as a facilitation contact for onboarding humans and can assist with the review process. Both roles authorize the onboarding-review tools after the user has passed the `UserState == Active` access gate.
 
 The consent check is purely a **Volunteer-level safety gate**. It is independent of tier applications — it does not evaluate whether someone should be a Colaborador or Asociado.
 
@@ -63,7 +63,7 @@ These roles complement the existing Board and Admin roles. Coordinators handle d
 
 **As a** Consent Coordinator
 **I want to** review new humans who have completed their profile and consents
-**So that** I can perform safety checks before they gain Volunteer access
+**So that** I can perform safety checks on them (an audit annotation; Volunteer admission does not wait on it)
 
 **Acceptance Criteria:**
 - See queue of humans with `ConsentCheckStatus = Pending`
@@ -125,7 +125,7 @@ With action-level restrictions:
 - **Vote on tier applications**: Board only (separate Board Voting dashboard)
 
 ### Role Assignment Authorization
-Role management lives on `UsersAdminController.AddRole`/`EndRole` and is enforced by the resource-based `RoleAssignmentAuthorizationHandler` (`RoleAssignmentOperationRequirement.Manage`), not a `CanManageRole()` method:
+Role management lives on `RoleAssignmentsController.AddRole`/`EndRole` (`Humans.Auth`) and is enforced by the resource-based `RoleAssignmentAuthorizationHandler` (`RoleAssignmentOperationRequirement.Manage`), not a `CanManageRole()` method:
 - **Admin** can assign any role
 - **Board** (or HumanAdmin) can assign any role in `RoleNames.BoardManageableRoles`, which includes ConsentCoordinator and VolunteerCoordinator (Admin is not in that set)
 

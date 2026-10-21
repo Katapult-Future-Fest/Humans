@@ -1,6 +1,7 @@
 using System.Globalization;
 using Humans.Base.Interfaces;
 using Humans.Settings.Contracts;
+using Humans.Tickets.Contracts;
 using Humans.Users.Contracts;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -18,25 +19,29 @@ internal sealed class SectionAdminTiles : ISectionAdminTiles
 
     private static async ValueTask<AdminTileValue?> TotalAsync(IServiceProvider sp, CancellationToken ct)
     {
-        var count = (await Snapshot(sp, ct)).Count;
+        var count = (await SnapshotAsync(sp, ct)).Count;
         return new AdminTileValue(count.ToString(CultureInfo.CurrentCulture), Summary: $"{count} users");
     }
 
     private static async ValueTask<AdminTileValue?> ProfilesAsync(IServiceProvider sp, CancellationToken ct)
     {
-        var count = (await Snapshot(sp, ct)).Count(u => u.IsActive);
+        var count = (await SnapshotAsync(sp, ct)).Count(u => u.IsActive);
         return new AdminTileValue(count.ToString(CultureInfo.CurrentCulture), Summary: $"{count} with profile");
     }
 
     private static async ValueTask<AdminTileValue?> TicketHoldersAsync(IServiceProvider sp, CancellationToken ct)
     {
         var activeEvent = await sp.GetRequiredService<ISettingsService>().GetActiveEventSettingsAsync(ct);
-        var count = activeEvent is { Year: > 0 }
-            ? (await Snapshot(sp, ct)).Count(u => u.HasTicketForYear(activeEvent.Year))
-            : 0;
+        var count = 0;
+        if (activeEvent is { Year: > 0 })
+        {
+            var living = (await SnapshotAsync(sp, ct)).Select(u => u.Id).ToHashSet();
+            count = (await sp.GetRequiredService<ITicketService>().GetAllParticipationsAsync(ct))
+                .Count(p => p.Year == activeEvent.Year && p.HasTicket && living.Contains(p.UserId));
+        }
         return new AdminTileValue(count.ToString(CultureInfo.CurrentCulture), Summary: $"{count} with ticket");
     }
 
-    private static async Task<IReadOnlyCollection<UserInfo>> Snapshot(IServiceProvider sp, CancellationToken ct) =>
+    private static async Task<IReadOnlyCollection<UserInfo>> SnapshotAsync(IServiceProvider sp, CancellationToken ct) =>
         await sp.GetRequiredService<IUserService>().GetAllUserInfosAsync(ct);
 }

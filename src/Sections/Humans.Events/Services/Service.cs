@@ -176,8 +176,11 @@ internal sealed class EventService(
         return events.Select(ToEventInfo).ToList();
     }
 
-    public Task<Event?> GetUserEventAsync(Guid eventId, Guid userId, CancellationToken ct = default)
-        => repo.GetUserEventAsync(eventId, userId, ct);
+    public async Task<EventInfo?> GetUserEventAsync(Guid eventId, Guid userId, CancellationToken ct = default)
+    {
+        var guideEvent = await repo.GetUserEventAsync(eventId, userId, ct);
+        return guideEvent is null ? null : ToEventInfo(guideEvent);
+    }
 
     public async Task<IReadOnlyList<EventInfo>> GetCampSubmissionsAsync(Guid campId, CancellationToken ct = default)
     {
@@ -185,8 +188,11 @@ internal sealed class EventService(
         return events.Select(ToEventInfo).ToList();
     }
 
-    public Task<Event?> GetCampEventAsync(Guid eventId, Guid campId, CancellationToken ct = default)
-        => repo.GetCampEventAsync(eventId, campId, ct);
+    public async Task<EventInfo?> GetCampEventAsync(Guid eventId, Guid campId, CancellationToken ct = default)
+    {
+        var guideEvent = await repo.GetCampEventAsync(eventId, campId, ct);
+        return guideEvent is null ? null : ToEventInfo(guideEvent);
+    }
 
     public async Task<CampSubmissionsSummary> GetCampSubmissionsSummaryAsync(Guid campId, CancellationToken ct = default)
     {
@@ -200,6 +206,9 @@ internal sealed class EventService(
 
     public async Task SubmitEventAsync(Event guideEvent, string? lifecycleActionUrl = null, CancellationToken ct = default)
     {
+        await EnsureSubmissionWindowOpenAsync(ct);
+        await EnsureValidRecurrenceDaysAsync(guideEvent.IsRecurring, guideEvent.RecurrenceDays, ct);
+        guideEvent.Submit(clock);
         await repo.AddEventAsync(guideEvent, ct);
 
         // Submission-confirmation email is part of the submit workflow. A null
@@ -246,20 +255,28 @@ internal sealed class EventService(
         }
     }
 
-    public Task UpdateAndResubmitAsync(Event guideEvent, CancellationToken ct = default)
+    public async Task UpdateAndResubmitAsync(Guid eventId, EventEdit edit, CancellationToken ct = default)
     {
+        await EnsureValidRecurrenceDaysAsync(edit.IsRecurring, edit.RecurrenceDays, ct);
+        var guideEvent = await LoadEventAsync(eventId, ct);
+        ApplyEdit(guideEvent, edit);
         guideEvent.Resubmit(clock);
-        return repo.SaveEventAsync(guideEvent, ct);
+        await repo.SaveEventAsync(guideEvent, ct);
     }
 
-    public Task WithdrawEventAsync(Event guideEvent, CancellationToken ct = default)
+    public async Task WithdrawEventAsync(Guid eventId, CancellationToken ct = default)
     {
+        var guideEvent = await LoadEventAsync(eventId, ct);
         guideEvent.Withdraw(clock);
-        return repo.SaveEventAsync(guideEvent, ct);
+        await repo.SaveEventAsync(guideEvent, ct);
     }
 
-    public Task ModeratorWithdrawAsync(Event guideEvent, Guid actorUserId, CancellationToken ct = default)
+    public async Task<bool> ModeratorWithdrawAsync(Guid eventId, Guid actorUserId, CancellationToken ct = default)
     {
+        var guideEvent = await LoadEventAsync(eventId, ct);
+        // A moderator may withdraw whatever the submitter could.
+        if (!guideEvent.CanBeWithdrawnBySubmitter)
+            return false;
         guideEvent.Withdraw(clock);
 
         var action = new EventModerationAction
@@ -271,11 +288,15 @@ internal sealed class EventService(
             CreatedAt = guideEvent.LastUpdatedAt
         };
 
-        return repo.SaveEventAndModerationActionAsync(guideEvent, action, ct);
+        await repo.SaveEventAndModerationActionAsync(guideEvent, action, ct);
+        return true;
     }
 
-    public Task AdminUpdateAsync(Event guideEvent, Guid actorUserId, string? note, CancellationToken ct = default)
+    public async Task AdminUpdateAsync(Guid eventId, EventEdit edit, Guid actorUserId, string? note, CancellationToken ct = default)
     {
+        await EnsureValidRecurrenceDaysAsync(edit.IsRecurring, edit.RecurrenceDays, ct);
+        var guideEvent = await LoadEventAsync(eventId, ct);
+        ApplyEdit(guideEvent, edit);
         var now = clock.GetCurrentInstant();
         guideEvent.LastUpdatedAt = now; // Status deliberately untouched — admin edit never re-queues.
 
@@ -289,15 +310,62 @@ internal sealed class EventService(
             CreatedAt = now
         };
 
-        return repo.SaveEventAndModerationActionAsync(guideEvent, action, ct);
+        await repo.SaveEventAndModerationActionAsync(guideEvent, action, ct);
     }
 
-    public Task<BulkImportResult> BulkImportAsync(
+    // Submissions are accepted only inside the guide's submission window.
+    private async Task EnsureSubmissionWindowOpenAsync(CancellationToken ct)
+    {
+        var settings = await repo.GetGuideSettingsAsync(ct);
+        if (settings is null || !settings.IsSubmissionOpenAt(clock.GetCurrentInstant()))
+            throw new InvalidOperationException("The event submission window is closed.");
+    }
+
+    // A recurring event may only repeat on day offsets inside the configured event calendar.
+    private async Task EnsureValidRecurrenceDaysAsync(bool isRecurring, string? recurrenceDays, CancellationToken ct)
+    {
+        if (!isRecurring) return;
+        var settings = await repo.GetGuideSettingsAsync(ct);
+        var eventSettings = settings is null ? null : await settingsService.GetEventSettingsByIdAsync(settings.EventSettingsId, ct);
+        if (eventSettings is null || !EventRecurrenceDays.HasOnlyEventOffsets(recurrenceDays, eventSettings.EventEndOffset))
+            throw new InvalidOperationException("Recurrence days must be day offsets inside the event calendar.");
+    }
+
+    private async Task<Event> LoadEventAsync(Guid eventId, CancellationToken ct) =>
+        await repo.GetEventForModerationAsync(eventId, ct)
+            ?? throw new InvalidOperationException($"Event {eventId} not found.");
+
+    // The event's own CampId — not the caller — decides which field set applies:
+    // camp events carry a priority rank, individual events a shared venue.
+    private static void ApplyEdit(Event guideEvent, EventEdit edit)
+    {
+        if (guideEvent.CampId.HasValue)
+        {
+            guideEvent.ApplyBarrioEdit(
+                edit.CategoryId, edit.Title, edit.Description, edit.StartAt, edit.DurationMinutes,
+                edit.LocationNote, edit.Host, edit.IsRecurring, edit.RecurrenceDays, edit.PriorityRank);
+        }
+        else
+        {
+            guideEvent.ApplyIndividualEdit(
+                edit.CategoryId,
+                edit.VenueId is { } venueId && venueId != Guid.Empty
+                    ? venueId
+                    : throw new InvalidOperationException($"Individual event {guideEvent.Id} edit requires a venue."),
+                edit.Title, edit.Description, edit.StartAt, edit.DurationMinutes,
+                edit.LocationNote, edit.Host, edit.IsRecurring, edit.RecurrenceDays);
+        }
+    }
+
+    public async Task<BulkImportResult> BulkImportAsync(
         Guid campId, Guid submitterUserId, IReadOnlyList<BulkCsvRow> rows,
         LocalDate gateOpeningDate, int eventEndOffset, DateTimeZone timeZone,
-        CancellationToken ct = default) =>
-        new EventBulkImporter(repo, clock, localizer).ImportAsync(
+        CancellationToken ct = default)
+    {
+        await EnsureSubmissionWindowOpenAsync(ct);
+        return await new EventBulkImporter(repo, clock, localizer).ImportAsync(
             campId, submitterUserId, rows, gateOpeningDate, eventEndOffset, timeZone, ct);
+    }
 
     public async Task<byte[]> BuildBulkUploadTemplateAsync(Guid campId, string campName, CancellationToken ct = default)
     {
@@ -400,18 +468,28 @@ internal sealed class EventService(
         return events.Select(ToEventInfo).ToList();
     }
 
-    public Task<Event?> GetEventForModerationAsync(Guid eventId, CancellationToken ct = default)
-        => repo.GetEventForModerationAsync(eventId, ct);
+    public async Task<EventInfo?> GetEventForModerationAsync(Guid eventId, CancellationToken ct = default)
+    {
+        var guideEvent = await repo.GetEventWithDetailsAsync(eventId, ct);
+        return guideEvent is null ? null : ToEventInfo(guideEvent);
+    }
 
     public Task<IReadOnlyList<CampEventOverlap>> GetCampEventsForOverlapAsync(CancellationToken ct = default)
         => repo.GetActiveCampEventsAsync(ct);
 
-    public async Task ApplyModerationAsync(
+    public async Task<ModerationOutcome> ApplyModerationAsync(
         Guid eventId, Guid actorUserId, EventModerationActionType actionType, string? reason,
         string? submitterEditUrl = null, CancellationToken ct = default)
     {
+        if (actionType is EventModerationActionType.Rejected or EventModerationActionType.ResubmitRequested
+            && string.IsNullOrWhiteSpace(reason))
+            return ModerationOutcome.ReasonRequired;
+
         var guideEvent = await repo.GetEventForModerationAsync(eventId, ct)
             ?? throw new InvalidOperationException($"Event {eventId} not found.");
+
+        if (guideEvent.Status is not EventStatus.Pending)
+            return ModerationOutcome.NotPending;
 
         guideEvent.ApplyModerationAction(actionType, clock);
 
@@ -441,6 +519,8 @@ internal sealed class EventService(
             if (lifecycleStatus.HasValue)
                 await SendLifecycleEmailAsync(guideEvent, lifecycleStatus.Value, reason, submitterEditUrl, ct);
         }
+
+        return ModerationOutcome.Applied;
     }
 
     public async Task<IReadOnlyList<EventInfo>> GetAllEventsForDashboardAsync(CancellationToken ct = default)
@@ -743,4 +823,8 @@ internal sealed class EventService(
         await repo.DeleteFavouritesAndPreferenceForUserAsync(userId, ct);
         await repo.ClearSubmitterHostForUserAsync(userId, ct);
     }
+
+    /// <summary>Reached through the decorator's <c>IUserMerge</c>; stays idempotent.</summary>
+    public Task ReassignAsync(Guid mergedFromUserId, Guid mergedToUserId, Guid actorUserId, Instant now, CancellationToken ct) =>
+        repo.ReassignToUserAsync(mergedFromUserId, mergedToUserId, now, ct);
 }

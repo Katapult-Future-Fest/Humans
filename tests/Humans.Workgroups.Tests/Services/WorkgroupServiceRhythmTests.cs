@@ -2,7 +2,6 @@ using AwesomeAssertions;
 using NSubstitute.ExceptionExtensions;
 using Humans.AuditLog.Contracts;
 using Humans.Notifications.Contracts;
-using Humans.Users.Contracts;
 using Humans.Workgroups.Domain;
 using Humans.Workgroups.Services;
 using Humans.Workgroups.Tests.Infrastructure;
@@ -33,7 +32,7 @@ public sealed class WorkgroupServiceRhythmTests : WorkgroupsTestHarness
             await AddMemberAsync(workgroup.Id, survivorId, WorkgroupMemberRole.Coordinator);
         // Users' batched read retains requested keys while resolving their values.
         Users.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(call => (IReadOnlyDictionary<Guid, UserInfo>)call.Arg<IReadOnlyCollection<Guid>>()
+            .Returns(call => call.Arg<IReadOnlyCollection<Guid>>()
                 .ToDictionary(id => id, _ => survivor));
 
         await NewService().RunDailyRhythmAsync(Ct);

@@ -3,7 +3,7 @@
 | Controller | Scope | Roles | Source |
 |---|---|---|---|
 | `ShiftsController` | Class | `[Authorize]` (authenticated) | — |
-| `ShiftsController.ToggleDay` | Action | `[Authorize]` inherited (`[HttpPost("ToggleDay")]`, `[ValidateAntiForgeryToken]`) | — (self-service day-rota toggle; name/dietary gates short-circuit) |
+| `ShiftsController.ToggleDay` | Action | `[Authorize]` inherited (`[HttpPost("ToggleDay")]`, `[ValidateAntiForgeryToken]`) | — (self-service day-rota toggle; the name gate short-circuits) |
 | `ShiftsController.Summary` / `SummaryTeam` / `SummaryRota` | Action | `Admin, NoInfoAdmin, VolunteerCoordinator` OR any team manager/coordinator | `PolicyNames.ShiftDepartmentManager` (read-only Shift Summary by Camp at `/Shifts/Summary`) |
 | `ShiftsController.Settings` (POST; the read side is the `/Settings#shifts` tab) | Action | `Admin` | `PolicyNames.AdminOnly` |
 | `ShiftsController.OrphanSignups` | Action | `Admin` | `PolicyNames.AdminOnly` |
@@ -16,7 +16,7 @@
 | `ShiftWorkloadAdminController` | Class | `Admin, NoInfoAdmin, VolunteerCoordinator` | `PolicyNames.ShiftDashboardAccess` |
 | `VolunteerTrackingController` | Class | `Admin, NoInfoAdmin, VolunteerCoordinator` | `PolicyNames.ShiftDashboardAccess` |
 | `VolunteerTrackingController.SetCampSetup` / `ClearCampSetup` / `SetDayOff` / `ClearDayOff` / `SetAvailabilityDay` / `ClearAvailabilityDay` | Action | `Admin, VolunteerCoordinator` | `PolicyNames.VolunteerTrackingWrite` |
-| `ShiftProfileController` (`[Route("Profile")]`) | Class | `[Authorize]` (authenticated) | — (`Me/ShiftInfo` GET/POST, the self-service shift-info panel embedded on the profile page) |
+| `ShiftProfileController` (`[Route("Shifts")]`) | Class | `[Authorize]` (authenticated) | — (`ShiftInfo` GET/POST, the self-service shift-info panel embedded on the profile page) |
 
 `EarlyEntryRosterController` lives in `Humans.EarlyEntry` — see that section's authorization doc.
 

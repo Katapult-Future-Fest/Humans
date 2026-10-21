@@ -3,7 +3,6 @@ using Humans.Auth.Contracts;
 using Humans.Teams.Data;
 using Humans.Teams.Domain;
 using AwesomeAssertions;
-using Humans.Onboarding.Contracts;
 using Humans.Shifts.Contracts;
 using Humans.Teams.Contracts;
 using Humans.Tickets.Contracts;
@@ -53,10 +52,10 @@ public sealed class ShiftDashboardMetricsTests : ShiftsTestHarness
             AdminAuthorization,
             serviceProvider,
             Cache,
-            Substitute.For<IShiftViewInvalidator>(),
+            new ShiftViewProbe().Cache,
             NewCalendarResolver(),
             Clock,
-            NSubstitute.Substitute.For<Humans.EarlyEntry.Contracts.IEarlyEntryInvalidator>(), Microsoft.Extensions.Logging.Abstractions.NullLogger<ShiftManagementService>.Instance);
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<ShiftManagementService>.Instance);
     }
 
     [HumansFact]
@@ -1104,7 +1103,7 @@ public sealed class ShiftDashboardMetricsTests : ShiftsTestHarness
     // so the test seed helpers (Db.*.Add) drive results end-to-end.
     // ================================================================
 
-    // Only the two-method read surface now: the full ITicketManagement is internal to
+    // Only the ticket-order read surface now: the full ITicketManagement is internal to
     // Humans.Tickets since that section's G5 move, and this fake never needed the other
     // eleven members. Seeds come from the section's own fixture, so the fake returns the
     // rows the dashboard paths read rather than querying a context this project cannot see.
@@ -1117,6 +1116,12 @@ public sealed class ShiftDashboardMetricsTests : ShiftsTestHarness
             throw new NotSupportedException();
 
         public Task<UserTicketHoldings> GetUserTicketHoldingsAsync(Guid userId, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+
+        public Task<IReadOnlyList<EventParticipationInfo>> GetParticipationsAsync(Guid userId, CancellationToken ct = default) =>
+            throw new NotSupportedException();
+
+        public Task<IReadOnlyList<EventParticipationInfo>> GetAllParticipationsAsync(CancellationToken ct = default) =>
             throw new NotSupportedException();
     }
 
@@ -1166,8 +1171,6 @@ public sealed class ShiftDashboardMetricsTests : ShiftsTestHarness
         }
 
         // Members below are unused by the dashboard compute paths under test.
-        public Task<IReadOnlyList<UserParticipationRow>> GetAllParticipationsForYearAsync(int year, CancellationToken ct = default) => throw new NotSupportedException();
-        public Task<IReadOnlyList<OnsiteUserRow>> GetOnsiteUsersAsync(int year, CancellationToken ct = default) => throw new NotSupportedException();
         public Task<UserInfo?> GetByEmailOrAlternateAsync(string email, CancellationToken ct = default) => throw new NotSupportedException();
     }
 

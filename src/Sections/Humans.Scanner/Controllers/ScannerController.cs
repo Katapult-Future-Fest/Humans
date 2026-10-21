@@ -10,7 +10,6 @@ using Humans.Scanner.Models;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using NodaTime;
-using Humans.Users.Contracts;
 
 namespace Humans.Scanner.Controllers;
 
@@ -19,7 +18,6 @@ namespace Humans.Scanner.Controllers;
 [Route("Scanner")]
 internal sealed class ScannerController(
     ITicketService tickets,
-    IUserService users,
     IEarlyEntryService earlyEntry,
     IConsentService consents,
     IICalFeedService calendarFeed,
@@ -62,8 +60,7 @@ internal sealed class ScannerController(
             burnTz = burn is null ? null : DateTimeZoneProviders.Tzdb.GetZoneOrNull(burn.TimeZoneId);
             if (burn is not null)
             {
-                var info = await users.GetUserInfoAsync(userId, ct);
-                checkedInAt = info?.EventParticipations
+                checkedInAt = (await tickets.GetParticipationsAsync(userId, ct))
                     .FirstOrDefault(p => p.Year == burn.Year)?.CheckedInAt;
             }
 

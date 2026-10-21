@@ -1,6 +1,5 @@
 using System.Globalization;
 using System.Resources;
-using Humans.Base.Extensions;
 using Humans.GoogleIntegration.Contracts;
 using Humans.AuditLog.Contracts;
 using Humans.Notifications.Contracts;
@@ -13,8 +12,7 @@ namespace Humans.Camps.Services;
 internal sealed class CampRoleService(
     ICampRepository repo,
     ICampRoleCampAccess campAccess,
-    ICampInfoInvalidator campInfoInvalidator,
-    IUserEmailService userEmailService,
+    IGoogleIntegrationService googleIdentities,
     IUserService userService,
     IAuditLogService auditLog,
     INotificationEmitter notificationEmitter,
@@ -166,10 +164,6 @@ internal sealed class CampRoleService(
             $"Updated camp role definition '{input.Name}'.",
             actorUserId);
 
-        // Name/SortOrder are baked into the cached CampInfo role projection across
-        // every camp that assigns this definition — flush the whole projection.
-        await campInfoInvalidator.InvalidateAllAsync(ct);
-
         return UpdateCampRoleDefinitionResult.Updated(input.Name);
     }
 
@@ -196,10 +190,6 @@ internal sealed class CampRoleService(
             AuditAction.CampRoleDefinitionDeactivated,
             nameof(CampRoleDefinition), id,
             "Deactivated camp role definition.", actorUserId);
-
-        // Deactivated definitions drop from the cached role projection (the fetch
-        // filters DeactivatedAt == null) — flush so the role disappears now.
-        await campInfoInvalidator.InvalidateAllAsync(ct);
         return true;
     }
 
@@ -217,10 +207,6 @@ internal sealed class CampRoleService(
             AuditAction.CampRoleDefinitionReactivated,
             nameof(CampRoleDefinition), id,
             "Reactivated camp role definition.", actorUserId);
-
-        // Reactivated definitions re-enter the cached role projection — flush so the
-        // role reappears now rather than at the next unrelated camp invalidation.
-        await campInfoInvalidator.InvalidateAllAsync(ct);
         return true;
     }
 
@@ -294,8 +280,6 @@ internal sealed class CampRoleService(
             actorUserId,
             relatedEntityId: campMemberId, relatedEntityType: nameof(CampMember));
 
-        await campInfoInvalidator.InvalidateSeasonAsync(campSeasonId, ct);
-
         try
         {
             var culture = CultureInfo.GetCultureInfo("en");
@@ -362,14 +346,11 @@ internal sealed class CampRoleService(
             relatedEntityId: assignment.CampMemberId,
             relatedEntityType: nameof(CampMember));
 
-        await campInfoInvalidator.InvalidateSeasonAsync(assignment.CampSeasonId, ct);
-
         return true;
     }
 
     public async Task<int> RemoveAllForMemberAsync(Guid campMemberId, Guid actorUserId, CancellationToken ct = default)
     {
-        var memberLookup = await campAccess.GetCampMemberStatusAsync(campMemberId, ct);
         var deleted = await repo.DeleteAllForMemberAsync(campMemberId, ct);
         if (deleted > 0)
         {
@@ -378,11 +359,6 @@ internal sealed class CampRoleService(
                 nameof(CampMember), campMemberId,
                 $"Cascade-removed {deleted} role assignment(s) for camp member.",
                 actorUserId);
-
-            if (memberLookup is not null)
-            {
-                await campInfoInvalidator.InvalidateSeasonAsync(memberLookup.CampSeasonId, ct);
-            }
         }
         return deleted;
     }
@@ -524,9 +500,7 @@ internal sealed class CampRoleService(
             .ToDictionary(g => g.Key, g => g.ToList());
 
         var allUserIds = assignments.Select(a => a.CampMember.UserId).Distinct().ToList();
-        var emailsByUserId = allUserIds.Count == 0
-            ? new Dictionary<Guid, IReadOnlyList<UserEmailRowSnapshot>>()
-            : await userEmailService.GetEntitiesByUserIdsAsync(allUserIds, ct);
+        var identitiesByUserId = await googleIdentities.GetWorkspaceIdentitiesAsync(allUserIds, ct);
 
         var rows = seasons
             .Select(s =>
@@ -535,19 +509,8 @@ internal sealed class CampRoleService(
                     ? list.Select(a =>
                     {
                         var userId = a.CampMember.UserId;
-                        string? googleEmail = null;
-                        if (emailsByUserId.TryGetValue(userId, out var emails))
-                        {
-                            googleEmail = emails
-                                .Where(e => e.IsVerified && e.IsGoogle)
-                                .Select(e => e.Email)
-                                .FirstOrDefault()
-                                ?? emails
-                                    .Where(e => e.IsVerified)
-                                    .OrderBy(e => e.Email, StringComparer.OrdinalIgnoreCase)
-                                    .Select(e => e.Email)
-                                    .FirstOrDefault();
-                        }
+                        // The member's Google Workspace identity (GoogleIntegration); null without a verified address.
+                        var googleEmail = identitiesByUserId.TryGetValue(userId, out var identity) ? identity.Email : null;
 
                         return new CampRoleDrillDownAssignee(userId, googleEmail, a.AssignedAt);
                     }).ToList()

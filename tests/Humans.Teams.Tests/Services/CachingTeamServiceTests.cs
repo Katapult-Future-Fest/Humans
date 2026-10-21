@@ -43,8 +43,8 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
 
         var services = new ServiceCollection();
         services.AddSingleton(userService);
-        services.AddSingleton<IUserService>(userService);
-        services.AddSingleton<IRoleAssignmentService>(_roleAssignmentService);
+        services.AddSingleton(userService);
+        services.AddSingleton(_roleAssignmentService);
         services.AddKeyedScoped<ITeamManagementService>(
             CachingTeamService.InnerServiceKey,
             (_, _) => _innerTeamService);
@@ -56,10 +56,62 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         _pages = new TeamPageService(
             _service,
             Substitute.For<Humans.GoogleIntegration.Contracts.ITeamResourceService>(),
-            Substitute.For<Humans.Shifts.Contracts.IShiftManagementService>(),
+            Substitute.For<Humans.Shifts.Contracts.IShiftService>(),
             Substitute.For<Humans.Settings.Contracts.ISettingsService>(),
             userService,
             _roleAssignmentService);
+    }
+
+    [HumansFact]
+    public async Task EraseForUserAsync_ErasesThroughInnerAndEvictsTeamGraph()
+    {
+        var userId = Guid.NewGuid();
+        var teamId = Guid.NewGuid();
+        _innerTeamService.GetTeamsAsync(Arg.Any<CancellationToken>()).Returns(new Dictionary<Guid, TeamInfo>
+        {
+            [teamId] = MakeTeam(teamId, "Kitchen", parentTeamId: null, isActive: true,
+                members: [MakeMember(userId, TeamMemberRole.Member)]),
+        });
+        (await _service.GetUserTeamMembershipsAsync(userId, Xunit.TestContext.Current.CancellationToken))
+            .Should().HaveCount(1);
+        // The inner erase ends the membership in the database.
+        _innerTeamService.GetTeamsAsync(Arg.Any<CancellationToken>()).Returns(new Dictionary<Guid, TeamInfo>
+        {
+            [teamId] = MakeTeam(teamId, "Kitchen", parentTeamId: null, isActive: true),
+        });
+
+        await _service.EraseForUserAsync(userId, Xunit.TestContext.Current.CancellationToken);
+
+        await _innerTeamService.Received(1).EraseForUserAsync(userId, Arg.Any<CancellationToken>());
+        (await _service.GetUserTeamMembershipsAsync(userId, Xunit.TestContext.Current.CancellationToken))
+            .Should().BeEmpty();
+    }
+
+    [HumansFact]
+    public async Task EraseForUserAsync_InnerThrows_StillEvictsTeamGraph()
+    {
+        var userId = Guid.NewGuid();
+        var teamId = Guid.NewGuid();
+        _innerTeamService.GetTeamsAsync(Arg.Any<CancellationToken>()).Returns(new Dictionary<Guid, TeamInfo>
+        {
+            [teamId] = MakeTeam(teamId, "Kitchen", parentTeamId: null, isActive: true,
+                members: [MakeMember(userId, TeamMemberRole.Member)]),
+        });
+        (await _service.GetUserTeamMembershipsAsync(userId, Xunit.TestContext.Current.CancellationToken))
+            .Should().HaveCount(1);
+        // Memberships ended and committed before a later erase step failed.
+        _innerTeamService.GetTeamsAsync(Arg.Any<CancellationToken>()).Returns(new Dictionary<Guid, TeamInfo>
+        {
+            [teamId] = MakeTeam(teamId, "Kitchen", parentTeamId: null, isActive: true),
+        });
+        _innerTeamService.EraseForUserAsync(userId, Arg.Any<CancellationToken>())
+            .Returns(Task.FromException(new InvalidOperationException("boom")));
+
+        var act = () => _service.EraseForUserAsync(userId, Xunit.TestContext.Current.CancellationToken);
+
+        await act.Should().ThrowAsync<InvalidOperationException>();
+        (await _service.GetUserTeamMembershipsAsync(userId, Xunit.TestContext.Current.CancellationToken))
+            .Should().BeEmpty();
     }
 
     [HumansFact]
@@ -82,7 +134,7 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         };
         _innerTeamService.GetTeamsAsync(Arg.Any<CancellationToken>()).Returns(teams);
 
-        var result = await _service.GetEffectiveBudgetCoordinatorTeamIdsAsync(userId, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetEffectiveBudgetCoordinatorTeamIdsAsync(userId, TestContext.Current.CancellationToken);
 
         result.Should().BeEquivalentTo(new[] { deptId, activeChildId });
     }
@@ -101,7 +153,7 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         };
         _innerTeamService.GetTeamsAsync(Arg.Any<CancellationToken>()).Returns(teams);
 
-        var result = await _service.GetEffectiveBudgetCoordinatorTeamIdsAsync(userId, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetEffectiveBudgetCoordinatorTeamIdsAsync(userId, TestContext.Current.CancellationToken);
 
         result.Should().BeEquivalentTo(new[] { deptId });
     }
@@ -123,7 +175,7 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         };
         _innerTeamService.GetTeamsAsync(Arg.Any<CancellationToken>()).Returns(teams);
 
-        var result = await _service.GetEffectiveBudgetCoordinatorTeamIdsAsync(userId, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetEffectiveBudgetCoordinatorTeamIdsAsync(userId, TestContext.Current.CancellationToken);
 
         result.Should().BeEmpty();
     }
@@ -142,7 +194,7 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         };
         _innerTeamService.GetTeamsAsync(Arg.Any<CancellationToken>()).Returns(teams);
 
-        var result = await _service.GetEffectiveBudgetCoordinatorTeamIdsAsync(userId, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetEffectiveBudgetCoordinatorTeamIdsAsync(userId, TestContext.Current.CancellationToken);
 
         result.Should().BeEmpty();
     }
@@ -178,10 +230,10 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
     {
         var team = SeedTeam("Public department");
         team.IsPublicPage = true;
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var first = await _pages.GetTeamDirectoryAsync(null, Xunit.TestContext.Current.CancellationToken);
-        var second = await _pages.GetTeamDirectoryAsync(null, Xunit.TestContext.Current.CancellationToken);
+        var first = await _pages.GetTeamDirectoryAsync(null, TestContext.Current.CancellationToken);
+        var second = await _pages.GetTeamDirectoryAsync(null, TestContext.Current.CancellationToken);
 
         first.IsAuthenticated.Should().BeFalse();
         first.Departments.Should().ContainSingle().Which.Name.Should().Be(team.Name);
@@ -195,9 +247,9 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         var user = SeedUser();
         var inactiveTeam = SeedTeam("Inactive", isActive: false);
         SeedTeamMember(inactiveTeam.Id, user.Id, TeamMemberRole.Coordinator);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.IsUserCoordinatorOfTeamAsync(inactiveTeam.Id, user.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.IsUserCoordinatorOfTeamAsync(inactiveTeam.Id, user.Id, TestContext.Current.CancellationToken);
 
         result.Should().BeFalse();
     }
@@ -210,9 +262,9 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         var child = SeedTeam("Child");
         child.ParentTeamId = inactiveParent.Id;
         SeedTeamMember(inactiveParent.Id, user.Id, TeamMemberRole.Coordinator);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.IsUserCoordinatorOfTeamAsync(child.Id, user.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.IsUserCoordinatorOfTeamAsync(child.Id, user.Id, TestContext.Current.CancellationToken);
 
         result.Should().BeFalse();
     }
@@ -234,9 +286,9 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         });
         var team = SeedTeam("Alpha");
         SeedTeamMember(team.Id, user.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetTeamAsync(team.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetTeamAsync(team.Id, TestContext.Current.CancellationToken);
 
         var member = result!.Members.Should().ContainSingle().Subject;
         member.Email.Should().Be("alice@example.test");
@@ -250,9 +302,9 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         var team2 = SeedTeam("Beta");
         SeedTeamMember(team1.Id, user.Id);
         SeedTeamMember(team2.Id, user.Id, TeamMemberRole.Coordinator);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetUserTeamMembershipsAsync(user.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetUserTeamMembershipsAsync(user.Id, TestContext.Current.CancellationToken);
 
         result.Should().HaveCount(2);
         result.Should().Contain(m => m.TeamId == team1.Id && m.Role == TeamMemberRole.Member);
@@ -266,9 +318,9 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         var team = SeedTeam("Alpha");
         var member = SeedTeamMember(team.Id, user.Id);
         member.LeftAt = Clock.GetCurrentInstant();
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetUserTeamMembershipsAsync(user.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetUserTeamMembershipsAsync(user.Id, TestContext.Current.CancellationToken);
 
         result.Should().BeEmpty();
     }
@@ -281,9 +333,9 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         var child = SeedTeam("Logo");
         child.ParentTeamId = parent.Id;
         SeedTeamMember(child.Id, user.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetUserTeamMembershipsAsync(user.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetUserTeamMembershipsAsync(user.Id, TestContext.Current.CancellationToken);
 
         var membership = result.Should().ContainSingle().Subject;
         membership.TeamSlug.Should().Be("logo");
@@ -296,20 +348,20 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         var user = SeedUser("Alice");
         var team = SeedTeam("Alpha");
         SeedTeamMember(team.Id, user.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         // Warm the cache + inverse index.
-        var before = await _service.GetUserTeamMembershipsAsync(user.Id, Xunit.TestContext.Current.CancellationToken);
+        var before = await _service.GetUserTeamMembershipsAsync(user.Id, TestContext.Current.CancellationToken);
         before.Should().HaveCount(1);
 
         // New membership written outside the decorator: clearing simulates the
         // real path where mutation methods call InvalidateTeamsCache().
         var team2 = SeedTeam("Beta");
         SeedTeamMember(team2.Id, user.Id, TeamMemberRole.Coordinator);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
         _service.InvalidateActiveTeamsCache();
 
-        var after = await _service.GetUserTeamMembershipsAsync(user.Id, Xunit.TestContext.Current.CancellationToken);
+        var after = await _service.GetUserTeamMembershipsAsync(user.Id, TestContext.Current.CancellationToken);
         after.Should().HaveCount(2);
     }
 
@@ -328,13 +380,13 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         SeedTeamMember(t1.Id, bob.Id);
         SeedTeamMember(t2.Id, alice.Id, TeamMemberRole.Coordinator);
         SeedTeamMember(t3.Id, carol.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var aliceTeams = (await _service.GetUserTeamMembershipsAsync(alice.Id, Xunit.TestContext.Current.CancellationToken))
+        var aliceTeams = (await _service.GetUserTeamMembershipsAsync(alice.Id, TestContext.Current.CancellationToken))
             .Select(m => m.TeamId).ToHashSet();
-        var bobTeams = (await _service.GetUserTeamMembershipsAsync(bob.Id, Xunit.TestContext.Current.CancellationToken))
+        var bobTeams = (await _service.GetUserTeamMembershipsAsync(bob.Id, TestContext.Current.CancellationToken))
             .Select(m => m.TeamId).ToHashSet();
-        var carolTeams = (await _service.GetUserTeamMembershipsAsync(carol.Id, Xunit.TestContext.Current.CancellationToken))
+        var carolTeams = (await _service.GetUserTeamMembershipsAsync(carol.Id, TestContext.Current.CancellationToken))
             .Select(m => m.TeamId).ToHashSet();
 
         aliceTeams.Should().BeEquivalentTo([t1.Id, t2.Id]);
@@ -348,17 +400,17 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         var user = SeedUser("Alice");
         var team = SeedTeam("Alpha");
         SeedTeamMember(team.Id, user.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         // First call drives warmup (which uses repository, not inner service).
-        await _service.GetUserTeamMembershipsAsync(user.Id, Xunit.TestContext.Current.CancellationToken);
+        await _service.GetUserTeamMembershipsAsync(user.Id, TestContext.Current.CancellationToken);
 
         // The inner ITeamManagementService is an unconfigured NSubstitute mock; if the
         // warm-cache path served from the index, no method on it is invoked.
         var inner = _serviceProvider.GetRequiredKeyedService<ITeamManagementService>(
             CachingTeamService.InnerServiceKey);
 
-        var second = await _service.GetUserTeamMembershipsAsync(user.Id, Xunit.TestContext.Current.CancellationToken);
+        var second = await _service.GetUserTeamMembershipsAsync(user.Id, TestContext.Current.CancellationToken);
         second.Should().HaveCount(1);
 
         await inner.DidNotReceive().GetUserTeamMembershipsAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>());
@@ -368,9 +420,9 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
     public async Task GetUserTeamsAsync_UnknownUser_ReturnsEmptyWithoutInnerCall()
     {
         SeedTeam("Alpha");
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetUserTeamMembershipsAsync(Guid.NewGuid(), Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetUserTeamMembershipsAsync(Guid.NewGuid(), TestContext.Current.CancellationToken);
 
         result.Should().BeEmpty();
         var inner = _serviceProvider.GetRequiredKeyedService<ITeamManagementService>(
@@ -408,7 +460,7 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
             SeedTeamMember(team.Id, user.Id, TeamMemberRole.Coordinator);
         SeedJoinRequest(publicParent.Id, SeedUser("Public requester").Id);
         SeedJoinRequest(hiddenChild.Id, SeedUser("Private requester").Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         var result = await _pages.GetMyTeamMembershipsAsync(user.Id, TestContext.Current.CancellationToken);
 
@@ -432,9 +484,9 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         SeedTeamMember(systemTeam.Id, user.Id, TeamMemberRole.Coordinator);
         SeedJoinRequest(managedTeam.Id, SeedUser("Requester A").Id);
         SeedJoinRequest(systemTeam.Id, SeedUser("Requester B").Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _pages.GetMyTeamMembershipsAsync(user.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _pages.GetMyTeamMembershipsAsync(user.Id, TestContext.Current.CancellationToken);
 
         result.Should().HaveCount(2);
         result.Single(m => m.TeamId == managedTeam.Id).PendingRequestCount.Should().Be(1);
@@ -453,9 +505,9 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         var team = SeedTeam("Alpha");
         SeedTeamMember(team.Id, user.Id);
         SeedJoinRequest(team.Id, SeedUser("Requester").Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _pages.GetMyTeamMembershipsAsync(user.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _pages.GetMyTeamMembershipsAsync(user.Id, TestContext.Current.CancellationToken);
 
         result.Should().ContainSingle();
         result[0].Role.Should().Be(TeamMemberRole.Member);
@@ -473,9 +525,9 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         SeedJoinRequest(department.Id, SeedUser("Direct Requester").Id);
         SeedJoinRequest(child.Id, SeedUser("Child Requester A").Id);
         SeedJoinRequest(child.Id, SeedUser("Child Requester B").Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _pages.GetMyTeamMembershipsAsync(user.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _pages.GetMyTeamMembershipsAsync(user.Id, TestContext.Current.CancellationToken);
 
         var deptRow = result.Should().ContainSingle(m => m.TeamId == department.Id).Subject;
         deptRow.PendingRequestCount.Should().Be(3);
@@ -496,9 +548,9 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         SeedTeamMember(parent.Id, user.Id, TeamMemberRole.Coordinator);
         SeedTeamMember(child.Id, user.Id);
         SeedJoinRequest(child.Id, SeedUser("Child Requester").Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _pages.GetMyTeamMembershipsAsync(user.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _pages.GetMyTeamMembershipsAsync(user.Id, TestContext.Current.CancellationToken);
 
         var childRow = result.Should().ContainSingle(m => m.TeamId == child.Id).Subject;
         childRow.Role.Should().Be(TeamMemberRole.Member);
@@ -512,9 +564,9 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         var team = SeedTeam("Alpha");
         SeedTeamMember(team.Id, user.Id);
         SeedJoinRequest(team.Id, SeedUser("Requester").Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _pages.GetMyTeamMembershipsAsync(user.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _pages.GetMyTeamMembershipsAsync(user.Id, TestContext.Current.CancellationToken);
 
         result.Should().ContainSingle();
         result[0].PendingRequestCount.Should().Be(0);
@@ -528,9 +580,9 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         var child = SeedTeam("Logo");
         child.ParentTeamId = parent.Id;
         SeedTeamMember(child.Id, user.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _pages.GetMyTeamMembershipsAsync(user.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _pages.GetMyTeamMembershipsAsync(user.Id, TestContext.Current.CancellationToken);
 
         var row = result.Should().ContainSingle().Subject;
         row.TeamName.Should().Be("Comms - Logo");
@@ -543,10 +595,10 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         var team = SeedTeam("Alpha");
         SeedTeamMember(team.Id, user.Id, TeamMemberRole.Coordinator);
         SeedJoinRequest(team.Id, SeedUser("Requester").Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         // The page assembler warms the canonical snapshot through the decorator.
-        var first = await _pages.GetMyTeamMembershipsAsync(user.Id, Xunit.TestContext.Current.CancellationToken);
+        var first = await _pages.GetMyTeamMembershipsAsync(user.Id, TestContext.Current.CancellationToken);
         first.Should().ContainSingle();
         first[0].PendingRequestCount.Should().Be(1);
 
@@ -554,7 +606,7 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
             CachingTeamService.InnerServiceKey);
 
         // A second page read must reuse the warmed snapshot.
-        var second = await _pages.GetMyTeamMembershipsAsync(user.Id, Xunit.TestContext.Current.CancellationToken);
+        var second = await _pages.GetMyTeamMembershipsAsync(user.Id, TestContext.Current.CancellationToken);
         second.Should().ContainSingle();
 
         await inner.Received(1).GetTeamsAsync(Arg.Any<CancellationToken>());
@@ -572,8 +624,8 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
     public async Task JoinLifecycleWrite_InvalidatesCache(string write)
     {
         var team = SeedTeam("Alpha");
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
-        var ct = Xunit.TestContext.Current.CancellationToken;
+        await SaveAllAsync(TestContext.Current.CancellationToken);
+        var ct = TestContext.Current.CancellationToken;
 
         // Warm the cache so we can observe invalidation by counter.
         await _service.GetTeamAsync(team.Id, ct);
@@ -596,7 +648,7 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
     {
         // The inner service reports a post-commit dependency failure as a failed
         // result, so a failure cannot prove the cached team is unchanged.
-        var ct = Xunit.TestContext.Current.CancellationToken;
+        var ct = TestContext.Current.CancellationToken;
         var team = SeedTeam("Alpha");
         await SaveAllAsync(ct);
         await _service.GetTeamAsync(team.Id, ct);
@@ -617,7 +669,7 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
     [InlineData(false, true)]
     public async Task FailedMembershipWrite_RebuildsTeamAndUserIndexes(bool joining, bool cancelled)
     {
-        var ct = Xunit.TestContext.Current.CancellationToken;
+        var ct = TestContext.Current.CancellationToken;
         var team = SeedTeam("Alpha");
         var user = SeedUser("Coordinator");
         var member = joining ? null : SeedTeamMember(team.Id, user.Id);
@@ -628,7 +680,7 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         Exception failure = cancelled
             ? new OperationCanceledException(ct)
             : new InvalidOperationException("Post-write dependency failed");
-        async Task PersistThenFail()
+        async Task PersistThenFailAsync()
         {
             if (member is null)
                 SeedTeamMember(team.Id, user.Id, TeamMemberRole.Coordinator);
@@ -642,13 +694,13 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         if (joining)
         {
             _innerTeamService.JoinTeamAsync(team.Id, user.Id, null, ct)
-                .Returns(async _ => { await PersistThenFail(); return default!; });
+                .Returns(async _ => { await PersistThenFailAsync(); return default!; });
             write = () => _service.JoinTeamAsync(team.Id, user.Id, null, ct);
         }
         else
         {
             _innerTeamService.SetMemberRoleAsync(team.Id, user.Id, TeamMemberRole.Coordinator, user.Id, ct)
-                .Returns(_ => PersistThenFail());
+                .Returns(_ => PersistThenFailAsync());
             write = () => _service.SetMemberRoleAsync(team.Id, user.Id, TeamMemberRole.Coordinator, user.Id, ct);
         }
 
@@ -661,7 +713,7 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
     [HumansFact]
     public async Task FailedRevocation_RemovesCachedCoordinatorAccessAndMembership()
     {
-        var ct = Xunit.TestContext.Current.CancellationToken;
+        var ct = TestContext.Current.CancellationToken;
         var team = SeedTeam("Alpha");
         var user = SeedUser("Former coordinator");
         var member = SeedTeamMember(team.Id, user.Id, TeamMemberRole.Coordinator);
@@ -689,9 +741,9 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         var team = SeedTeam("Alpha");
         SeedJoinRequest(team.Id, SeedUser("Requester A").Id);
         SeedJoinRequest(team.Id, SeedUser("Requester B").Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var info = await _service.GetTeamAsync(team.Id, Xunit.TestContext.Current.CancellationToken);
+        var info = await _service.GetTeamAsync(team.Id, TestContext.Current.CancellationToken);
 
         info.Should().NotBeNull();
         info.PendingRequestCount.Should().Be(2);
@@ -704,9 +756,9 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         var hidden = SeedTeam("Kitchenette");
         hidden.IsHidden = true;
         SeedTeam("Gate");
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var results = await _service.SearchAsync("kitchen", int.MaxValue, Xunit.TestContext.Current.CancellationToken);
+        var results = await _service.SearchAsync("kitchen", int.MaxValue, TestContext.Current.CancellationToken);
 
         // Cache-served name match: case-insensitive, hidden teams excluded, non-matches dropped.
         results.Select(r => r.Name).Should().ContainSingle().Which.Should().Be("Kitchen");
@@ -725,10 +777,10 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         // makes that safe: /Teams/{slug} is where the hidden team is actually refused.
         var hidden = SeedTeam("Kitchenette");
         hidden.IsHidden = true;
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         var results = await _service.SearchAsync(
-            hidden.Id.ToString(), int.MaxValue, Xunit.TestContext.Current.CancellationToken);
+            hidden.Id.ToString(), int.MaxValue, TestContext.Current.CancellationToken);
 
         var hit = results.Should().ContainSingle().Subject;
         hit.TeamId.Should().Be(hidden.Id);
@@ -745,9 +797,9 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         SeedTeam("Kitchen");
         SeedTeam("Kitchen Crew");
         SeedTeam("Main Kitchen");
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var results = await _service.SearchAsync("Kitchen", int.MaxValue, Xunit.TestContext.Current.CancellationToken);
+        var results = await _service.SearchAsync("Kitchen", int.MaxValue, TestContext.Current.CancellationToken);
 
         results.Should().BeEquivalentTo(new[]
         {
@@ -766,10 +818,10 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         var viewer = SeedUser("Plain Human");
         var hidden = SeedTeam("Kitchenette");
         hidden.IsHidden = true;
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         var detail = await _pages.GetTeamDetailAsync(
-            hidden.Slug, viewer.Id, Xunit.TestContext.Current.CancellationToken);
+            hidden.Slug, viewer.Id, TestContext.Current.CancellationToken);
 
         detail.Should().BeNull();
     }
@@ -780,10 +832,10 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         var hidden = SeedTeam("Kitchenette");
         hidden.IsHidden = true;
         hidden.IsPublicPage = true;
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         var detail = await _pages.GetTeamDetailAsync(
-            hidden.Slug, userId: null, Xunit.TestContext.Current.CancellationToken);
+            hidden.Slug, userId: null, TestContext.Current.CancellationToken);
 
         detail.Should().BeNull();
     }
@@ -794,14 +846,14 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         var admin = SeedUser("Teams Admin");
         var hidden = SeedTeam("Kitchenette");
         hidden.IsHidden = true;
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
         _roleAssignmentService.IsUserTeamsAdminAsync(admin.Id, Arg.Any<CancellationToken>())
             .Returns(true);
         _innerTeamService.GetPendingRequestsForTeamAsync(hidden.Id, Arg.Any<CancellationToken>())
             .Returns(Task.FromResult<IReadOnlyList<TeamJoinRequestSnapshot>>([]));
 
         var detail = await _pages.GetTeamDetailAsync(
-            hidden.Slug, admin.Id, Xunit.TestContext.Current.CancellationToken);
+            hidden.Slug, admin.Id, TestContext.Current.CancellationToken);
 
         detail.Should().NotBeNull();
         detail.Team.Name.Should().Be("Kitchenette");
@@ -824,7 +876,7 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
     {
         var teams = await TeamsDb.Teams.AsNoTracking()
             .Include(t => t.Members.Where(m => m.LeftAt == null))
-            .ToListAsync(Xunit.TestContext.Current.CancellationToken);
+            .ToListAsync(TestContext.Current.CancellationToken);
         var userIds = teams
             .SelectMany(t => t.Members.Select(m => m.UserId))
             .Distinct()
@@ -834,14 +886,14 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
             : await Db.Users.AsNoTracking()
                 .Include(u => u.UserEmails)
                 .Where(u => userIds.Contains(u.Id))
-                .ToDictionaryAsync(u => u.Id, Xunit.TestContext.Current.CancellationToken);
+                .ToDictionaryAsync(u => u.Id, TestContext.Current.CancellationToken);
         var childIdsByParent = teams
             .Where(t => t.ParentTeamId.HasValue)
             .GroupBy(t => t.ParentTeamId!.Value)
             .ToDictionary(g => g.Key, g => (IReadOnlyList<Guid>)g.Select(t => t.Id).ToList());
         var pendingRows = await TeamsDb.TeamJoinRequests.AsNoTracking()
             .Where(r => r.Status == TeamJoinRequestStatus.Pending)
-            .ToListAsync(Xunit.TestContext.Current.CancellationToken);
+            .ToListAsync(TestContext.Current.CancellationToken);
         var pendingCounts = pendingRows
             .GroupBy(r => r.TeamId)
             .ToDictionary(g => g.Key, g => g.Count());
@@ -874,9 +926,7 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
                             email,
                             user?.ProfilePictureUrl,
                             m.Role,
-                            m.JoinedAt,
-                            user?.UserEmails.FirstOrDefault(e => e.IsGoogle && e.IsVerified)?.GoogleEmailStatus
-                                ?? GoogleEmailStatus.Unknown);
+                            m.JoinedAt);
                     })
                     .ToList(),
                 ParentTeamId: t.ParentTeamId,

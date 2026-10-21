@@ -40,20 +40,15 @@ public sealed class EmailDependencyCycleTests
 
         services.AddSingleton<IMemoryCache>(_ => new MemoryCache(new MemoryCacheOptions()));
 
-        services.AddScoped<IUserInfoInvalidator>(_ => Substitute.For<IUserInfoInvalidator>());
         services.AddScoped<IAuditLogService>(_ => Substitute.For<IAuditLogService>());
         services.AddScoped<INotificationEmitter>(_ => Substitute.For<INotificationEmitter>());
         services.AddScoped<ISystemTeamSync>(_ => Substitute.For<ISystemTeamSync>());
-        services.AddScoped<INavBadgeCacheInvalidator>(_ => Substitute.For<INavBadgeCacheInvalidator>());
-        services.AddScoped<IRoleAssignmentClaimsCacheInvalidator>(_ => Substitute.For<IRoleAssignmentClaimsCacheInvalidator>());
-        services.AddScoped<INotificationMeterCacheInvalidator>(_ => Substitute.For<INotificationMeterCacheInvalidator>());
-        services.AddScoped<IShiftAuthorizationInvalidator>(_ => Substitute.For<IShiftAuthorizationInvalidator>());
         services.AddScoped<IAdminAuthorizationService>(_ => Substitute.For<IAdminAuthorizationService>());
         services.AddScoped<IEmailOutboxRepository>(_ => Substitute.For<IEmailOutboxRepository>());
         services.AddScoped<IEmailBodyComposer>(_ => Substitute.For<IEmailBodyComposer>());
         services.AddScoped<IImmediateOutboxProcessor>(_ => Substitute.For<IImmediateOutboxProcessor>());
         services.AddScoped<IHumansMetrics>(_ => Substitute.For<IHumansMetrics>());
-        services.AddScoped<ICommunicationPreferenceService>(_ => Substitute.For<ICommunicationPreferenceService>());
+        services.AddScoped<ICommunicationPreferenceManagement>(_ => Substitute.For<ICommunicationPreferenceManagement>());
         services.AddScoped<NodaTime.IClock>(_ => Substitute.For<NodaTime.IClock>());
         services.AddScoped<UserManager<User>>(_ =>
             Substitute.For<UserManager<User>>(userStore, null, null, null, null, null, null, null, null));
@@ -61,7 +56,7 @@ public sealed class EmailDependencyCycleTests
         // Users is another section; its concrete UserService and its two repository
         // interfaces are internal to Humans.Users and its own graph is pinned by the
         // section's own tests. Same call as ITeamService / IRoleAssignmentService /
-        // IShiftManagementService below — the subject here is the email chain.
+        // IShiftService below — the subject here is the email chain.
         services.AddScoped<IUserService>(_ => Substitute.For<IUserService>());
 
         // Auth is another section; RoleAssignmentService is internal to Humans.Auth and its
@@ -72,7 +67,7 @@ public sealed class EmailDependencyCycleTests
         // Shifts is another section; its concrete service is internal to Humans.Shifts and
         // its own graph is pinned by the section's own tests. Same call as ITeamService and
         // IRoleAssignmentService below — the subject here is the email chain.
-        services.AddScoped<IShiftManagementService>(_ => Substitute.For<IShiftManagementService>());
+        services.AddScoped<IShiftService>(_ => Substitute.For<IShiftService>());
 
         services.AddScoped<IUserEmailService>(_ => Substitute.For<IUserEmailService>());
 
@@ -120,9 +115,12 @@ public sealed class EmailDependencyCycleTests
         ProjectReferencesOf("Humans.Email").Should().BeSubsetOf(
             [
                 "Humans.AuditLog", "Humans.Base", "Humans.Campaigns", "Humans.Email.Contracts",
-                "Humans.Gdpr", "Humans.Settings", "Humans.Users.Contracts"
+                "Humans.Gdpr", "Humans.Settings", "Humans.Tickets.Contracts", "Humans.Users.Contracts"
             ],
-            because: "Email is a crosscut: it may lose section references, never gain one");
+            because: "Email is a crosscut: it may lose section references, never gain one. "
+                + "Tickets.Contracts (a Base-only leaf) arrived with "
+                + "communication preferences (Users decomposition commit 14): the preferences panel "
+                + "locks the Ticketing row through ITicketService.GetUserTicketHoldingsAsync");
 
     private static IEnumerable<string> ProjectReferencesOf(string projectName)
     {

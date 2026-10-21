@@ -1,7 +1,6 @@
 using Xunit;
 using Humans.Base.Helpers;
 using Humans.Base.Extensions;
-using System.Text;
 // Tests seed TeamMember.User navs directly for DB-roundtrip verification.
 // TeamMember.User is Obsolete per Â§6c and is never populated by production
 // code (nobodies-collective/Humans#979 removed the in-memory stitcher); the
@@ -40,6 +39,7 @@ using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
 using NodaTime;
+using Microsoft.Extensions.DependencyInjection;
 using NSubstitute;
 using RoleAssignmentService = Humans.Auth.Services.RoleAssignmentService;
 using TeamService = Humans.Teams.Services.TeamService;
@@ -55,6 +55,7 @@ public sealed class TeamServiceTests : TeamsTestHarness
     private readonly RoleAssignmentService _roleAssignmentService;
     private readonly ITeamResourceManagement _teamResourceService;
     private readonly IGoogleSyncWrite _googleSyncService = Substitute.For<IGoogleSyncWrite>();
+    private readonly IGoogleIntegrationService _googleIdentities = Substitute.For<IGoogleIntegrationService>();
     private readonly ISystemTeamSync _systemTeamSync = Substitute.For<ISystemTeamSync>();
 
     public TeamServiceTests()
@@ -65,9 +66,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
             AuditLog,
             Notifier,
             Substitute.For<ISystemTeamSync>(),
-            Substitute.For<INavBadgeCacheInvalidator>(),
-            Substitute.For<IRoleAssignmentClaimsCacheInvalidator>(),
-            Substitute.For<IRoleAssignmentCacheInvalidator>(),
+            new CachingRoleAssignmentService(
+                Substitute.For<IServiceScopeFactory>(), Clock,
+                NullLogger<CachingRoleAssignmentService>.Instance),
             Clock,
             NullLogger<RoleAssignmentService>.Instance);
         _teamResourceService = Substitute.For<ITeamResourceManagement>();
@@ -89,9 +90,10 @@ public sealed class TeamServiceTests : TeamsTestHarness
             .With(_systemTeamSync)
             .With(_googleSyncService)
             .With<IGoogleSyncOutboxService>(googleOutboxService)
+            .With(_googleIdentities)
             .With<ITeamResourceService>(_teamResourceService)
             .With(userService)
-            .With<IUserService>(userService)
+            .With(userService)
             .Build();
         var shiftManagementService = new ShiftManagementService(
             new ShiftRepository(ShiftsDbFactory, ShiftsDb, Clock),
@@ -99,28 +101,17 @@ public sealed class TeamServiceTests : TeamsTestHarness
             AdminAuthorization,
             serviceProvider,
             Cache,
-            Substitute.For<IShiftViewInvalidator>(),
+            new CachingShiftViewService(Substitute.For<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(), Microsoft.Extensions.Logging.Abstractions.NullLogger<CachingShiftViewService>.Instance),
             new EventCalendarResolver(NewSettingsServiceBackedByShiftsDb()),
             Clock,
-            NSubstitute.Substitute.For<Humans.EarlyEntry.Contracts.IEarlyEntryInvalidator>(), Microsoft.Extensions.Logging.Abstractions.NullLogger<ShiftManagementService>.Instance);
-
-        // Shift-auth invalidation: production path uses IShiftAuthorizationInvalidator
-        // (backed by ShiftManagementService in DI). In tests we redirect it to the
-        // same IMemoryCache entry so legacy assertions on the ShiftAuthorization
-        // cache key keep working.
-        ShiftAuthInvalidator
-            .When(s => s.Invalidate(Arg.Any<Guid>()))
-            .Do(ci => Cache.Remove(CacheKeys.ShiftAuthorization(ci.Arg<Guid>())));
+            NullLogger<ShiftManagementService>.Instance);
 
         _service = new TeamService(
             new TeamRepository(TeamsDbFactory),
             AuditLog,
             Notifier,
             shiftManagementService,
-            Substitute.For<INotificationMeterCacheInvalidator>(),
-            ShiftAuthInvalidator,
             AdminAuthorization,
-            EarlyEntryInvalidator,
             serviceProvider,
             Clock,
             NullLogger<TeamService>.Instance);
@@ -149,16 +140,16 @@ public sealed class TeamServiceTests : TeamsTestHarness
         SeedTeamMember(currentTeam.Id, survivor.Id);
         var previous = SeedTeamMember(previousTeam.Id, archived.Id, leftAt: Clock.GetCurrentInstant());
         SeedTeamMember(unrelatedTeam.Id, unrelated.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
         TeamsDb.ChangeTracker.Clear();
-        var info = (await _userService.GetUserInfoAsync(survivor.Id, Xunit.TestContext.Current.CancellationToken))!
+        var info = (await _userService.GetUserInfoAsync(survivor.Id, TestContext.Current.CancellationToken))!
             with
         { MergedUserIds = [archived.Id] };
         _userService.GetUserInfoAsync(survivor.Id, Arg.Any<CancellationToken>()).Returns(info);
         _userService.GetUserInfoAsync(archived.Id, Arg.Any<CancellationToken>()).Returns(info);
 
         var slices = await _service.ContributeForUserAsync(
-            requestArchivedId ? archived.Id : survivor.Id, Xunit.TestContext.Current.CancellationToken);
+            requestArchivedId ? archived.Id : survivor.Id, TestContext.Current.CancellationToken);
 
         var rows = System.Text.Json.JsonSerializer.SerializeToElement(slices.Single(s =>
                 string.Equals(s.SectionName, TeamService.TeamMemberships, StringComparison.Ordinal)).Data)
@@ -213,10 +204,10 @@ public sealed class TeamServiceTests : TeamsTestHarness
             RequestedAt = now,
             Message = "Someone else's request"
         });
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
         TeamsDb.ChangeTracker.Clear();
 
-        var slices = await _service.ContributeForUserAsync(user.Id, Xunit.TestContext.Current.CancellationToken);
+        var slices = await _service.ContributeForUserAsync(user.Id, TestContext.Current.CancellationToken);
         var slice = slices.Single(x => string.Equals(x.SectionName, "TeamJoinRequests", StringComparison.Ordinal));
         var exported = System.Text.Json.JsonSerializer.SerializeToElement(slice.Data).EnumerateArray().Single();
         exported.GetProperty("Message").GetString().Should().Be(request.Message);
@@ -230,7 +221,7 @@ public sealed class TeamServiceTests : TeamsTestHarness
     [HumansFact]
     public async Task CreateTeamAsync_ReservedSlug_Throws()
     {
-        var act = () => _service.CreateTeamAsync("Roster", null, requiresApproval: false, cancellationToken: Xunit.TestContext.Current.CancellationToken);
+        var act = () => _service.CreateTeamAsync("Roster", null, requiresApproval: false, cancellationToken: TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*reserved route*");
@@ -240,7 +231,7 @@ public sealed class TeamServiceTests : TeamsTestHarness
     public async Task CreateTeamAsync_ParentNotFound_Throws()
     {
         var act = () => _service.CreateTeamAsync(
-            "Child", null, requiresApproval: false, parentTeamId: Guid.NewGuid(), cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            "Child", null, requiresApproval: false, parentTeamId: Guid.NewGuid(), cancellationToken: TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*not found*");
@@ -250,10 +241,10 @@ public sealed class TeamServiceTests : TeamsTestHarness
     public async Task CreateTeamAsync_ParentIsSystemTeam_Throws()
     {
         var parent = SeedTeam("Volunteers", type: SystemTeamType.Volunteers);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         var act = () => _service.CreateTeamAsync(
-            "Child", null, requiresApproval: false, parentTeamId: parent.Id, cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            "Child", null, requiresApproval: false, parentTeamId: parent.Id, cancellationToken: TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*System teams cannot be parents*");
@@ -265,10 +256,10 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var grandparent = SeedTeam("Department");
         var parent = SeedTeam("SubTeam");
         parent.ParentTeamId = grandparent.Id;
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         var act = () => _service.CreateTeamAsync(
-            "GrandChild", null, requiresApproval: false, parentTeamId: parent.Id, cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            "GrandChild", null, requiresApproval: false, parentTeamId: parent.Id, cancellationToken: TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*already has a parent*");
@@ -283,10 +274,10 @@ public sealed class TeamServiceTests : TeamsTestHarness
             requiresApproval: true,
             parentTeamId: null,
             googleGroupPrefix: "eng",
-            isHidden: true, cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            isHidden: true, cancellationToken: TestContext.Current.CancellationToken);
 
         ClearAllTrackers();
-        var stored = await TeamsDb.Teams.AsNoTracking().SingleAsync(t => t.Id == result.Id, Xunit.TestContext.Current.CancellationToken);
+        var stored = await TeamsDb.Teams.AsNoTracking().SingleAsync(t => t.Id == result.Id, TestContext.Current.CancellationToken);
         stored.Name.Should().Be("Engineering");
         stored.Description.Should().Be("Builds things");
         stored.Slug.Should().Be("engineering");
@@ -304,13 +295,13 @@ public sealed class TeamServiceTests : TeamsTestHarness
     public async Task CreateTeamAsync_ValidParent_PersistsParentId()
     {
         var parent = SeedTeam("Department");
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         var result = await _service.CreateTeamAsync(
-            "SubTeam", null, requiresApproval: false, parentTeamId: parent.Id, cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            "SubTeam", null, requiresApproval: false, parentTeamId: parent.Id, cancellationToken: TestContext.Current.CancellationToken);
 
         ClearAllTrackers();
-        var stored = await TeamsDb.Teams.AsNoTracking().SingleAsync(t => t.Id == result.Id, Xunit.TestContext.Current.CancellationToken);
+        var stored = await TeamsDb.Teams.AsNoTracking().SingleAsync(t => t.Id == result.Id, TestContext.Current.CancellationToken);
         stored.ParentTeamId.Should().Be(parent.Id);
     }
 
@@ -319,7 +310,7 @@ public sealed class TeamServiceTests : TeamsTestHarness
     [InlineData("日本のチーム")]
     public async Task CreateTeamAsync_NonAsciiNamesGetDistinctUsableSlugs(string name)
     {
-        var ct = Xunit.TestContext.Current.CancellationToken;
+        var ct = TestContext.Current.CancellationToken;
         var first = await _service.CreateTeamAsync(name, null, false, cancellationToken: ct);
         var second = await _service.CreateTeamAsync(name, null, false, cancellationToken: ct);
 
@@ -336,7 +327,7 @@ public sealed class TeamServiceTests : TeamsTestHarness
     [HumansFact]
     public async Task CreateTeamAsync_LongNameCollisionsStayWithinTheSlugColumn()
     {
-        var ct = Xunit.TestContext.Current.CancellationToken;
+        var ct = TestContext.Current.CancellationToken;
         var maxLength = TeamsDb.Model.FindEntityType(typeof(Team))!.FindProperty(nameof(Team.Slug))!.GetMaxLength()!.Value;
         var name = new string('a', maxLength - 3) + "-bc";
         var slugs = new HashSet<string>(StringComparer.Ordinal);
@@ -355,7 +346,7 @@ public sealed class TeamServiceTests : TeamsTestHarness
     [InlineData("日本のチーム")]
     public async Task UpdateTeamAsync_NonAsciiRenamePreservesTheUsableSlug(string name)
     {
-        var ct = Xunit.TestContext.Current.CancellationToken;
+        var ct = TestContext.Current.CancellationToken;
         var team = SeedTeam("Original Name");
         await SaveAllAsync(ct);
         var originalSlug = team.Slug;
@@ -364,17 +355,17 @@ public sealed class TeamServiceTests : TeamsTestHarness
 
         var read = await _service.GetTeamBySlugAsync(originalSlug, ct);
         read.Should().NotBeNull();
-        read!.Name.Should().Be(name);
+        read.Name.Should().Be(name);
         read.Slug.Should().Be(originalSlug);
     }
 
     [HumansFact]
     public async Task CreateTeamAsync_SlugCollision_AppendsSuffix()
     {
-        var first = await _service.CreateTeamAsync("Alpha", null, requiresApproval: false, cancellationToken: Xunit.TestContext.Current.CancellationToken);
+        var first = await _service.CreateTeamAsync("Alpha", null, requiresApproval: false, cancellationToken: TestContext.Current.CancellationToken);
         first.Slug.Should().Be("alpha");
 
-        var second = await _service.CreateTeamAsync("Alpha", null, requiresApproval: false, cancellationToken: Xunit.TestContext.Current.CancellationToken);
+        var second = await _service.CreateTeamAsync("Alpha", null, requiresApproval: false, cancellationToken: TestContext.Current.CancellationToken);
 
         second.Slug.Should().Be("alpha-2");
     }
@@ -387,7 +378,7 @@ public sealed class TeamServiceTests : TeamsTestHarness
     public async Task AddSeededMemberAsync_TeamNotFound_Throws()
     {
         var act = () => _service.AddSeededMemberAsync(
-            Guid.NewGuid(), Guid.NewGuid(), TeamMemberRole.Member, Clock.GetCurrentInstant(), Xunit.TestContext.Current.CancellationToken);
+            Guid.NewGuid(), Guid.NewGuid(), TeamMemberRole.Member, Clock.GetCurrentInstant(), TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*not found*");
@@ -398,10 +389,10 @@ public sealed class TeamServiceTests : TeamsTestHarness
     {
         var team = SeedTeam("Volunteers", type: SystemTeamType.Volunteers);
         var user = SeedUser();
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         var act = () => _service.AddSeededMemberAsync(
-            team.Id, user.Id, TeamMemberRole.Member, Clock.GetCurrentInstant(), Xunit.TestContext.Current.CancellationToken);
+            team.Id, user.Id, TeamMemberRole.Member, Clock.GetCurrentInstant(), TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*cannot target system teams*");
@@ -413,10 +404,10 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var team = SeedTeam("Alpha");
         var user = SeedUser();
         SeedTeamMember(team.Id, user.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         var act = () => _service.AddSeededMemberAsync(
-            team.Id, user.Id, TeamMemberRole.Member, Clock.GetCurrentInstant(), Xunit.TestContext.Current.CancellationToken);
+            team.Id, user.Id, TeamMemberRole.Member, Clock.GetCurrentInstant(), TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*already a member*");
@@ -427,15 +418,15 @@ public sealed class TeamServiceTests : TeamsTestHarness
     {
         var team = SeedTeam("Alpha");
         var user = SeedUser();
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
         var joinedAt = Instant.FromUtc(2025, 1, 1, 0, 0);
 
         var result = await _service.AddSeededMemberAsync(
-            team.Id, user.Id, TeamMemberRole.Coordinator, joinedAt, Xunit.TestContext.Current.CancellationToken);
+            team.Id, user.Id, TeamMemberRole.Coordinator, joinedAt, TestContext.Current.CancellationToken);
 
         ClearAllTrackers();
         var stored = await TeamsDb.TeamMembers.AsNoTracking()
-            .SingleAsync(m => m.TeamId == team.Id && m.UserId == user.Id, Xunit.TestContext.Current.CancellationToken);
+            .SingleAsync(m => m.TeamId == team.Id && m.UserId == user.Id, TestContext.Current.CancellationToken);
         stored.Role.Should().Be(TeamMemberRole.Coordinator);
         stored.JoinedAt.Should().Be(joinedAt);
         stored.LeftAt.Should().BeNull();
@@ -452,9 +443,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var user = SeedUser();
         var team = SeedTeam("Alpha");
         SeedTeamMember(team.Id, user.Id, TeamMemberRole.Coordinator);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.IsUserCoordinatorOfTeamAsync(team.Id, user.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.IsUserCoordinatorOfTeamAsync(team.Id, user.Id, TestContext.Current.CancellationToken);
 
         result.Should().BeTrue();
     }
@@ -465,9 +456,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var user = SeedUser();
         var team = SeedTeam("Alpha");
         SeedTeamMember(team.Id, user.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.IsUserCoordinatorOfTeamAsync(team.Id, user.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.IsUserCoordinatorOfTeamAsync(team.Id, user.Id, TestContext.Current.CancellationToken);
 
         result.Should().BeFalse();
     }
@@ -479,9 +470,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var team = SeedTeam("Alpha");
         SeedTeamMember(team.Id, user.Id, TeamMemberRole.Coordinator,
             leftAt: Clock.GetCurrentInstant() - Duration.FromDays(1));
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.IsUserCoordinatorOfTeamAsync(team.Id, user.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.IsUserCoordinatorOfTeamAsync(team.Id, user.Id, TestContext.Current.CancellationToken);
 
         result.Should().BeFalse();
     }
@@ -493,9 +484,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var teamA = SeedTeam("Alpha");
         var teamB = SeedTeam("Beta");
         SeedTeamMember(teamA.Id, user.Id, TeamMemberRole.Coordinator);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.IsUserCoordinatorOfTeamAsync(teamB.Id, user.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.IsUserCoordinatorOfTeamAsync(teamB.Id, user.Id, TestContext.Current.CancellationToken);
 
         result.Should().BeFalse();
     }
@@ -508,9 +499,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var child = SeedTeam("SubTeam");
         child.ParentTeamId = parent.Id;
         SeedTeamMember(parent.Id, user.Id, TeamMemberRole.Coordinator);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.IsUserCoordinatorOfTeamAsync(child.Id, user.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.IsUserCoordinatorOfTeamAsync(child.Id, user.Id, TestContext.Current.CancellationToken);
 
         result.Should().BeTrue();
     }
@@ -523,9 +514,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var child = SeedTeam("SubTeam");
         child.ParentTeamId = parent.Id;
         SeedTeamMember(parent.Id, user.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.IsUserCoordinatorOfTeamAsync(child.Id, user.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.IsUserCoordinatorOfTeamAsync(child.Id, user.Id, TestContext.Current.CancellationToken);
 
         result.Should().BeFalse();
     }
@@ -540,9 +531,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var member = SeedTeamMember(child.Id, user.Id, TeamMemberRole.Coordinator);
         var roleDef = SeedTeamRoleDefinition(child.Id, isManagement: true);
         SeedTeamRoleAssignment(roleDef.Id, member.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.IsUserCoordinatorOfTeamAsync(child.Id, user.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.IsUserCoordinatorOfTeamAsync(child.Id, user.Id, TestContext.Current.CancellationToken);
 
         result.Should().BeTrue();
     }
@@ -559,9 +550,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var member = SeedTeamMember(childA.Id, user.Id, TeamMemberRole.Coordinator);
         var roleDef = SeedTeamRoleDefinition(childA.Id, isManagement: true);
         SeedTeamRoleAssignment(roleDef.Id, member.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.IsUserCoordinatorOfTeamAsync(childB.Id, user.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.IsUserCoordinatorOfTeamAsync(childB.Id, user.Id, TestContext.Current.CancellationToken);
 
         result.Should().BeFalse();
     }
@@ -576,9 +567,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var member = SeedTeamMember(child.Id, user.Id, TeamMemberRole.Coordinator);
         var roleDef = SeedTeamRoleDefinition(child.Id, isManagement: true);
         SeedTeamRoleAssignment(roleDef.Id, member.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.IsUserCoordinatorOfTeamAsync(parent.Id, user.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.IsUserCoordinatorOfTeamAsync(parent.Id, user.Id, TestContext.Current.CancellationToken);
 
         result.Should().BeFalse();
     }
@@ -588,7 +579,7 @@ public sealed class TeamServiceTests : TeamsTestHarness
     {
         var user = SeedUser();
         var team = SeedTeam("Alpha");
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         var result = await _service.UpdateTeamPageContentAsync(
             team.Id,
@@ -598,11 +589,11 @@ public sealed class TeamServiceTests : TeamsTestHarness
             ],
             isPublicPage: true,
             showCoordinatorsOnPublicPage: true,
-            user.Id, cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            user.Id, cancellationToken: TestContext.Current.CancellationToken);
 
         result.Succeeded.Should().BeTrue();
 
-        var stored = await TeamsDb.Teams.AsNoTracking().SingleAsync(t => t.Id == team.Id, Xunit.TestContext.Current.CancellationToken);
+        var stored = await TeamsDb.Teams.AsNoTracking().SingleAsync(t => t.Id == team.Id, TestContext.Current.CancellationToken);
         stored.PageContent.Should().Be("Welcome");
         stored.CallsToAction.Should().ContainSingle()
             .Which.Should().BeEquivalentTo(new CallToAction
@@ -613,6 +604,34 @@ public sealed class TeamServiceTests : TeamsTestHarness
             });
         stored.IsPublicPage.Should().BeTrue();
         stored.ShowCoordinatorsOnPublicPage.Should().BeTrue();
+    }
+
+    [HumansTheory]
+    [InlineData("javascript:alert(1)", false)]
+    [InlineData("java\nscript:alert(1)", false)]
+    [InlineData("data:text/html,hello", false)]
+    [InlineData("file:///etc/passwd", false)]
+    [InlineData("https://example.org/join", true)]
+    [InlineData("mailto:team@example.org", true)]
+    [InlineData("/join", true)]
+    [InlineData("../join#details", true)]
+    public async Task UpdateTeamPageContentAsync_RejectsUnsafeActionUrlsWithoutChangingPage(string url, bool safe)
+    {
+        var team = SeedTeam("Alpha");
+        team.PageContent = "Original";
+        team.CallsToAction = [new CallToAction { Text = "Original", Url = "/original" }];
+        await SaveAllAsync(TestContext.Current.CancellationToken);
+
+        var result = await _service.UpdateTeamPageContentAsync(team.Id, "Changed",
+            [new TeamPageCallToActionInput("Join", url, CallToActionStyle.Primary)], true, false,
+            Guid.NewGuid(), TestContext.Current.CancellationToken);
+
+        result.Succeeded.Should().Be(safe);
+        var stored = await TeamsDb.Teams.AsNoTracking().SingleAsync(t => t.Id == team.Id,
+            TestContext.Current.CancellationToken);
+        stored.PageContent.Should().Be(safe ? "Changed" : "Original");
+        stored.CallsToAction.Should().ContainSingle().Which.Url.Should().Be(safe ? url : "/original");
+        if (!safe) result.ErrorMessage.Should().Contain("URL");
     }
 
     [HumansTheory]
@@ -641,14 +660,13 @@ public sealed class TeamServiceTests : TeamsTestHarness
         }
         var service = new TeamService(
             repo, Substitute.For<IAuditLogService>(), Notifier,
-            Substitute.For<IShiftManagementService>(),
-            Substitute.For<INotificationMeterCacheInvalidator>(), ShiftAuthInvalidator,
-            AdminAuthorization, Substitute.For<IEarlyEntryInvalidator>(),
+            Substitute.For<IShiftService>(),
+            AdminAuthorization,
             new ServiceLocatorBuilder().Build(), Clock, NullLogger<TeamService>.Instance);
 
         var result = await service.UpdateTeamPageContentAsync(
             team.Id, "Welcome", [], true, false, Guid.NewGuid(),
-            Xunit.TestContext.Current.CancellationToken);
+            TestContext.Current.CancellationToken);
 
         result.Succeeded.Should().BeFalse();
         result.ErrorMessage.Should().BeNull();
@@ -662,7 +680,7 @@ public sealed class TeamServiceTests : TeamsTestHarness
     public async Task UpdateTeamPageContentAsync_KnownRefusal_RetainsFeedback(string refusal, string message)
     {
         var team = SeedTeam("Alpha", string.Equals(refusal, "system", StringComparison.Ordinal) ? SystemTeamType.Volunteers : SystemTeamType.None);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
         var actions = refusal switch
         {
             "too-many" => Enumerable.Range(0, 4)
@@ -674,7 +692,7 @@ public sealed class TeamServiceTests : TeamsTestHarness
 
         var result = await _service.UpdateTeamPageContentAsync(
             string.Equals(refusal, "missing", StringComparison.Ordinal) ? Guid.NewGuid() : team.Id,
-            "Welcome", actions, true, false, Guid.NewGuid(), Xunit.TestContext.Current.CancellationToken);
+            "Welcome", actions, true, false, Guid.NewGuid(), TestContext.Current.CancellationToken);
 
         result.Succeeded.Should().BeFalse();
         result.ErrorMessage.Should().Contain(message);
@@ -688,7 +706,7 @@ public sealed class TeamServiceTests : TeamsTestHarness
     public async Task UpdateTeamAsync_TeamNotFound_Refuses()
     {
         var act = () => _service.UpdateTeamAsync(
-            Guid.NewGuid(), "name", null, requiresApproval: false, isActive: true, cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            Guid.NewGuid(), "name", null, requiresApproval: false, isActive: true, cancellationToken: TestContext.Current.CancellationToken);
 
         (await act()).ErrorMessage.Should().Match("*not found*");
     }
@@ -699,7 +717,7 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var team = SeedTeam("Volunteers", type: SystemTeamType.Volunteers);
         team.Description = "old";
         team.RequiresApproval = false;
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
         var originalName = team.Name;
         var originalSlug = team.Slug;
 
@@ -709,10 +727,10 @@ public sealed class TeamServiceTests : TeamsTestHarness
             description: "new",
             requiresApproval: true,
             isActive: false,
-            googleGroupPrefix: "vol-prefix", cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            googleGroupPrefix: "vol-prefix", cancellationToken: TestContext.Current.CancellationToken);
 
         ClearAllTrackers();
-        var stored = await TeamsDb.Teams.AsNoTracking().SingleAsync(t => t.Id == team.Id, Xunit.TestContext.Current.CancellationToken);
+        var stored = await TeamsDb.Teams.AsNoTracking().SingleAsync(t => t.Id == team.Id, TestContext.Current.CancellationToken);
         stored.Description.Should().Be("new");
         stored.GoogleGroupPrefix.Should().Be("vol-prefix");
         // System teams ignore name/requiresApproval/isActive on update
@@ -727,10 +745,10 @@ public sealed class TeamServiceTests : TeamsTestHarness
     public async Task UpdateTeamAsync_ParentIsSelf_Refuses()
     {
         var team = SeedTeam("Alpha");
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         var act = () => _service.UpdateTeamAsync(
-            team.Id, "Alpha", null, false, true, parentTeamId: team.Id, cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            team.Id, "Alpha", null, false, true, parentTeamId: team.Id, cancellationToken: TestContext.Current.CancellationToken);
 
         (await act()).ErrorMessage.Should().Match("*own parent*");
     }
@@ -742,10 +760,10 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var child = SeedTeam("Child");
         child.ParentTeamId = parent.Id;
         var newParent = SeedTeam("NewParent");
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         var act = () => _service.UpdateTeamAsync(
-            parent.Id, "Parent", null, false, true, parentTeamId: newParent.Id, cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            parent.Id, "Parent", null, false, true, parentTeamId: newParent.Id, cancellationToken: TestContext.Current.CancellationToken);
 
         (await act()).ErrorMessage.Should().Match("*sub-teams*");
     }
@@ -754,10 +772,10 @@ public sealed class TeamServiceTests : TeamsTestHarness
     public async Task UpdateTeamAsync_ParentNotFound_Refuses()
     {
         var team = SeedTeam("Alpha");
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         var act = () => _service.UpdateTeamAsync(
-            team.Id, "Alpha", null, false, true, parentTeamId: Guid.NewGuid(), cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            team.Id, "Alpha", null, false, true, parentTeamId: Guid.NewGuid(), cancellationToken: TestContext.Current.CancellationToken);
 
         (await act()).ErrorMessage.Should().Match("*Parent team*not found*");
     }
@@ -767,10 +785,10 @@ public sealed class TeamServiceTests : TeamsTestHarness
     {
         var team = SeedTeam("Alpha");
         var systemParent = SeedTeam("Volunteers", type: SystemTeamType.Volunteers);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         var act = () => _service.UpdateTeamAsync(
-            team.Id, "Alpha", null, false, true, parentTeamId: systemParent.Id, cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            team.Id, "Alpha", null, false, true, parentTeamId: systemParent.Id, cancellationToken: TestContext.Current.CancellationToken);
 
         (await act()).ErrorMessage.Should().Match("*System teams cannot be parents*");
     }
@@ -782,10 +800,10 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var parent = SeedTeam("Parent");
         parent.ParentTeamId = grandparent.Id;
         var team = SeedTeam("Alpha");
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         var act = () => _service.UpdateTeamAsync(
-            team.Id, "Alpha", null, false, true, parentTeamId: parent.Id, cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            team.Id, "Alpha", null, false, true, parentTeamId: parent.Id, cancellationToken: TestContext.Current.CancellationToken);
 
         (await act()).ErrorMessage.Should().Match("*nest more than one level*");
     }
@@ -794,10 +812,10 @@ public sealed class TeamServiceTests : TeamsTestHarness
     public async Task UpdateTeamAsync_InvalidCustomSlug_Refuses()
     {
         var team = SeedTeam("Alpha");
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         var act = () => _service.UpdateTeamAsync(
-            team.Id, "Alpha", null, false, true, customSlug: "!@#$", cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            team.Id, "Alpha", null, false, true, customSlug: "!@#$", cancellationToken: TestContext.Current.CancellationToken);
 
         (await act()).ErrorMessage.Should().Match("*Custom slug is not valid*");
     }
@@ -807,10 +825,10 @@ public sealed class TeamServiceTests : TeamsTestHarness
     {
         SeedTeam("Other Team");
         var team = SeedTeam("Alpha");
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         var act = () => _service.UpdateTeamAsync(
-            team.Id, "Alpha", null, false, true, customSlug: "other-team", cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            team.Id, "Alpha", null, false, true, customSlug: "other-team", cancellationToken: TestContext.Current.CancellationToken);
 
         (await act()).ErrorMessage.Should().Match("*already in use*");
     }
@@ -820,13 +838,13 @@ public sealed class TeamServiceTests : TeamsTestHarness
     {
         var team = SeedTeam("Alpha");
         team.CustomSlug = "previous-custom";
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         await _service.UpdateTeamAsync(
-            team.Id, "Alpha", null, false, true, customSlug: "", cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            team.Id, "Alpha", null, false, true, customSlug: "", cancellationToken: TestContext.Current.CancellationToken);
 
         ClearAllTrackers();
-        var stored = await TeamsDb.Teams.AsNoTracking().SingleAsync(t => t.Id == team.Id, Xunit.TestContext.Current.CancellationToken);
+        var stored = await TeamsDb.Teams.AsNoTracking().SingleAsync(t => t.Id == team.Id, TestContext.Current.CancellationToken);
         stored.CustomSlug.Should().BeNull();
     }
 
@@ -842,7 +860,7 @@ public sealed class TeamServiceTests : TeamsTestHarness
     [InlineData("Tree")]
     public async Task UpdateTeamAsync_ReservedRenameKeepsTheExistingUrl(string name)
     {
-        var ct = Xunit.TestContext.Current.CancellationToken;
+        var ct = TestContext.Current.CancellationToken;
         var team = SeedTeam("Original Name");
         await SaveAllAsync(ct);
         var originalSlug = team.Slug;
@@ -851,7 +869,7 @@ public sealed class TeamServiceTests : TeamsTestHarness
 
         var read = await _service.GetTeamBySlugAsync(originalSlug, ct);
         read.Should().NotBeNull();
-        read!.Name.Should().Be(name);
+        read.Name.Should().Be(name);
         read.Slug.Should().Be(originalSlug);
     }
 
@@ -867,7 +885,7 @@ public sealed class TeamServiceTests : TeamsTestHarness
     [InlineData("Tree")]
     public async Task UpdateTeamAsync_ReservedCustomSlugRefusesTheUpdate(string slug)
     {
-        var ct = Xunit.TestContext.Current.CancellationToken;
+        var ct = TestContext.Current.CancellationToken;
         var team = SeedTeam("Original Name");
         await SaveAllAsync(ct);
         var originalSlug = team.Slug;
@@ -889,13 +907,13 @@ public sealed class TeamServiceTests : TeamsTestHarness
     public async Task UpdateTeamAsync_RenamesTeam_AndRegeneratesSlug()
     {
         var team = SeedTeam("Old Name");
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         await _service.UpdateTeamAsync(
-            team.Id, "Brand New Name", null, false, true, cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            team.Id, "Brand New Name", null, false, true, cancellationToken: TestContext.Current.CancellationToken);
 
         ClearAllTrackers();
-        var stored = await TeamsDb.Teams.AsNoTracking().SingleAsync(t => t.Id == team.Id, Xunit.TestContext.Current.CancellationToken);
+        var stored = await TeamsDb.Teams.AsNoTracking().SingleAsync(t => t.Id == team.Id, TestContext.Current.CancellationToken);
         stored.Name.Should().Be("Brand New Name");
         stored.Slug.Should().Be("brand-new-name");
     }
@@ -905,14 +923,14 @@ public sealed class TeamServiceTests : TeamsTestHarness
     {
         SeedTeam("Conflict");
         var team = SeedTeam("Old Name");
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
         var originalSlug = team.Slug;
 
         await _service.UpdateTeamAsync(
-            team.Id, "Conflict", null, false, true, cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            team.Id, "Conflict", null, false, true, cancellationToken: TestContext.Current.CancellationToken);
 
         ClearAllTrackers();
-        var stored = await TeamsDb.Teams.AsNoTracking().SingleAsync(t => t.Id == team.Id, Xunit.TestContext.Current.CancellationToken);
+        var stored = await TeamsDb.Teams.AsNoTracking().SingleAsync(t => t.Id == team.Id, TestContext.Current.CancellationToken);
         stored.Name.Should().Be("Conflict");
         stored.Slug.Should().Be(originalSlug);
     }
@@ -925,7 +943,7 @@ public sealed class TeamServiceTests : TeamsTestHarness
         team.RequiresApproval = false;
         team.IsActive = true;
         team.IsPublicPage = false;
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         await _service.UpdateTeamAsync(
             team.Id,
@@ -937,10 +955,10 @@ public sealed class TeamServiceTests : TeamsTestHarness
             hasBudget: true,
             isHidden: true,
             isSensitive: true,
-            isPromotedToDirectory: true, cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            isPromotedToDirectory: true, cancellationToken: TestContext.Current.CancellationToken);
 
         ClearAllTrackers();
-        var stored = await TeamsDb.Teams.AsNoTracking().SingleAsync(t => t.Id == team.Id, Xunit.TestContext.Current.CancellationToken);
+        var stored = await TeamsDb.Teams.AsNoTracking().SingleAsync(t => t.Id == team.Id, TestContext.Current.CancellationToken);
         stored.Description.Should().Be("new description");
         stored.RequiresApproval.Should().BeTrue();
         stored.IsActive.Should().BeFalse();
@@ -960,14 +978,14 @@ public sealed class TeamServiceTests : TeamsTestHarness
         team.IsHidden = true;
         team.IsSensitive = true;
         team.IsPromotedToDirectory = true;
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         await _service.UpdateTeamAsync(
             team.Id, "Alpha", null, false, true,
-            hasBudget: null, isHidden: null, isSensitive: null, isPromotedToDirectory: null, cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            hasBudget: null, isHidden: null, isSensitive: null, isPromotedToDirectory: null, cancellationToken: TestContext.Current.CancellationToken);
 
         ClearAllTrackers();
-        var stored = await TeamsDb.Teams.AsNoTracking().SingleAsync(t => t.Id == team.Id, Xunit.TestContext.Current.CancellationToken);
+        var stored = await TeamsDb.Teams.AsNoTracking().SingleAsync(t => t.Id == team.Id, TestContext.Current.CancellationToken);
         stored.HasBudget.Should().BeTrue();
         stored.IsHidden.Should().BeTrue();
         stored.IsSensitive.Should().BeTrue();
@@ -981,36 +999,16 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var team = SeedTeam("Alpha");
         team.IsPublicPage = true;
         team.ShowCoordinatorsOnPublicPage = true;
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         await _service.UpdateTeamAsync(
-            team.Id, "Alpha", null, false, true, parentTeamId: parent.Id, cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            team.Id, "Alpha", null, false, true, parentTeamId: parent.Id, cancellationToken: TestContext.Current.CancellationToken);
 
         ClearAllTrackers();
-        var stored = await TeamsDb.Teams.AsNoTracking().SingleAsync(t => t.Id == team.Id, Xunit.TestContext.Current.CancellationToken);
+        var stored = await TeamsDb.Teams.AsNoTracking().SingleAsync(t => t.Id == team.Id, TestContext.Current.CancellationToken);
         stored.IsPublicPage.Should().BeFalse();
         stored.ShowCoordinatorsOnPublicPage.Should().BeFalse();
         stored.ParentTeamId.Should().Be(parent.Id);
-    }
-
-    [HumansFact]
-    public async Task UpdateTeamAsync_ParentChange_InvalidatesShiftAuthForManagementUsers()
-    {
-        var parentOld = SeedTeam("Old Parent");
-        var parentNew = SeedTeam("New Parent");
-        var team = SeedTeam("Alpha");
-        team.ParentTeamId = parentOld.Id;
-        var manager = SeedUser(displayName: "Manager");
-        var member = SeedTeamMember(team.Id, manager.Id, TeamMemberRole.Coordinator);
-        var roleDef = SeedTeamRoleDefinition(team.Id, isManagement: true);
-        SeedTeamRoleAssignment(roleDef.Id, member.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
-        Cache.Set(CacheKeys.ShiftAuthorization(manager.Id), new[] { team.Id });
-
-        await _service.UpdateTeamAsync(
-            team.Id, "Alpha", null, false, true, parentTeamId: parentNew.Id, cancellationToken: Xunit.TestContext.Current.CancellationToken);
-
-        Cache.TryGetValue(CacheKeys.ShiftAuthorization(manager.Id), out _).Should().BeFalse();
     }
 
     // health.md §4: IsSensitive is written only by a global Admin. The gate is the service's,
@@ -1020,17 +1018,17 @@ public sealed class TeamServiceTests : TeamsTestHarness
     public async Task UpdateTeamAsync_IsSensitiveChangedByNonAdmin_ThrowsAndLeavesFlag()
     {
         var team = SeedTeam("Alpha");
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
         AdminAuthorization.RequireCurrentUserIsAdminAsync(Arg.Any<CancellationToken>())
             .Returns(Task.FromException(new UnauthorizedAccessException("A full Admin role is required.")));
 
         var act = () => _service.UpdateTeamAsync(
             team.Id, "Alpha", null, requiresApproval: false, isActive: true,
-            isSensitive: true, cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            isSensitive: true, cancellationToken: TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<UnauthorizedAccessException>();
         ClearAllTrackers();
-        var stored = await TeamsDb.Teams.AsNoTracking().SingleAsync(t => t.Id == team.Id, Xunit.TestContext.Current.CancellationToken);
+        var stored = await TeamsDb.Teams.AsNoTracking().SingleAsync(t => t.Id == team.Id, TestContext.Current.CancellationToken);
         stored.IsSensitive.Should().BeFalse();
     }
 
@@ -1038,14 +1036,14 @@ public sealed class TeamServiceTests : TeamsTestHarness
     public async Task UpdateTeamAsync_IsSensitiveChangedByAdmin_Writes()
     {
         var team = SeedTeam("Alpha");
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         await _service.UpdateTeamAsync(
             team.Id, "Alpha", null, requiresApproval: false, isActive: true,
-            isSensitive: true, cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            isSensitive: true, cancellationToken: TestContext.Current.CancellationToken);
 
         ClearAllTrackers();
-        var stored = await TeamsDb.Teams.AsNoTracking().SingleAsync(t => t.Id == team.Id, Xunit.TestContext.Current.CancellationToken);
+        var stored = await TeamsDb.Teams.AsNoTracking().SingleAsync(t => t.Id == team.Id, TestContext.Current.CancellationToken);
         stored.IsSensitive.Should().BeTrue();
     }
 
@@ -1054,13 +1052,13 @@ public sealed class TeamServiceTests : TeamsTestHarness
     {
         // The dev fixture seeders on ITeamSeeding pass the flag's current value; a no-op is not a write.
         var team = SeedTeam("Alpha");
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
         AdminAuthorization.RequireCurrentUserIsAdminAsync(Arg.Any<CancellationToken>())
             .Returns(Task.FromException(new UnauthorizedAccessException("A full Admin role is required.")));
 
         await _service.UpdateTeamAsync(
             team.Id, "Alpha", null, requiresApproval: false, isActive: true,
-            isSensitive: false, cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            isSensitive: false, cancellationToken: TestContext.Current.CancellationToken);
 
         await AdminAuthorization.DidNotReceive().RequireCurrentUserIsAdminAsync(Arg.Any<CancellationToken>());
     }
@@ -1077,12 +1075,12 @@ public sealed class TeamServiceTests : TeamsTestHarness
 
         var result = await _service.CreateTeamWithGoogleGroupAsync(
             "Gate Crew", null, requiresApproval: false, googleGroupPrefix: "gate-crew",
-            cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            cancellationToken: TestContext.Current.CancellationToken);
 
         result.GroupWarning.Should().Contain("Google Group setup failed")
             .And.Contain("prefix has been cleared");
         ClearAllTrackers();
-        var reloaded = await TeamsDb.Teams.SingleAsync(t => t.Id == result.Team.Id, Xunit.TestContext.Current.CancellationToken);
+        var reloaded = await TeamsDb.Teams.SingleAsync(t => t.Id == result.Team.Id, TestContext.Current.CancellationToken);
         reloaded.GoogleGroupPrefix.Should().BeNull();
     }
 
@@ -1091,7 +1089,7 @@ public sealed class TeamServiceTests : TeamsTestHarness
     {
         var result = await _service.CreateTeamWithGoogleGroupAsync(
             "Quiet Crew", null, requiresApproval: false,
-            cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            cancellationToken: TestContext.Current.CancellationToken);
 
         result.GroupWarning.Should().BeNull();
         await _googleSyncService.DidNotReceive().EnsureTeamGroupAsync(
@@ -1102,13 +1100,13 @@ public sealed class TeamServiceTests : TeamsTestHarness
     public async Task UpdateTeamWithGoogleGroup_GroupNeedsConfirmation_ReturnsWarning()
     {
         var team = SeedTeam("Alpha");
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
         _googleSyncService.EnsureTeamGroupAsync(team.Id, cancellationToken: Arg.Any<CancellationToken>())
             .Returns(GroupLinkResult.NeedsConfirmation("Group was deactivated.", Guid.NewGuid()));
 
         var result = await _service.UpdateTeamWithGoogleGroupAsync(
             team.Id, team.Name, team.Description, team.RequiresApproval, team.IsActive,
-            cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            cancellationToken: TestContext.Current.CancellationToken);
 
         result.GroupWarning.Should().Be("Group was deactivated.");
     }
@@ -1117,13 +1115,13 @@ public sealed class TeamServiceTests : TeamsTestHarness
     public async Task UpdateTeamWithGoogleGroup_GroupOk_NoWarning()
     {
         var team = SeedTeam("Alpha");
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
         _googleSyncService.EnsureTeamGroupAsync(team.Id, cancellationToken: Arg.Any<CancellationToken>())
             .Returns(GroupLinkResult.Ok());
 
         var result = await _service.UpdateTeamWithGoogleGroupAsync(
             team.Id, team.Name, team.Description, team.RequiresApproval, team.IsActive,
-            cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            cancellationToken: TestContext.Current.CancellationToken);
 
         result.GroupWarning.Should().BeNull();
     }
@@ -1137,15 +1135,15 @@ public sealed class TeamServiceTests : TeamsTestHarness
     {
         var user = SeedUser();
         var team = SeedTeam("Gate", requiresApproval: true);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var outcome = await _service.JoinTeamAsync(team.Id, user.Id, "Pick me", Xunit.TestContext.Current.CancellationToken);
+        var outcome = await _service.JoinTeamAsync(team.Id, user.Id, "Pick me", TestContext.Current.CancellationToken);
 
         outcome.ErrorKey.Should().BeNull();
         outcome.Outcome.Should().Be(TeamJoinOutcome.RequestSubmitted);
-        (await TeamsDb.TeamJoinRequests.SingleAsync(Xunit.TestContext.Current.CancellationToken))
+        (await TeamsDb.TeamJoinRequests.SingleAsync(TestContext.Current.CancellationToken))
             .UserId.Should().Be(user.Id);
-        (await TeamsDb.TeamMembers.AnyAsync(Xunit.TestContext.Current.CancellationToken)).Should().BeFalse();
+        (await TeamsDb.TeamMembers.AnyAsync(TestContext.Current.CancellationToken)).Should().BeFalse();
     }
 
     [HumansFact]
@@ -1174,8 +1172,8 @@ public sealed class TeamServiceTests : TeamsTestHarness
         }
         var provider = new ServiceLocatorBuilder().Build();
         TeamService NewService() => new(repository, AuditLog, Notifier,
-            Substitute.For<IShiftManagementService>(), Substitute.For<INotificationMeterCacheInvalidator>(),
-            ShiftAuthInvalidator, AdminAuthorization, EarlyEntryInvalidator, provider, Clock,
+            Substitute.For<IShiftService>(),
+            AdminAuthorization, provider, Clock,
             NullLogger<TeamService>.Instance);
         var userId = Guid.NewGuid();
         var first = NewService().JoinTeamAsync(team.Id, userId, "Pick me", ct);
@@ -1228,15 +1226,15 @@ public sealed class TeamServiceTests : TeamsTestHarness
     {
         var user = SeedUser();
         var team = SeedTeam("Open Crew", requiresApproval: false);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var outcome = await _service.JoinTeamAsync(team.Id, user.Id, message: null, Xunit.TestContext.Current.CancellationToken);
+        var outcome = await _service.JoinTeamAsync(team.Id, user.Id, message: null, TestContext.Current.CancellationToken);
 
         outcome.ErrorKey.Should().BeNull();
         outcome.Outcome.Should().Be(TeamJoinOutcome.Joined);
-        (await TeamsDb.TeamMembers.SingleAsync(Xunit.TestContext.Current.CancellationToken))
+        (await TeamsDb.TeamMembers.SingleAsync(TestContext.Current.CancellationToken))
             .UserId.Should().Be(user.Id);
-        (await TeamsDb.TeamJoinRequests.AnyAsync(Xunit.TestContext.Current.CancellationToken)).Should().BeFalse();
+        (await TeamsDb.TeamJoinRequests.AnyAsync(TestContext.Current.CancellationToken)).Should().BeFalse();
     }
 
     // ==========================================================================
@@ -1244,36 +1242,36 @@ public sealed class TeamServiceTests : TeamsTestHarness
     // ==========================================================================
 
     [HumansTheory]
-    [Xunit.InlineData(false)]
-    [Xunit.InlineData(true)]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task JoinTeamAsync_DeactivatedTeamCannotBeRejoined(bool requiresApproval)
     {
         var user = SeedUser();
         var team = SeedTeam("Closed Team", requiresApproval: requiresApproval);
         SeedTeamMember(team.Id, user.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
-        await _service.DeleteTeamAsync(team.Id, Guid.NewGuid(), Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
+        await _service.DeleteTeamAsync(team.Id, Guid.NewGuid(), TestContext.Current.CancellationToken);
 
-        var result = await _service.JoinTeamAsync(team.Id, user.Id, "Returning", Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.JoinTeamAsync(team.Id, user.Id, "Returning", TestContext.Current.CancellationToken);
         result.ErrorKey.Should().Be("Teams_NotFound");
         result.Outcome.Should().BeNull();
 
-        var detail = await _pages.GetTeamDetailAsync(team.Slug, user.Id, Xunit.TestContext.Current.CancellationToken);
+        var detail = await _pages.GetTeamDetailAsync(team.Slug, user.Id, TestContext.Current.CancellationToken);
         detail.Should().NotBeNull();
         detail.CanCurrentUserJoin.Should().BeFalse();
         (await TeamsDb.TeamMembers.AsNoTracking().CountAsync(m => m.TeamId == team.Id && m.LeftAt == null,
-            Xunit.TestContext.Current.CancellationToken)).Should().Be(0);
+            TestContext.Current.CancellationToken)).Should().Be(0);
         (await TeamsDb.TeamJoinRequests.AsNoTracking().CountAsync(r => r.TeamId == team.Id,
-            Xunit.TestContext.Current.CancellationToken)).Should().Be(0);
+            TestContext.Current.CancellationToken)).Should().Be(0);
     }
 
     [HumansFact]
     public async Task RequestToJoinTeamAsync_TeamNotFound_ReturnsRefusal()
     {
         var user = SeedUser();
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.RequestToJoinTeamAsync(Guid.NewGuid(), user.Id, null, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.RequestToJoinTeamAsync(Guid.NewGuid(), user.Id, null, TestContext.Current.CancellationToken);
 
         result.ErrorKey.Should().Be("Teams_NotFound");
         result.Request.Should().BeNull();
@@ -1285,9 +1283,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
     {
         var user = SeedUser();
         var team = SeedTeam("Volunteers", type: SystemTeamType.Volunteers, requiresApproval: true);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.RequestToJoinTeamAsync(team.Id, user.Id, null, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.RequestToJoinTeamAsync(team.Id, user.Id, null, TestContext.Current.CancellationToken);
 
         result.ErrorKey.Should().Be("Teams_Team_CannotJoinSystem");
         result.Request.Should().BeNull();
@@ -1300,9 +1298,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var user = SeedUser();
         var team = SeedTeam("Alpha", requiresApproval: true);
         team.IsHidden = true;
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.RequestToJoinTeamAsync(team.Id, user.Id, null, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.RequestToJoinTeamAsync(team.Id, user.Id, null, TestContext.Current.CancellationToken);
 
         result.ErrorKey.Should().Be("Teams_CannotJoinHidden");
         result.Request.Should().BeNull();
@@ -1314,9 +1312,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
     {
         var user = SeedUser();
         var team = SeedTeam("Alpha");
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.RequestToJoinTeamAsync(team.Id, user.Id, null, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.RequestToJoinTeamAsync(team.Id, user.Id, null, TestContext.Current.CancellationToken);
 
         result.ErrorKey.Should().Be("Teams_JoinPolicyChanged");
         result.Request.Should().BeNull();
@@ -1329,9 +1327,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var user = SeedUser();
         var team = SeedTeam("Alpha", requiresApproval: true);
         SeedJoinRequest(team.Id, user.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.RequestToJoinTeamAsync(team.Id, user.Id, null, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.RequestToJoinTeamAsync(team.Id, user.Id, null, TestContext.Current.CancellationToken);
 
         result.ErrorKey.Should().Be("Teams_Team_AlreadyPendingRequest");
         result.Request.Should().BeNull();
@@ -1344,9 +1342,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var user = SeedUser();
         var team = SeedTeam("Alpha", requiresApproval: true);
         SeedTeamMember(team.Id, user.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.RequestToJoinTeamAsync(team.Id, user.Id, null, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.RequestToJoinTeamAsync(team.Id, user.Id, null, TestContext.Current.CancellationToken);
 
         result.ErrorKey.Should().Be("Teams_Team_AlreadyMember");
         result.Request.Should().BeNull();
@@ -1358,9 +1356,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
     {
         var user = SeedUser();
         var team = SeedTeam("Alpha", requiresApproval: true);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var response = await _service.RequestToJoinTeamAsync(team.Id, user.Id, "Pick me", Xunit.TestContext.Current.CancellationToken);
+        var response = await _service.RequestToJoinTeamAsync(team.Id, user.Id, "Pick me", TestContext.Current.CancellationToken);
 
         response.ErrorKey.Should().BeNull();
         response.Request.Should().NotBeNull();
@@ -1373,23 +1371,23 @@ public sealed class TeamServiceTests : TeamsTestHarness
         result.RequestedAt.Should().Be(Clock.GetCurrentInstant());
 
         ClearAllTrackers();
-        var stored = await TeamsDb.TeamJoinRequests.AsNoTracking().SingleAsync(Xunit.TestContext.Current.CancellationToken);
+        var stored = await TeamsDb.TeamJoinRequests.AsNoTracking().SingleAsync(TestContext.Current.CancellationToken);
         stored.Id.Should().Be(result.Id);
         stored.Message.Should().Be("Pick me");
     }
 
     [HumansTheory]
-    [Xunit.InlineData(true)]
-    [Xunit.InlineData(false)]
+    [InlineData(true)]
+    [InlineData(false)]
     public async Task JoinTeam_NameLookupFailure_ReturnsCommittedRequestOrMembership(bool requiresApproval)
     {
         var user = SeedUser();
         var coordinator = SeedUser(displayName: "Coordinator");
         var team = SeedTeam("Alpha", requiresApproval: requiresApproval);
         SeedTeamMember(team.Id, coordinator.Id, TeamMemberRole.Coordinator);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
         var userInfo = await _userService.GetUserInfoAsync(
-            user.Id, Xunit.TestContext.Current.CancellationToken);
+            user.Id, TestContext.Current.CancellationToken);
         var lookups = 0;
         _userService.GetUserInfoAsync(user.Id, Arg.Any<CancellationToken>())
             .Returns(_ => !requiresApproval && lookups++ == 0
@@ -1399,26 +1397,26 @@ public sealed class TeamServiceTests : TeamsTestHarness
         if (requiresApproval)
         {
             var response = await _service.RequestToJoinTeamAsync(
-                team.Id, user.Id, "Pick me", Xunit.TestContext.Current.CancellationToken);
+                team.Id, user.Id, "Pick me", TestContext.Current.CancellationToken);
             response.ErrorKey.Should().BeNull();
             response.Request.Should().NotBeNull();
             var result = response.Request!;
             result.Status.Should().Be(TeamJoinRequestStatus.Pending);
             ClearAllTrackers();
             (await TeamsDb.TeamJoinRequests.AsNoTracking().SingleAsync(
-                Xunit.TestContext.Current.CancellationToken)).Id.Should().Be(result.Id);
+                TestContext.Current.CancellationToken)).Id.Should().Be(result.Id);
         }
         else
         {
             var response = await _service.JoinTeamDirectlyAsync(
-                team.Id, user.Id, Xunit.TestContext.Current.CancellationToken);
+                team.Id, user.Id, TestContext.Current.CancellationToken);
             response.ErrorKey.Should().BeNull();
             response.Member.Should().NotBeNull();
             var result = response.Member!;
             result.UserId.Should().Be(user.Id);
             ClearAllTrackers();
             (await TeamsDb.TeamMembers.AsNoTracking().SingleAsync(
-                m => m.UserId == user.Id, Xunit.TestContext.Current.CancellationToken))
+                m => m.UserId == user.Id, TestContext.Current.CancellationToken))
                 .Id.Should().Be(result.Id);
             await AuditLog.Received(1).LogAsync(
                 AuditAction.TeamJoinedDirectly, nameof(Team), team.Id,
@@ -1435,9 +1433,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
     public async Task RemoveMemberAsync_TeamNotFound_ReturnsRefusal()
     {
         var actor = SeedUser(displayName: "Actor");
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.RemoveMemberAsync(Guid.NewGuid(), Guid.NewGuid(), actor.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.RemoveMemberAsync(Guid.NewGuid(), Guid.NewGuid(), actor.Id, TestContext.Current.CancellationToken);
 
         result.ErrorKey.Should().Be("Teams_RemoveMember_TeamMissing");
     }
@@ -1449,9 +1447,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var target = SeedUser(displayName: "Target");
         var team = SeedTeam("Volunteers", type: SystemTeamType.Volunteers);
         var member = SeedTeamMember(team.Id, target.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.RemoveMemberAsync(team.Id, target.Id, actor.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.RemoveMemberAsync(team.Id, target.Id, actor.Id, TestContext.Current.CancellationToken);
 
         result.ErrorKey.Should().Be("Teams_RemoveMember_SystemTeam");
         member.LeftAt.Should().BeNull();
@@ -1464,9 +1462,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var target = SeedUser(displayName: "Target");
         var team = SeedTeam("Alpha");
         var member = SeedTeamMember(team.Id, target.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.RemoveMemberAsync(team.Id, target.Id, actor.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.RemoveMemberAsync(team.Id, target.Id, actor.Id, TestContext.Current.CancellationToken);
 
         result.ErrorKey.Should().Be("Teams_RemoveMember_Permission");
         member.LeftAt.Should().BeNull();
@@ -1479,29 +1477,33 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var target = SeedUser(displayName: "Target");
         var team = SeedTeam("Alpha");
         SeedTeamMember(team.Id, actor.Id, TeamMemberRole.Coordinator);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.RemoveMemberAsync(team.Id, target.Id, actor.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.RemoveMemberAsync(team.Id, target.Id, actor.Id, TestContext.Current.CancellationToken);
 
         result.ErrorKey.Should().Be("Teams_RemoveMember_NotMember");
     }
 
-    [HumansFact]
-    public async Task ReassignAsync_RefusedRemovalStillAbortsMerge()
+    [HumansTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ReassignAsync_RefusedRemovalStillAbortsMerge(bool targetAlreadyMember)
     {
         var actor = SeedUser(displayName: "Actor");
         var source = SeedUser(displayName: "Source");
         var target = SeedUser(displayName: "Target");
         var team = SeedTeam("Alpha");
         var member = SeedTeamMember(team.Id, source.Id);
-        SeedTeamMember(team.Id, target.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        if (targetAlreadyMember) SeedTeamMember(team.Id, target.Id);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         Func<Task> act = () => _service.ReassignAsync(source.Id, target.Id, actor.Id,
-            Clock.GetCurrentInstant(), Xunit.TestContext.Current.CancellationToken);
+            Clock.GetCurrentInstant(), TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*permission*");
         member.LeftAt.Should().BeNull();
+        (await TeamsDb.TeamMembers.CountAsync(m => m.TeamId == team.Id && m.UserId == target.Id,
+            TestContext.Current.CancellationToken)).Should().Be(targetAlreadyMember ? 1 : 0);
     }
 
     [HumansFact]
@@ -1512,12 +1514,12 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var team = SeedTeam("Alpha");
         SeedTeamMember(team.Id, actor.Id, TeamMemberRole.Coordinator);
         var member = SeedTeamMember(team.Id, target.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        await _service.RemoveMemberAsync(team.Id, target.Id, actor.Id, Xunit.TestContext.Current.CancellationToken);
+        await _service.RemoveMemberAsync(team.Id, target.Id, actor.Id, TestContext.Current.CancellationToken);
 
         ClearAllTrackers();
-        var reloaded = await TeamsDb.TeamMembers.AsNoTracking().SingleAsync(tm => tm.Id == member.Id, Xunit.TestContext.Current.CancellationToken);
+        var reloaded = await TeamsDb.TeamMembers.AsNoTracking().SingleAsync(tm => tm.Id == member.Id, TestContext.Current.CancellationToken);
         reloaded.LeftAt.Should().Be(Clock.GetCurrentInstant());
         await _systemTeamSync.DidNotReceive().SyncMembershipForUserAsync(
             Arg.Any<Guid>(), Arg.Any<SystemTeamType>(), Arg.Any<CancellationToken>());
@@ -1532,9 +1534,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var target = SeedUser(displayName: "Target");
         var team = SeedTeam("Alpha");
         SeedTeamMember(team.Id, target.Id, TeamMemberRole.Coordinator);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        await _service.RemoveMemberAsync(team.Id, target.Id, actor.Id, Xunit.TestContext.Current.CancellationToken);
+        await _service.RemoveMemberAsync(team.Id, target.Id, actor.Id, TestContext.Current.CancellationToken);
 
         // The coordinator-eligibility reconcile is part of the mutation (T1).
         await _systemTeamSync.Received(1).SyncMembershipForUserAsync(
@@ -1549,9 +1551,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
     public async Task RejectJoinRequestAsync_RequestNotFound_Throws()
     {
         var approver = SeedUser(displayName: "Approver");
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var act = () => _service.RejectJoinRequestAsync(Guid.NewGuid(), approver.Id, "reason", Xunit.TestContext.Current.CancellationToken);
+        var act = () => _service.RejectJoinRequestAsync(Guid.NewGuid(), approver.Id, "reason", TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*not found*");
@@ -1564,9 +1566,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var requester = SeedUser(displayName: "Requester");
         var team = SeedTeam("Alpha", requiresApproval: true);
         var request = SeedJoinRequest(team.Id, requester.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var act = () => _service.RejectJoinRequestAsync(request.Id, stranger.Id, "no thanks", Xunit.TestContext.Current.CancellationToken);
+        var act = () => _service.RejectJoinRequestAsync(request.Id, stranger.Id, "no thanks", TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*permission*");
@@ -1580,9 +1582,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var team = SeedTeam("Alpha", requiresApproval: true);
         SeedTeamMember(team.Id, coordinator.Id, TeamMemberRole.Coordinator);
         var request = SeedJoinRequest(team.Id, requester.Id, TeamJoinRequestStatus.Approved);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var act = () => _service.RejectJoinRequestAsync(request.Id, coordinator.Id, "late", Xunit.TestContext.Current.CancellationToken);
+        var act = () => _service.RejectJoinRequestAsync(request.Id, coordinator.Id, "late", TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*pending*");
@@ -1596,12 +1598,12 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var team = SeedTeam("Alpha", requiresApproval: true);
         SeedTeamMember(team.Id, coordinator.Id, TeamMemberRole.Coordinator);
         var request = SeedJoinRequest(team.Id, requester.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        await _service.RejectJoinRequestAsync(request.Id, coordinator.Id, "out of capacity", Xunit.TestContext.Current.CancellationToken);
+        await _service.RejectJoinRequestAsync(request.Id, coordinator.Id, "out of capacity", TestContext.Current.CancellationToken);
 
         ClearAllTrackers();
-        var stored = await TeamsDb.TeamJoinRequests.AsNoTracking().SingleAsync(r => r.Id == request.Id, Xunit.TestContext.Current.CancellationToken);
+        var stored = await TeamsDb.TeamJoinRequests.AsNoTracking().SingleAsync(r => r.Id == request.Id, TestContext.Current.CancellationToken);
         stored.Status.Should().Be(TeamJoinRequestStatus.Rejected);
         stored.ReviewNotes.Should().Be("out of capacity");
         stored.ReviewedByUserId.Should().Be(coordinator.Id);
@@ -1613,18 +1615,18 @@ public sealed class TeamServiceTests : TeamsTestHarness
     // ==========================================================================
 
     [HumansTheory]
-    [Xunit.InlineData("normal", "es", "es")]
-    [Xunit.InlineData("email-prep-failure", "es", "es")]
-    [Xunit.InlineData("profile-lookup-failure", "es", "en")]
-    [Xunit.InlineData("normal", "", "en")]
-    [Xunit.InlineData("normal", " ", "en")]
-    [Xunit.InlineData("normal", "not a culture!", "en")]
-    [Xunit.InlineData("normal", "fr-FR", "en")]
+    [InlineData("normal", "es", "es")]
+    [InlineData("email-prep-failure", "es", "es")]
+    [InlineData("profile-lookup-failure", "es", "en")]
+    [InlineData("normal", "", "en")]
+    [InlineData("normal", " ", "en")]
+    [InlineData("normal", "not a culture!", "en")]
+    [InlineData("normal", "fr-FR", "en")]
     public async Task AddedMemberNotice_ReusesEmailRecipientLanguageAndSurvivesPreparationFailure(
         string mode, string language, string expectedCulture)
     {
         using var actorCulture = new CultureScope("fr");
-        var ct = Xunit.TestContext.Current.CancellationToken;
+        var ct = TestContext.Current.CancellationToken;
         var coordinator = SeedUser(displayName: "Coordinator");
         var requester = SeedUser(displayName: "Requester");
         requester.PreferredLanguage = language;
@@ -1660,11 +1662,11 @@ public sealed class TeamServiceTests : TeamsTestHarness
     }
 
     [HumansTheory]
-    [Xunit.InlineData("approve")]
-    [Xunit.InlineData("reject")]
-    [Xunit.InlineData("remove")]
-    [Xunit.InlineData("request")]
-    [Xunit.InlineData("join")]
+    [InlineData("approve")]
+    [InlineData("reject")]
+    [InlineData("remove")]
+    [InlineData("request")]
+    [InlineData("join")]
     public async Task MemberNotices_LongNamesDispatchFullCopy(string action)
     {
         var coordinator = SeedUser(displayName: "Coordinator");
@@ -1678,13 +1680,13 @@ public sealed class TeamServiceTests : TeamsTestHarness
             SeedTeamMember(team.Id, requester.Id);
         if (string.Equals(action, "request", StringComparison.Ordinal) || string.Equals(action, "join", StringComparison.Ordinal))
             TeamsDb.TeamJoinRequests.Remove(request);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
         switch (action)
         {
-            case "approve": await _service.ApproveJoinRequestAsync(request.Id, coordinator.Id, null, Xunit.TestContext.Current.CancellationToken); break;
-            case "reject": await _service.RejectJoinRequestAsync(request.Id, coordinator.Id, "Reason", Xunit.TestContext.Current.CancellationToken); break;
-            case "remove": await _service.RemoveMemberAsync(team.Id, requester.Id, coordinator.Id, Xunit.TestContext.Current.CancellationToken); break;
-            default: await _service.JoinTeamAsync(team.Id, requester.Id, null, Xunit.TestContext.Current.CancellationToken); break;
+            case "approve": await _service.ApproveJoinRequestAsync(request.Id, coordinator.Id, null, TestContext.Current.CancellationToken); break;
+            case "reject": await _service.RejectJoinRequestAsync(request.Id, coordinator.Id, "Reason", TestContext.Current.CancellationToken); break;
+            case "remove": await _service.RemoveMemberAsync(team.Id, requester.Id, coordinator.Id, TestContext.Current.CancellationToken); break;
+            default: await _service.JoinTeamAsync(team.Id, requester.Id, null, TestContext.Current.CancellationToken); break;
         }
         var notices = Notifier.ReceivedCalls().Where(call => call.GetArguments()[0] is NotificationSource)
             .Select(call => call.GetArguments()).ToList();
@@ -1701,10 +1703,10 @@ public sealed class TeamServiceTests : TeamsTestHarness
     }
 
     [HumansTheory]
-    [Xunit.InlineData("approve")]
-    [Xunit.InlineData("reject")]
-    [Xunit.InlineData("remove")]
-    [Xunit.InlineData("lookup-failure")]
+    [InlineData("approve")]
+    [InlineData("reject")]
+    [InlineData("remove")]
+    [InlineData("lookup-failure")]
     public async Task MemberNotices_UseRecipientLanguageWithLookupFailureFallback(string action)
     {
         var coordinator = SeedUser(displayName: "Coordinator");
@@ -1715,7 +1717,7 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var request = SeedJoinRequest(team.Id, requester.Id);
         if (string.Equals(action, "remove", StringComparison.Ordinal))
             SeedTeamMember(team.Id, requester.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
         if (string.Equals(action, "lookup-failure", StringComparison.Ordinal))
             _userService.GetUserInfoAsync(requester.Id, Arg.Any<CancellationToken>())
                 .Returns(ValueTask.FromException<UserInfo?>(new IOException("Language lookup unavailable")));
@@ -1723,13 +1725,13 @@ public sealed class TeamServiceTests : TeamsTestHarness
         switch (action)
         {
             case "approve":
-                await _service.ApproveJoinRequestAsync(request.Id, coordinator.Id, null, Xunit.TestContext.Current.CancellationToken);
+                await _service.ApproveJoinRequestAsync(request.Id, coordinator.Id, null, TestContext.Current.CancellationToken);
                 break;
             case "remove":
-                await _service.RemoveMemberAsync(team.Id, requester.Id, coordinator.Id, Xunit.TestContext.Current.CancellationToken);
+                await _service.RemoveMemberAsync(team.Id, requester.Id, coordinator.Id, TestContext.Current.CancellationToken);
                 break;
             default:
-                await _service.RejectJoinRequestAsync(request.Id, coordinator.Id, "Reason", Xunit.TestContext.Current.CancellationToken);
+                await _service.RejectJoinRequestAsync(request.Id, coordinator.Id, "Reason", TestContext.Current.CancellationToken);
                 break;
         }
 
@@ -1767,13 +1769,13 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var requester = SeedUser(displayName: "Requester");
         var team = SeedTeam("Alpha", requiresApproval: true);
         var request = SeedJoinRequest(team.Id, requester.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var act = () => _service.ApproveJoinRequestAsync(request.Id, stranger.Id, null, Xunit.TestContext.Current.CancellationToken);
+        var act = () => _service.ApproveJoinRequestAsync(request.Id, stranger.Id, null, TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*permission*");
-        (await TeamsDb.TeamMembers.AnyAsync(tm => tm.UserId == requester.Id, Xunit.TestContext.Current.CancellationToken))
+        (await TeamsDb.TeamMembers.AnyAsync(tm => tm.UserId == requester.Id, TestContext.Current.CancellationToken))
             .Should().BeFalse();
     }
 
@@ -1785,20 +1787,20 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var team = SeedTeam("Alpha", requiresApproval: true);
         SeedTeamMember(team.Id, coordinator.Id, TeamMemberRole.Coordinator);
         var request = SeedJoinRequest(team.Id, requester.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var member = await _service.ApproveJoinRequestAsync(request.Id, coordinator.Id, "welcome", Xunit.TestContext.Current.CancellationToken);
+        var member = await _service.ApproveJoinRequestAsync(request.Id, coordinator.Id, "welcome", TestContext.Current.CancellationToken);
 
         member.UserId.Should().Be(requester.Id);
         member.Role.Should().Be(TeamMemberRole.Member);
 
         ClearAllTrackers();
-        var stored = await TeamsDb.TeamJoinRequests.AsNoTracking().SingleAsync(r => r.Id == request.Id, Xunit.TestContext.Current.CancellationToken);
+        var stored = await TeamsDb.TeamJoinRequests.AsNoTracking().SingleAsync(r => r.Id == request.Id, TestContext.Current.CancellationToken);
         stored.Status.Should().Be(TeamJoinRequestStatus.Approved);
         stored.ReviewedByUserId.Should().Be(coordinator.Id);
         (await TeamsDb.TeamMembers.AsNoTracking().AnyAsync(
             tm => tm.TeamId == team.Id && tm.UserId == requester.Id && tm.LeftAt == null,
-            Xunit.TestContext.Current.CancellationToken)).Should().BeTrue();
+            TestContext.Current.CancellationToken)).Should().BeTrue();
         await AuditLog.Received(1).LogAsync(
             AuditAction.TeamJoinRequestApproved, nameof(Team), team.Id,
             Arg.Any<string>(), coordinator.Id,
@@ -1813,10 +1815,10 @@ public sealed class TeamServiceTests : TeamsTestHarness
     public async Task CreateRoleDefinitionAsync_TeamNotFound_Throws()
     {
         var actor = SeedUser(displayName: "Actor");
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         var act = () => _service.CreateRoleDefinitionAsync(
-            Guid.NewGuid(), "Lead", null, 1, [SlotPriority.None], 0, RolePeriod.YearRound, actor.Id, cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            Guid.NewGuid(), "Lead", null, 1, [SlotPriority.None], 0, RolePeriod.YearRound, actor.Id, cancellationToken: TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*Team*not found*");
@@ -1831,10 +1833,10 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var team = SeedTeam("Alpha");
         SeedTeamRoleDefinition(team.Id, isManagement: false);
         var existingName = "Member Role";
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         var act = () => _service.CreateRoleDefinitionAsync(
-            team.Id, existingName, null, 1, [SlotPriority.None], 0, RolePeriod.YearRound, actor.Id, cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            team.Id, existingName, null, 1, [SlotPriority.None], 0, RolePeriod.YearRound, actor.Id, cancellationToken: TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*already exists*");
@@ -1845,20 +1847,20 @@ public sealed class TeamServiceTests : TeamsTestHarness
     {
         var actor = SeedUser(displayName: "Actor");
         var team = SeedTeam("Alpha");
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         var act = () => _service.CreateRoleDefinitionAsync(
-            team.Id, "Lead", null, 1, [SlotPriority.None], 0, RolePeriod.YearRound, actor.Id, cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            team.Id, "Lead", null, 1, [SlotPriority.None], 0, RolePeriod.YearRound, actor.Id, cancellationToken: TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*permission*");
     }
 
     [HumansTheory]
-    [Xunit.InlineData(false, -1)]
-    [Xunit.InlineData(false, 99)]
-    [Xunit.InlineData(true, -1)]
-    [Xunit.InlineData(true, 99)]
+    [InlineData(false, -1)]
+    [InlineData(false, 99)]
+    [InlineData(true, -1)]
+    [InlineData(true, 99)]
     public async Task RoleDefinitionWrites_UndefinedPriority_RejectWithoutChangingDefinition(bool update, int priority)
     {
         var actor = SeedUser(displayName: "Actor");
@@ -1868,20 +1870,20 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var definition = SeedTeamRoleDefinition(team.Id, isManagement: false);
         definition.Name = "Original";
         definition.Priorities = [SlotPriority.None];
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         Func<Task> act = update
             ? () => _service.UpdateRoleDefinitionAsync(
                 definition.Id, "Changed", null, 1, [(SlotPriority)priority], 0, false,
-                RolePeriod.Event, actor.Id, cancellationToken: Xunit.TestContext.Current.CancellationToken)
+                RolePeriod.Event, actor.Id, cancellationToken: TestContext.Current.CancellationToken)
             : () => _service.CreateRoleDefinitionAsync(
                 team.Id, "Changed", null, 1, [(SlotPriority)priority], 0,
-                RolePeriod.Event, actor.Id, cancellationToken: Xunit.TestContext.Current.CancellationToken);
+                RolePeriod.Event, actor.Id, cancellationToken: TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*priority*");
         ClearAllTrackers();
         var stored = await TeamsDb.TeamRoleDefinitions.AsNoTracking()
-            .SingleAsync(Xunit.TestContext.Current.CancellationToken);
+            .SingleAsync(TestContext.Current.CancellationToken);
         stored.Name.Should().Be("Original");
         stored.Priorities.Should().Equal(SlotPriority.None);
         AuditLog.ReceivedCalls().Should().BeEmpty();
@@ -1894,12 +1896,12 @@ public sealed class TeamServiceTests : TeamsTestHarness
         SeedRoleAssignment(actor.Id, RoleNames.Admin,
             Clock.GetCurrentInstant() - Duration.FromDays(1));
         var team = SeedTeam("Alpha");
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         var result = await _service.CreateRoleDefinitionAsync(
             team.Id, "Lead", "Lead description", 2,
             [SlotPriority.Critical, SlotPriority.Important], 5, RolePeriod.Event, actor.Id,
-            isPublic: false, cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            isPublic: false, cancellationToken: TestContext.Current.CancellationToken);
 
         result.TeamId.Should().Be(team.Id);
         result.Name.Should().Be("Lead");
@@ -1918,10 +1920,10 @@ public sealed class TeamServiceTests : TeamsTestHarness
     public async Task UpdateRoleDefinitionAsync_DefinitionNotFound_Throws()
     {
         var actor = SeedUser(displayName: "Actor");
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         var act = () => _service.UpdateRoleDefinitionAsync(
-            Guid.NewGuid(), "Lead", null, 1, [SlotPriority.None], 0, false, RolePeriod.YearRound, actor.Id, cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            Guid.NewGuid(), "Lead", null, 1, [SlotPriority.None], 0, false, RolePeriod.YearRound, actor.Id, cancellationToken: TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*Role definition*not found*");
@@ -1933,10 +1935,10 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var actor = SeedUser(displayName: "Actor");
         var team = SeedTeam("Alpha");
         var def = SeedTeamRoleDefinition(team.Id, isManagement: false);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         var act = () => _service.UpdateRoleDefinitionAsync(
-            def.Id, "Lead", null, 1, [SlotPriority.None], 0, false, RolePeriod.YearRound, actor.Id, cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            def.Id, "Lead", null, 1, [SlotPriority.None], 0, false, RolePeriod.YearRound, actor.Id, cancellationToken: TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*permission*");
@@ -1953,10 +1955,10 @@ public sealed class TeamServiceTests : TeamsTestHarness
         first.Name = "Original";
         var second = SeedTeamRoleDefinition(team.Id, isManagement: false);
         second.Name = "Other";
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         var act = () => _service.UpdateRoleDefinitionAsync(
-            second.Id, "Original", null, 1, [SlotPriority.None], 0, false, RolePeriod.YearRound, actor.Id, cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            second.Id, "Original", null, 1, [SlotPriority.None], 0, false, RolePeriod.YearRound, actor.Id, cancellationToken: TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*already exists*");
@@ -1970,15 +1972,15 @@ public sealed class TeamServiceTests : TeamsTestHarness
             Clock.GetCurrentInstant() - Duration.FromDays(1));
         var team = SeedTeam("Alpha");
         var def = SeedTeamRoleDefinition(team.Id, isManagement: true);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         await _service.UpdateRoleDefinitionAsync(
             def.Id, def.Name, null, 1, [SlotPriority.None], 0,
             isManagement: false, RolePeriod.YearRound, actor.Id,
-            canToggleManagement: false, cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            canToggleManagement: false, cancellationToken: TestContext.Current.CancellationToken);
 
         ClearAllTrackers();
-        var stored = await TeamsDb.TeamRoleDefinitions.AsNoTracking().SingleAsync(d => d.Id == def.Id, Xunit.TestContext.Current.CancellationToken);
+        var stored = await TeamsDb.TeamRoleDefinitions.AsNoTracking().SingleAsync(d => d.Id == def.Id, TestContext.Current.CancellationToken);
         stored.IsManagement.Should().BeTrue();
     }
 
@@ -1992,15 +1994,15 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var def = SeedTeamRoleDefinition(team.Id, isManagement: false);
         def.Name = "Original";
         def.SortOrder = 0;
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         await _service.UpdateRoleDefinitionAsync(
             def.Id, "Renamed", "new desc", slotCount: 2,
             [SlotPriority.Critical, SlotPriority.None], sortOrder: 7,
-            isManagement: false, RolePeriod.Event, actor.Id, isPublic: false, cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            isManagement: false, RolePeriod.Event, actor.Id, isPublic: false, cancellationToken: TestContext.Current.CancellationToken);
 
         ClearAllTrackers();
-        var stored = await TeamsDb.TeamRoleDefinitions.AsNoTracking().SingleAsync(d => d.Id == def.Id, Xunit.TestContext.Current.CancellationToken);
+        var stored = await TeamsDb.TeamRoleDefinitions.AsNoTracking().SingleAsync(d => d.Id == def.Id, TestContext.Current.CancellationToken);
         stored.Name.Should().Be("Renamed");
         stored.Description.Should().Be("new desc");
         stored.SlotCount.Should().Be(2);
@@ -2018,9 +2020,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
     public async Task DeleteRoleDefinitionAsync_NotFound_Throws()
     {
         var actor = SeedUser();
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var act = () => _service.DeleteRoleDefinitionAsync(Guid.NewGuid(), actor.Id, Xunit.TestContext.Current.CancellationToken);
+        var act = () => _service.DeleteRoleDefinitionAsync(Guid.NewGuid(), actor.Id, TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*Role definition*not found*");
@@ -2032,9 +2034,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var actor = SeedUser(displayName: "Actor");
         var team = SeedTeam("Alpha");
         var def = SeedTeamRoleDefinition(team.Id, isManagement: false);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var act = () => _service.DeleteRoleDefinitionAsync(def.Id, actor.Id, Xunit.TestContext.Current.CancellationToken);
+        var act = () => _service.DeleteRoleDefinitionAsync(def.Id, actor.Id, TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*permission*");
@@ -2048,12 +2050,12 @@ public sealed class TeamServiceTests : TeamsTestHarness
             Clock.GetCurrentInstant() - Duration.FromDays(1));
         var team = SeedTeam("Alpha");
         var def = SeedTeamRoleDefinition(team.Id, isManagement: false);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        await _service.DeleteRoleDefinitionAsync(def.Id, actor.Id, Xunit.TestContext.Current.CancellationToken);
+        await _service.DeleteRoleDefinitionAsync(def.Id, actor.Id, TestContext.Current.CancellationToken);
 
         ClearAllTrackers();
-        var stored = await TeamsDb.TeamRoleDefinitions.AsNoTracking().FirstOrDefaultAsync(d => d.Id == def.Id, Xunit.TestContext.Current.CancellationToken);
+        var stored = await TeamsDb.TeamRoleDefinitions.AsNoTracking().FirstOrDefaultAsync(d => d.Id == def.Id, TestContext.Current.CancellationToken);
         stored.Should().BeNull();
     }
 
@@ -2065,9 +2067,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
     public async Task ToggleRoleIsManagementAsync_DefinitionNotFound_Throws()
     {
         var actor = SeedUser();
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var act = () => _service.ToggleRoleIsManagementAsync(Guid.NewGuid(), actor.Id, Xunit.TestContext.Current.CancellationToken);
+        var act = () => _service.ToggleRoleIsManagementAsync(Guid.NewGuid(), actor.Id, TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*Role definition*not found*");
@@ -2079,9 +2081,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var actor = SeedUser(displayName: "Actor");
         var team = SeedTeam("Alpha");
         var def = SeedTeamRoleDefinition(team.Id, isManagement: false);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var act = () => _service.ToggleRoleIsManagementAsync(def.Id, actor.Id, Xunit.TestContext.Current.CancellationToken);
+        var act = () => _service.ToggleRoleIsManagementAsync(def.Id, actor.Id, TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*permission*");
@@ -2098,9 +2100,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var holder = SeedUser(displayName: "Holder");
         var member = SeedTeamMember(team.Id, holder.Id);
         SeedTeamRoleAssignment(def.Id, member.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var act = () => _service.ToggleRoleIsManagementAsync(def.Id, actor.Id, Xunit.TestContext.Current.CancellationToken);
+        var act = () => _service.ToggleRoleIsManagementAsync(def.Id, actor.Id, TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*members are assigned*");
@@ -2115,9 +2117,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var team = SeedTeam("Alpha");
         SeedTeamRoleDefinition(team.Id, isManagement: true);
         var def = SeedTeamRoleDefinition(team.Id, isManagement: false);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var act = () => _service.ToggleRoleIsManagementAsync(def.Id, actor.Id, Xunit.TestContext.Current.CancellationToken);
+        var act = () => _service.ToggleRoleIsManagementAsync(def.Id, actor.Id, TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*already marked as the management role*");
@@ -2131,13 +2133,13 @@ public sealed class TeamServiceTests : TeamsTestHarness
             Clock.GetCurrentInstant() - Duration.FromDays(1));
         var team = SeedTeam("Alpha");
         var def = SeedTeamRoleDefinition(team.Id, isManagement: false);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.ToggleRoleIsManagementAsync(def.Id, actor.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.ToggleRoleIsManagementAsync(def.Id, actor.Id, TestContext.Current.CancellationToken);
 
         result.IsManagement.Should().BeTrue();
         ClearAllTrackers();
-        var stored = await TeamsDb.TeamRoleDefinitions.AsNoTracking().SingleAsync(d => d.Id == def.Id, Xunit.TestContext.Current.CancellationToken);
+        var stored = await TeamsDb.TeamRoleDefinitions.AsNoTracking().SingleAsync(d => d.Id == def.Id, TestContext.Current.CancellationToken);
         stored.IsManagement.Should().BeTrue();
     }
 
@@ -2149,9 +2151,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
             Clock.GetCurrentInstant() - Duration.FromDays(1));
         var team = SeedTeam("Alpha");
         var def = SeedTeamRoleDefinition(team.Id, isManagement: true);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.ToggleRoleIsManagementAsync(def.Id, actor.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.ToggleRoleIsManagementAsync(def.Id, actor.Id, TestContext.Current.CancellationToken);
 
         result.IsManagement.Should().BeFalse();
     }
@@ -2163,7 +2165,7 @@ public sealed class TeamServiceTests : TeamsTestHarness
     [HumansFact]
     public async Task PermanentlyDeleteTeamAsync_TeamNotFound_Throws()
     {
-        var act = () => _service.PermanentlyDeleteTeamAsync(Guid.NewGuid(), Xunit.TestContext.Current.CancellationToken);
+        var act = () => _service.PermanentlyDeleteTeamAsync(Guid.NewGuid(), TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*not found*");
@@ -2173,9 +2175,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
     public async Task PermanentlyDeleteTeamAsync_SystemTeam_Throws()
     {
         var team = SeedTeam("Volunteers", type: SystemTeamType.Volunteers);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var act = () => _service.PermanentlyDeleteTeamAsync(team.Id, Xunit.TestContext.Current.CancellationToken);
+        var act = () => _service.PermanentlyDeleteTeamAsync(team.Id, TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*system team*");
@@ -2187,9 +2189,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var parent = SeedTeam("Parent");
         var child = SeedTeam("Child");
         child.ParentTeamId = parent.Id;
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var act = () => _service.PermanentlyDeleteTeamAsync(parent.Id, Xunit.TestContext.Current.CancellationToken);
+        var act = () => _service.PermanentlyDeleteTeamAsync(parent.Id, TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*sub-teams*");
@@ -2199,92 +2201,61 @@ public sealed class TeamServiceTests : TeamsTestHarness
     // EF provider used in this harness does not support transactions. Cover it in Integration tests.
 
     // ==========================================================================
-    // GetTeamEntityBySlugAsync
+    // GetTeamBySlugAsync (TeamInfo? â€” ITeamService surface)
     // ==========================================================================
 
     [HumansFact]
-    public async Task GetTeamEntityBySlugAsync_ExistingSlug_ReturnsTeamWithActiveMembers()
+    public async Task GetTeamBySlugAsync_ExistingSlug_ReturnsTeamWithActiveMembers()
     {
         var user = SeedUser();
         var team = SeedTeam("Alpha");
         SeedTeamMember(team.Id, user.Id);
         SeedTeamMember(team.Id, SeedUser(displayName: "Left User").Id,
             leftAt: Clock.GetCurrentInstant() - Duration.FromDays(1));
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetTeamEntityBySlugAsync("alpha", Xunit.TestContext.Current.CancellationToken);
-
-        result.Should().NotBeNull();
-        result.Name.Should().Be("Alpha");
-        result.Members.Should().ContainSingle();
-    }
-
-    [HumansFact]
-    public async Task GetTeamEntityBySlugAsync_NonExistentSlug_ReturnsNull()
-    {
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
-
-        var result = await _service.GetTeamEntityBySlugAsync("non-existent", Xunit.TestContext.Current.CancellationToken);
-
-        result.Should().BeNull();
-    }
-
-    // ==========================================================================
-    // GetTeamBySlugAsync (TeamInfo? â€” ITeamService surface)
-    // ==========================================================================
-
-    [HumansFact]
-    public async Task GetTeamBySlugAsync_ExistingSlug_ReturnsSameTeamAsEntityVersion()
-    {
-        var user = SeedUser();
-        var team = SeedTeam("Alpha");
-        SeedTeamMember(team.Id, user.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
-
-        var info = await _service.GetTeamBySlugAsync("alpha", Xunit.TestContext.Current.CancellationToken);
-        var entity = await _service.GetTeamEntityBySlugAsync("alpha", Xunit.TestContext.Current.CancellationToken);
+        var info = await _service.GetTeamBySlugAsync("ALPHA", TestContext.Current.CancellationToken);
 
         info.Should().NotBeNull();
-        entity.Should().NotBeNull();
-        info.Id.Should().Be(entity.Id);
-        info.Slug.Should().Be(entity.Slug);
-        info.Name.Should().Be(entity.Name);
+        info.Id.Should().Be(team.Id);
+        info.Name.Should().Be("Alpha");
+        info.Members.Should().ContainSingle().Which.UserId.Should().Be(user.Id);
     }
 
     [HumansFact]
     public async Task GetTeamBySlugAsync_NonExistentSlug_ReturnsNull()
     {
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetTeamBySlugAsync("non-existent", Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetTeamBySlugAsync("non-existent", TestContext.Current.CancellationToken);
 
         result.Should().BeNull();
     }
 
     // ==========================================================================
-    // GetTeamByIdAsync
+    // GetTeamAsync
     // ==========================================================================
 
     [HumansFact]
-    public async Task GetTeamByIdAsync_ExistingId_ReturnsTeamWithActiveMembers()
+    public async Task GetTeamAsync_ExistingId_ReturnsTeamWithActiveMembers()
     {
         var user = SeedUser();
         var team = SeedTeam("Alpha");
         SeedTeamMember(team.Id, user.Id);
         SeedTeamMember(team.Id, SeedUser(displayName: "Left User").Id,
             leftAt: Clock.GetCurrentInstant() - Duration.FromDays(1));
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetTeamByIdAsync(team.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetTeamAsync(team.Id, TestContext.Current.CancellationToken);
 
         result.Should().NotBeNull();
         result.Members.Should().ContainSingle();
     }
 
     [HumansFact]
-    public async Task GetTeamByIdAsync_NonExistentId_ReturnsNull()
+    public async Task GetTeamAsync_NonExistentId_ReturnsNull()
     {
-        var result = await _service.GetTeamByIdAsync(Guid.NewGuid(), Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetTeamAsync(Guid.NewGuid(), TestContext.Current.CancellationToken);
 
         result.Should().BeNull();
     }
@@ -2302,9 +2273,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         SeedTeamMember(teamA.Id, user.Id);
         SeedTeamMember(teamB.Id, user.Id,
             leftAt: Clock.GetCurrentInstant() - Duration.FromDays(1));
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetUserTeamMembershipsAsync(user.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetUserTeamMembershipsAsync(user.Id, TestContext.Current.CancellationToken);
 
         result.Should().ContainSingle();
         result[0].TeamId.Should().Be(teamA.Id);
@@ -2316,9 +2287,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var user = SeedUser();
         var team = SeedTeam("Alpha");
         SeedTeamMember(team.Id, user.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetUserTeamMembershipsAsync(user.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetUserTeamMembershipsAsync(user.Id, TestContext.Current.CancellationToken);
 
         result.Single().TeamName.Should().Be("Alpha");
     }
@@ -2327,9 +2298,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
     public async Task GetUserTeamsAsync_NoMemberships_ReturnsEmpty()
     {
         var user = SeedUser();
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetUserTeamMembershipsAsync(user.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetUserTeamMembershipsAsync(user.Id, TestContext.Current.CancellationToken);
 
         result.Should().BeEmpty();
     }
@@ -2348,9 +2319,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         SeedTeamMember(systemTeam.Id, user.Id, TeamMemberRole.Coordinator);
         SeedJoinRequest(managedTeam.Id, SeedUser(displayName: "Requester A").Id);
         SeedJoinRequest(systemTeam.Id, SeedUser(displayName: "Requester B").Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _pages.GetMyTeamMembershipsAsync(user.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _pages.GetMyTeamMembershipsAsync(user.Id, TestContext.Current.CancellationToken);
 
         result.Should().HaveCount(2);
         result.Single(m => m.TeamId == managedTeam.Id).PendingRequestCount.Should().Be(1);
@@ -2370,9 +2341,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var team = SeedTeam("Alpha", requiresApproval: true);
         SeedTeamMember(team.Id, user.Id);
         SeedJoinRequest(team.Id, SeedUser(displayName: "Requester").Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _pages.GetMyTeamMembershipsAsync(user.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _pages.GetMyTeamMembershipsAsync(user.Id, TestContext.Current.CancellationToken);
 
         result.Should().ContainSingle();
         result[0].Role.Should().Be(TeamMemberRole.Member);
@@ -2401,9 +2372,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         privateChild.ParentTeamId = team.Id;
         privateChild.IsPublicPage = false;
 
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _pages.GetTeamDetailAsync(team.Slug, userId: null, cancellationToken: Xunit.TestContext.Current.CancellationToken);
+        var result = await _pages.GetTeamDetailAsync(team.Slug, userId: null, cancellationToken: TestContext.Current.CancellationToken);
 
         result.Should().NotBeNull();
         result.IsAuthenticated.Should().BeFalse();
@@ -2429,9 +2400,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var pendingRequest = SeedJoinRequest(team.Id, requester.Id);
         var roleDefinition = SeedTeamRoleDefinition(team.Id, isManagement: true);
 
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _pages.GetTeamDetailAsync(team.Slug, coordinator.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _pages.GetTeamDetailAsync(team.Slug, coordinator.Id, TestContext.Current.CancellationToken);
 
         result.Should().NotBeNull();
         result.IsAuthenticated.Should().BeTrue();
@@ -2462,9 +2433,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var u2 = SeedUser(displayName: "U2");
         SeedJoinRequest(team.Id, u1.Id);
         SeedJoinRequest(team.Id, u2.Id, TeamJoinRequestStatus.Rejected);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetPendingRequestsForTeamAsync(team.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetPendingRequestsForTeamAsync(team.Id, TestContext.Current.CancellationToken);
 
         result.Should().ContainSingle();
         result[0].UserId.Should().Be(u1.Id);
@@ -2474,9 +2445,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
     public async Task GetPendingRequestsForTeamAsync_NoRequests_ReturnsEmpty()
     {
         var team = SeedTeam("Alpha");
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetPendingRequestsForTeamAsync(team.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetPendingRequestsForTeamAsync(team.Id, TestContext.Current.CancellationToken);
 
         result.Should().BeEmpty();
     }
@@ -2506,9 +2477,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
             RequestedAt = Clock.GetCurrentInstant() - Duration.FromHours(1)
         };
         TeamsDb.TeamJoinRequests.Add(later);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetPendingRequestsForTeamAsync(team.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetPendingRequestsForTeamAsync(team.Id, TestContext.Current.CancellationToken);
 
         result[0].UserId.Should().Be(u1.Id);
         result[1].UserId.Should().Be(u2.Id);
@@ -2527,12 +2498,12 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var user = SeedUser();
         var team = SeedTeam("Alpha", type: string.Equals(refusal, "system", StringComparison.Ordinal) ? SystemTeamType.Volunteers : SystemTeamType.None);
         var member = SeedTeamMember(team.Id, user.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         var result = await _service.LeaveTeamAsync(
             string.Equals(refusal, "missing", StringComparison.Ordinal) ? Guid.NewGuid() : team.Id,
             string.Equals(refusal, "nonmember", StringComparison.Ordinal) ? Guid.NewGuid() : user.Id,
-            Xunit.TestContext.Current.CancellationToken);
+            TestContext.Current.CancellationToken);
 
         result.Succeeded.Should().BeFalse();
         result.ErrorKey.Should().Be(refusal switch
@@ -2542,7 +2513,7 @@ public sealed class TeamServiceTests : TeamsTestHarness
             _ => "Teams_NotMember"
         });
         TeamsDb.ChangeTracker.Clear();
-        (await TeamsDb.TeamMembers.SingleAsync(m => m.Id == member.Id, Xunit.TestContext.Current.CancellationToken))
+        (await TeamsDb.TeamMembers.SingleAsync(m => m.Id == member.Id, TestContext.Current.CancellationToken))
             .LeftAt.Should().BeNull();
     }
 
@@ -2553,14 +2524,14 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var owner = SeedUser();
         var other = SeedUser();
         var request = SeedJoinRequest(team.Id, owner.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.WithdrawJoinRequestAsync(request.Id, other.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.WithdrawJoinRequestAsync(request.Id, other.Id, TestContext.Current.CancellationToken);
 
         result.Succeeded.Should().BeFalse();
         result.ErrorKey.Should().Be("Teams_RequestUnavailable");
         TeamsDb.ChangeTracker.Clear();
-        (await TeamsDb.TeamJoinRequests.SingleAsync(r => r.Id == request.Id, Xunit.TestContext.Current.CancellationToken))
+        (await TeamsDb.TeamJoinRequests.SingleAsync(r => r.Id == request.Id, TestContext.Current.CancellationToken))
             .Status.Should().Be(TeamJoinRequestStatus.Pending);
     }
 
@@ -2575,17 +2546,17 @@ public sealed class TeamServiceTests : TeamsTestHarness
         SeedJoinRequest(team.Id, user.Id, TeamJoinRequestStatus.Approved);
         SeedJoinRequest(team.Id, user.Id, TeamJoinRequestStatus.Rejected);
         SeedJoinRequest(team.Id, user.Id, TeamJoinRequestStatus.Withdrawn);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetPendingRequestsForUserAsync(user.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetPendingRequestsForUserAsync(user.Id, TestContext.Current.CancellationToken);
 
         var request = result.Should().ContainSingle().Subject;
         request.Id.Should().Be(pending.Id);
         request.UserId.Should().Be(user.Id);
         request.TeamName.Should().Be(team.Name);
         request.TeamSlug.Should().Be(team.Slug);
-        await _service.WithdrawJoinRequestAsync(pending.Id, user.Id, Xunit.TestContext.Current.CancellationToken);
-        (await _service.GetPendingRequestsForUserAsync(user.Id, Xunit.TestContext.Current.CancellationToken))
+        await _service.WithdrawJoinRequestAsync(pending.Id, user.Id, TestContext.Current.CancellationToken);
+        (await _service.GetPendingRequestsForUserAsync(user.Id, TestContext.Current.CancellationToken))
             .Should().BeEmpty();
     }
 
@@ -2595,9 +2566,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var team = SeedTeam("Alpha");
         var user = SeedUser();
         SeedJoinRequest(team.Id, user.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetUserPendingRequestAsync(team.Id, user.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetUserPendingRequestAsync(team.Id, user.Id, TestContext.Current.CancellationToken);
 
         result.Should().NotBeNull();
         result.UserId.Should().Be(user.Id);
@@ -2608,9 +2579,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
     {
         var team = SeedTeam("Alpha");
         var user = SeedUser();
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetUserPendingRequestAsync(team.Id, user.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetUserPendingRequestAsync(team.Id, user.Id, TestContext.Current.CancellationToken);
 
         result.Should().BeNull();
     }
@@ -2621,9 +2592,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var team = SeedTeam("Alpha");
         var user = SeedUser();
         SeedJoinRequest(team.Id, user.Id, TeamJoinRequestStatus.Approved);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetUserPendingRequestAsync(team.Id, user.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetUserPendingRequestAsync(team.Id, user.Id, TestContext.Current.CancellationToken);
 
         result.Should().BeNull();
     }
@@ -2641,9 +2612,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         SeedTeamMember(team.Id, active.Id);
         SeedTeamMember(team.Id, left.Id,
             leftAt: Clock.GetCurrentInstant() - Duration.FromDays(1));
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetTeamAsync(team.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetTeamAsync(team.Id, TestContext.Current.CancellationToken);
 
         result.Should().NotBeNull();
         result.Members.Should().ContainSingle();
@@ -2683,9 +2654,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
             JoinedAt = Clock.GetCurrentInstant() - Duration.FromDays(1)
         };
         await TeamsDb.TeamMembers.AddRangeAsync(m1, m2, m3);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetTeamAsync(team.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetTeamAsync(team.Id, TestContext.Current.CancellationToken);
 
         result.Should().NotBeNull();
         result.Members.Should().HaveCount(3);
@@ -2700,9 +2671,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var team = SeedTeam("Alpha");
         var user = SeedUser(displayName: "Alice");
         SeedTeamMember(team.Id, user.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetTeamAsync(team.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetTeamAsync(team.Id, TestContext.Current.CancellationToken);
 
         var member = result!.Members.Should().ContainSingle().Subject;
         member.DisplayName.Should().Be("Alice");
@@ -2712,9 +2683,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
     public async Task GetTeamAsync_NoMembers_ReturnsEmpty()
     {
         var team = SeedTeam("Alpha");
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetTeamAsync(team.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetTeamAsync(team.Id, TestContext.Current.CancellationToken);
 
         result.Should().NotBeNull();
         result.Members.Should().BeEmpty();
@@ -2730,9 +2701,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         SeedTeam("Alpha");
         SeedTeam("Beta");
         SeedTeam("Charlie");
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetAdminTeamListAsync(1, 2, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetAdminTeamListAsync(1, 2, TestContext.Current.CancellationToken);
 
         result.Teams.Should().HaveCount(2);
         result.TotalCount.Should().Be(3);
@@ -2744,9 +2715,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         SeedTeam("Alpha");
         SeedTeam("Beta");
         SeedTeam("Charlie");
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetAdminTeamListAsync(2, 2, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetAdminTeamListAsync(2, 2, TestContext.Current.CancellationToken);
 
         result.Teams.Should().ContainSingle();
         result.TotalCount.Should().Be(3);
@@ -2758,9 +2729,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var team = SeedTeam("Alpha");
         var active = SeedUser(displayName: "Active");
         SeedTeamMember(team.Id, active.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetAdminTeamListAsync(1, 10, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetAdminTeamListAsync(1, 10, TestContext.Current.CancellationToken);
 
         result.Teams.Single().MemberCount.Should().Be(1);
     }
@@ -2771,9 +2742,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var team = SeedTeam("Alpha");
         var u1 = SeedUser(displayName: "U1");
         SeedJoinRequest(team.Id, u1.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetAdminTeamListAsync(1, 10, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetAdminTeamListAsync(1, 10, TestContext.Current.CancellationToken);
 
         result.Teams.Single().PendingRequestCount.Should().Be(1);
     }
@@ -2783,9 +2754,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
     {
         SeedTeam("Active");
         SeedTeam("Inactive", isActive: false);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetAdminTeamListAsync(1, 10, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetAdminTeamListAsync(1, 10, TestContext.Current.CancellationToken);
 
         result.TotalCount.Should().Be(2);
         result.Teams.Should().HaveCount(2);
@@ -2796,9 +2767,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
     {
         SeedTeam("Zebra");
         SeedTeam("Volunteers", type: SystemTeamType.Volunteers);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetAdminTeamListAsync(1, 10, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetAdminTeamListAsync(1, 10, TestContext.Current.CancellationToken);
 
         // SystemTeamType.None(0) < Volunteers(1), so None sorts first in ascending order
         result.Teams[0].SystemTeamType.Should().BeNull();
@@ -2810,12 +2781,12 @@ public sealed class TeamServiceTests : TeamsTestHarness
     // ==========================================================================
 
     [HumansTheory]
-    [Xunit.InlineData(false, "missing")]
-    [Xunit.InlineData(true, "missing")]
-    [Xunit.InlineData(false, "deleted")]
-    [Xunit.InlineData(true, "deleted")]
-    [Xunit.InlineData(false, "merged")]
-    [Xunit.InlineData(true, "merged")]
+    [InlineData(false, "missing")]
+    [InlineData(true, "missing")]
+    [InlineData(false, "deleted")]
+    [InlineData(true, "deleted")]
+    [InlineData(false, "merged")]
+    [InlineData(true, "merged")]
     public async Task MembershipGrant_InvalidPerson_DoesNotCreateFootprint(bool assignRole, string kind)
     {
         var actor = SeedUser(displayName: "Actor");
@@ -2831,26 +2802,26 @@ public sealed class TeamServiceTests : TeamsTestHarness
             target.MergedAt = Clock.GetCurrentInstant();
             target.MergedToUserId = string.Equals(kind, "merged", StringComparison.Ordinal) ? Guid.NewGuid() : null;
         }
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         Func<Task> add = async () =>
         {
             if (assignRole)
-                await _service.AssignToRoleAsync(definition.Id, targetId, actor.Id, Xunit.TestContext.Current.CancellationToken);
+                await _service.AssignToRoleAsync(definition.Id, targetId, actor.Id, TestContext.Current.CancellationToken);
             else
-                await _service.AddMemberToTeamAsync(team.Id, targetId, actor.Id, Xunit.TestContext.Current.CancellationToken);
+                await _service.AddMemberToTeamAsync(team.Id, targetId, actor.Id, TestContext.Current.CancellationToken);
         };
 
         await add.Should().ThrowAsync<InvalidOperationException>();
-        (await TeamsDb.TeamMembers.CountAsync(Xunit.TestContext.Current.CancellationToken)).Should().Be(0);
-        (await GoogleIntegrationDb.GoogleSyncOutboxEvents.CountAsync(Xunit.TestContext.Current.CancellationToken)).Should().Be(0);
-        (await TeamsDb.TeamRoleAssignments.CountAsync(Xunit.TestContext.Current.CancellationToken)).Should().Be(0);
+        (await TeamsDb.TeamMembers.CountAsync(TestContext.Current.CancellationToken)).Should().Be(0);
+        (await GoogleIntegrationDb.GoogleSyncOutboxEvents.CountAsync(TestContext.Current.CancellationToken)).Should().Be(0);
+        (await TeamsDb.TeamRoleAssignments.CountAsync(TestContext.Current.CancellationToken)).Should().Be(0);
         AuditLog.ReceivedCalls().Should().BeEmpty();
     }
 
     [HumansTheory]
-    [Xunit.InlineData(false)]
-    [Xunit.InlineData(true)]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task AddMemberToTeamAsync_MergeAlias_UsesSurvivorForMembershipAndPendingRequest(bool alreadyMember)
     {
         var actor = SeedUser(displayName: "Actor");
@@ -2859,27 +2830,27 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var sourceId = Guid.NewGuid();
         var request = SeedJoinRequest(team.Id, target.Id);
         if (alreadyMember) SeedTeamMember(team.Id, target.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
         _userService.GetUserInfoAsync(sourceId, Arg.Any<CancellationToken>()).Returns(new ValueTask<UserInfo?>(
             UserInfo.Create(target, [], [], [], null, [])));
 
         if (alreadyMember)
         {
-            var add = () => _service.AddMemberToTeamAsync(team.Id, sourceId, actor.Id, Xunit.TestContext.Current.CancellationToken);
+            var add = () => _service.AddMemberToTeamAsync(team.Id, sourceId, actor.Id, TestContext.Current.CancellationToken);
             await add.Should().ThrowAsync<InvalidOperationException>().WithMessage("*already a member*");
             AuditLog.ReceivedCalls().Should().BeEmpty();
         }
         else
-            (await _service.AddMemberToTeamAsync(team.Id, sourceId, actor.Id, Xunit.TestContext.Current.CancellationToken))
+            (await _service.AddMemberToTeamAsync(team.Id, sourceId, actor.Id, TestContext.Current.CancellationToken))
                 .UserId.Should().Be(target.Id);
 
         TeamsDb.ChangeTracker.Clear();
-        var member = await TeamsDb.TeamMembers.AsNoTracking().SingleAsync(Xunit.TestContext.Current.CancellationToken);
+        var member = await TeamsDb.TeamMembers.AsNoTracking().SingleAsync(TestContext.Current.CancellationToken);
         member.UserId.Should().Be(target.Id);
         var savedRequest = await TeamsDb.TeamJoinRequests.AsNoTracking().SingleAsync(r => r.Id == request.Id,
-            Xunit.TestContext.Current.CancellationToken);
+            TestContext.Current.CancellationToken);
         savedRequest.Status.Should().Be(alreadyMember ? TeamJoinRequestStatus.Pending : TeamJoinRequestStatus.Approved);
-        var outbox = await GoogleIntegrationDb.GoogleSyncOutboxEvents.AsNoTracking().ToListAsync(Xunit.TestContext.Current.CancellationToken);
+        var outbox = await GoogleIntegrationDb.GoogleSyncOutboxEvents.AsNoTracking().ToListAsync(TestContext.Current.CancellationToken);
         if (alreadyMember) outbox.Should().BeEmpty();
         else outbox.Should().ContainSingle().Which.UserId.Should().Be(target.Id);
     }
@@ -2893,17 +2864,17 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var team = SeedTeam("Alpha");
         var member = SeedTeamMember(team.Id, target.Id);
         var definition = SeedTeamRoleDefinition(team.Id, isManagement: false);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
         var sourceId = Guid.NewGuid();
         _userService.GetUserInfoAsync(sourceId, Arg.Any<CancellationToken>()).Returns(new ValueTask<UserInfo?>(
             UserInfo.Create(target, [], [], [], null, [])));
 
         var assignment = await _service.AssignToRoleAsync(definition.Id, sourceId, actor.Id,
-            Xunit.TestContext.Current.CancellationToken);
+            TestContext.Current.CancellationToken);
 
         assignment.TeamMemberId.Should().Be(member.Id);
-        (await TeamsDb.TeamMembers.CountAsync(Xunit.TestContext.Current.CancellationToken)).Should().Be(1);
-        (await GoogleIntegrationDb.GoogleSyncOutboxEvents.CountAsync(Xunit.TestContext.Current.CancellationToken)).Should().Be(0);
+        (await TeamsDb.TeamMembers.CountAsync(TestContext.Current.CancellationToken)).Should().Be(1);
+        (await GoogleIntegrationDb.GoogleSyncOutboxEvents.CountAsync(TestContext.Current.CancellationToken)).Should().Be(0);
     }
 
     [HumansFact]
@@ -2912,9 +2883,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var actor = SeedUser(displayName: "Actor");
         var target = SeedUser(displayName: "Target");
         var team = SeedTeam("Alpha");
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.AddMemberToTeamAsync(team.Id, target.Id, actor.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.AddMemberToTeamAsync(team.Id, target.Id, actor.Id, TestContext.Current.CancellationToken);
 
         result.Should().NotBeNull();
         result.TeamId.Should().Be(team.Id);
@@ -2923,8 +2894,26 @@ public sealed class TeamServiceTests : TeamsTestHarness
         result.LeftAt.Should().BeNull();
 
         var memberInDb = await TeamsDb.TeamMembers
-            .FirstOrDefaultAsync(tm => tm.TeamId == team.Id && tm.UserId == target.Id && tm.LeftAt == null, Xunit.TestContext.Current.CancellationToken);
+            .FirstOrDefaultAsync(tm => tm.TeamId == team.Id && tm.UserId == target.Id && tm.LeftAt == null, TestContext.Current.CancellationToken);
         memberInDb.Should().NotBeNull();
+    }
+
+    [HumansTheory]
+    [InlineData(GoogleEmailStatus.Valid, 1)]
+    [InlineData(GoogleEmailStatus.Rejected, 0)]
+    public async Task AddMemberToTeamAsync_RejectedGoogleIdentity_SkipsTheOutboxEvent(GoogleEmailStatus status, int events)
+    {
+        var actor = SeedUser(displayName: "Actor");
+        var target = SeedUser(displayName: "Target");
+        var team = SeedTeam("Alpha");
+        await SaveAllAsync(TestContext.Current.CancellationToken);
+        _googleIdentities.GetWorkspaceIdentityAsync(target.Id, Arg.Any<CancellationToken>())
+            .Returns(new WorkspaceIdentity(target.Id, "target@example.org", status));
+
+        await _service.AddMemberToTeamAsync(team.Id, target.Id, actor.Id, TestContext.Current.CancellationToken);
+
+        (await GoogleIntegrationDb.GoogleSyncOutboxEvents.CountAsync(TestContext.Current.CancellationToken))
+            .Should().Be(events);
     }
 
     [HumansFact]
@@ -2934,18 +2923,18 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var target = SeedUser(displayName: "Target");
         var team = SeedTeam("Alpha");
         var request = SeedJoinRequest(team.Id, target.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        await _service.AddMemberToTeamAsync(team.Id, target.Id, actor.Id, Xunit.TestContext.Current.CancellationToken);
+        await _service.AddMemberToTeamAsync(team.Id, target.Id, actor.Id, TestContext.Current.CancellationToken);
 
         TeamsDb.ChangeTracker.Clear();
-        var saved = await TeamsDb.TeamJoinRequests.SingleAsync(r => r.Id == request.Id, Xunit.TestContext.Current.CancellationToken);
+        var saved = await TeamsDb.TeamJoinRequests.SingleAsync(r => r.Id == request.Id, TestContext.Current.CancellationToken);
         saved.Status.Should().Be(TeamJoinRequestStatus.Approved);
         saved.ReviewedByUserId.Should().Be(actor.Id);
         saved.ReviewNotes.Should().Be("Added directly by team manager");
         saved.ResolvedAt.Should().Be(Clock.GetCurrentInstant());
         (await TeamsDb.TeamMembers.CountAsync(m => m.TeamId == team.Id && m.UserId == target.Id && m.LeftAt == null,
-            Xunit.TestContext.Current.CancellationToken)).Should().Be(1);
+            TestContext.Current.CancellationToken)).Should().Be(1);
     }
 
     [HumansFact]
@@ -2954,9 +2943,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var actor = SeedUser(displayName: "Actor");
         var target = SeedUser(displayName: "Target");
         var team = SeedTeam("Alpha");
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        await _service.AddMemberToTeamAsync(team.Id, target.Id, actor.Id, Xunit.TestContext.Current.CancellationToken);
+        await _service.AddMemberToTeamAsync(team.Id, target.Id, actor.Id, TestContext.Current.CancellationToken);
 
         await AuditLog.Received(1).LogAsync(
             AuditAction.TeamMemberAdded, nameof(Team), team.Id,
@@ -2972,9 +2961,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var team = SeedTeam("Alpha");
         SeedTeamMember(team.Id, actor.Id, TeamMemberRole.Coordinator);
         SeedTeamMember(team.Id, target.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        await _service.RemoveMemberAsync(team.Id, target.Id, actor.Id, Xunit.TestContext.Current.CancellationToken);
+        await _service.RemoveMemberAsync(team.Id, target.Id, actor.Id, TestContext.Current.CancellationToken);
 
         await AuditLog.Received(1).LogAsync(
             AuditAction.TeamMemberRemoved, nameof(Team), team.Id,
@@ -2989,9 +2978,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var target = SeedUser(displayName: "Target");
         var team = SeedTeam("Alpha");
         SeedTeamMember(team.Id, target.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var act = () => _service.AddMemberToTeamAsync(team.Id, target.Id, actor.Id, Xunit.TestContext.Current.CancellationToken);
+        var act = () => _service.AddMemberToTeamAsync(team.Id, target.Id, actor.Id, TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*already a member*");
@@ -3003,30 +2992,30 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var actor = SeedUser(displayName: "Actor");
         var target = SeedUser(displayName: "Target");
         var team = SeedTeam("Volunteers", type: SystemTeamType.Volunteers);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var act = () => _service.AddMemberToTeamAsync(team.Id, target.Id, actor.Id, Xunit.TestContext.Current.CancellationToken);
+        var act = () => _service.AddMemberToTeamAsync(team.Id, target.Id, actor.Id, TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*system team*");
     }
 
     [HumansFact]
-    public async Task LeaveTeamAsync_RemovesManagementAssignments_InvalidatesShiftAuthorizationCache()
+    public async Task LeaveTeamAsync_RemovesManagementAssignments_EndsCoordinatorStatus()
     {
         var user = SeedUser();
         var team = SeedTeam("Operations");
         var roleDefinition = SeedTeamRoleDefinition(team.Id, isManagement: true);
         var member = SeedTeamMember(team.Id, user.Id, TeamMemberRole.Coordinator);
         SeedTeamRoleAssignment(roleDefinition.Id, member.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
-        Cache.Set(CacheKeys.ShiftAuthorization(user.Id), new[] { team.Id });
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.LeaveTeamAsync(team.Id, user.Id, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.LeaveTeamAsync(team.Id, user.Id, TestContext.Current.CancellationToken);
 
         result.Succeeded.Should().BeTrue();
         result.WasCoordinator.Should().BeTrue();
-        Cache.TryGetValue(CacheKeys.ShiftAuthorization(user.Id), out _).Should().BeFalse();
+        (await _service.GetUserCoordinatedTeamIdsAsync(user.Id, Xunit.TestContext.Current.CancellationToken))
+            .Should().NotContain(team.Id);
     }
 
     [HumansFact]
@@ -3083,9 +3072,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         await TeamsDb.TeamRoleDefinitions.AddRangeAsync(alphaDefinition, betaDefinition,
             new TeamRoleDefinition { Id = Guid.NewGuid(), TeamId = inactiveTeam.Id, Name = "Excluded inactive" },
             new TeamRoleDefinition { Id = Guid.NewGuid(), TeamId = systemTeam.Id, Name = "Excluded system" });
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _pages.GetRosterAsync(priority: null, status: null, period: null, cancellationToken: Xunit.TestContext.Current.CancellationToken);
+        var result = await _pages.GetRosterAsync(priority: null, status: null, period: null, cancellationToken: TestContext.Current.CancellationToken);
 
         result.Select(slot => (slot.TeamName, slot.RoleName, slot.SlotNumber))
             .Should().BeEquivalentTo(new[]
@@ -3139,12 +3128,12 @@ public sealed class TeamServiceTests : TeamsTestHarness
         });
 
         TeamsDb.TeamRoleDefinitions.Add(definition);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         var result = await _pages.GetRosterAsync(
             priority: nameof(SlotPriority.Important),
             status: "open",
-            period: nameof(RolePeriod.Event), cancellationToken: Xunit.TestContext.Current.CancellationToken);
+            period: nameof(RolePeriod.Event), cancellationToken: TestContext.Current.CancellationToken);
 
         result.Should().ContainSingle();
         result[0].SlotNumber.Should().Be(3);
@@ -3179,9 +3168,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var oldShift = SeedShift(oldRota.Id);
         SeedShiftSignup(oldShift.Id, user.Id, SignupStatus.Pending);
 
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetAdminTeamListAsync(1, 500, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetAdminTeamListAsync(1, 500, TestContext.Current.CancellationToken);
 
         var summary = result.Teams.Should().ContainSingle(t => t.Name == "Dept A").Subject;
         summary.PendingShiftSignupCount.Should().Be(2);
@@ -3199,9 +3188,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var shift = SeedShift(rota.Id);
         SeedShiftSignup(shift.Id, user.Id, SignupStatus.Pending);
 
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetAdminTeamListAsync(1, 500, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetAdminTeamListAsync(1, 500, TestContext.Current.CancellationToken);
 
         var summary = result.Teams.Should().ContainSingle(t => t.Name == "Dept B").Subject;
         summary.PendingShiftSignupCount.Should().Be(0);
@@ -3223,25 +3212,25 @@ public sealed class TeamServiceTests : TeamsTestHarness
         // Previously-left member should NOT be touched.
         var ghost = SeedUser(displayName: "Ghost");
         SeedTeamMember(team.Id, ghost.Id, leftAt: Clock.GetCurrentInstant() - Duration.FromDays(30));
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
         var actor = Guid.NewGuid();
         // Act
-        await _service.DeleteTeamAsync(team.Id, actor, Xunit.TestContext.Current.CancellationToken);
+        await _service.DeleteTeamAsync(team.Id, actor, TestContext.Current.CancellationToken);
 
         // Service uses its own DbContext; detach trackers so assertions re-read
         // from the store rather than returning stale tracked entities.
         ClearAllTrackers();
 
         // Assert â€” team soft-deleted
-        var reloaded = await TeamsDb.Teams.AsNoTracking().FirstOrDefaultAsync(t => t.Id == team.Id, Xunit.TestContext.Current.CancellationToken);
+        var reloaded = await TeamsDb.Teams.AsNoTracking().FirstOrDefaultAsync(t => t.Id == team.Id, TestContext.Current.CancellationToken);
         reloaded!.IsActive.Should().BeFalse();
 
         // All previously-active memberships now have LeftAt set.
         var aliceMember = await TeamsDb.TeamMembers.AsNoTracking()
-            .FirstAsync(tm => tm.TeamId == team.Id && tm.UserId == alice.Id, Xunit.TestContext.Current.CancellationToken);
+            .FirstAsync(tm => tm.TeamId == team.Id && tm.UserId == alice.Id, TestContext.Current.CancellationToken);
         var bobMember = await TeamsDb.TeamMembers.AsNoTracking()
-            .FirstAsync(tm => tm.TeamId == team.Id && tm.UserId == bob.Id, Xunit.TestContext.Current.CancellationToken);
+            .FirstAsync(tm => tm.TeamId == team.Id && tm.UserId == bob.Id, TestContext.Current.CancellationToken);
         aliceMember.LeftAt.Should().NotBeNull();
         bobMember.LeftAt.Should().NotBeNull();
         aliceMember.LeftAt.Should().Be(Clock.GetCurrentInstant());
@@ -3249,7 +3238,7 @@ public sealed class TeamServiceTests : TeamsTestHarness
 
         // Previously-left membership is unchanged (still has its original LeftAt).
         var ghostMember = await TeamsDb.TeamMembers.AsNoTracking()
-            .FirstAsync(tm => tm.TeamId == team.Id && tm.UserId == ghost.Id, Xunit.TestContext.Current.CancellationToken);
+            .FirstAsync(tm => tm.TeamId == team.Id && tm.UserId == ghost.Id, TestContext.Current.CancellationToken);
         ghostMember.LeftAt.Should().Be(Clock.GetCurrentInstant() - Duration.FromDays(30));
 
         foreach (var userId in new[] { alice.Id, bob.Id })
@@ -3261,7 +3250,7 @@ public sealed class TeamServiceTests : TeamsTestHarness
         }
         AuditLog.ReceivedCalls().Count(c => string.Equals(c.GetMethodInfo().Name, nameof(IAuditLogService.LogAsync), StringComparison.Ordinal))
             .Should().Be(2, "already-left memberships must not receive another removal audit");
-        await _service.DeleteTeamAsync(team.Id, actor, Xunit.TestContext.Current.CancellationToken);
+        await _service.DeleteTeamAsync(team.Id, actor, TestContext.Current.CancellationToken);
         AuditLog.ReceivedCalls().Count(c => string.Equals(c.GetMethodInfo().Name, nameof(IAuditLogService.LogAsync), StringComparison.Ordinal)).Should().Be(2);
 
         // DeactivateResourcesForTeamAsync is intentionally NOT called from DeleteTeamAsync:
@@ -3276,13 +3265,13 @@ public sealed class TeamServiceTests : TeamsTestHarness
     public async Task DeleteTeamAsync_NoActiveMembers_StillSoftDeletes()
     {
         var team = SeedTeam("Empty Team");
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        await _service.DeleteTeamAsync(team.Id, Guid.NewGuid(), Xunit.TestContext.Current.CancellationToken);
+        await _service.DeleteTeamAsync(team.Id, Guid.NewGuid(), TestContext.Current.CancellationToken);
 
         ClearAllTrackers();
 
-        var reloaded = await TeamsDb.Teams.AsNoTracking().FirstOrDefaultAsync(t => t.Id == team.Id, Xunit.TestContext.Current.CancellationToken);
+        var reloaded = await TeamsDb.Teams.AsNoTracking().FirstOrDefaultAsync(t => t.Id == team.Id, TestContext.Current.CancellationToken);
         reloaded!.IsActive.Should().BeFalse();
 
         await _teamResourceService.DidNotReceive().DeactivateResourcesForTeamAsync(
@@ -3300,9 +3289,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         second.GoogleGroupPrefix = "shared";
         SeedTeamMember(first.Id, alice.Id);
         SeedTeamMember(second.Id, bob.Id);
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetExpectedAsync(ct: Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.GetExpectedAsync(ct: TestContext.Current.CancellationToken);
 
         result.Should().NotContainKey($"shared@{DomainConstants.GoogleGroupDomain}");
     }
@@ -3352,11 +3341,11 @@ public sealed class TeamServiceTests : TeamsTestHarness
     {
         var settingsService = Substitute.For<ISettingsService>();
         settingsService.GetActiveEventSettingsAsync(Arg.Any<CancellationToken>())
-            .Returns(_ =>
+            .Returns(async ci =>
             {
                 var active = ShiftsDb.EventSettings.Local.FirstOrDefault(e => e.IsActive)
-                    ?? ShiftsDb.EventSettings.FirstOrDefault(e => e.IsActive);
-                return Task.FromResult(active is null ? null : ToEventSettingsInfo(active));
+                    ?? await ShiftsDb.EventSettings.FirstOrDefaultAsync(e => e.IsActive, ci.Arg<CancellationToken>());
+                return active is null ? null : ToEventSettingsInfo(active);
             });
         return settingsService;
     }

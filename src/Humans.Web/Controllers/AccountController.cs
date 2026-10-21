@@ -200,7 +200,9 @@ public class AccountController(
     {
         returnUrl ??= Url.Content("~/");
 
-        var user = await magicLinkService.VerifyLoginTokenAsync(userId, token);
+        var user = await magicLinkService.VerifyLoginTokenAsync(userId, token)
+            ? await FindIdentityUserAsync(userId)
+            : null;
         if (user is null)
         {
             return View("MagicLinkError");
@@ -250,9 +252,22 @@ public class AccountController(
             return View("MagicLinkError");
         }
 
+        foreach (var (value, field, label) in new[]
+        {
+            (burnerName, nameof(burnerName), "CompleteSignup_BurnerNameLabel"),
+            (firstName, nameof(firstName), "CompleteSignup_FirstNameLabel"),
+            (lastName, nameof(lastName), "CompleteSignup_LastNameLabel")
+        })
+        {
+            if (value?.Trim().Length > 256)
+                ModelState.AddModelError(field, localizer["Validation_MaxLength", localizer[label].Value, 256]);
+        }
         if (string.IsNullOrWhiteSpace(burnerName) ||
             string.IsNullOrWhiteSpace(firstName) ||
             string.IsNullOrWhiteSpace(lastName))
+            ModelState.AddModelError(string.Empty, localizer["CompleteSignup_AllFieldsRequired"]);
+
+        if (!ModelState.IsValid)
         {
             ViewData["ReturnUrl"] = returnUrl;
             ViewData["Email"] = verifiedEmail;
@@ -260,7 +275,6 @@ public class AccountController(
             ViewData["BurnerName"] = burnerName;
             ViewData["FirstName"] = firstName;
             ViewData["LastName"] = lastName;
-            ModelState.AddModelError(string.Empty, localizer["CompleteSignup_AllFieldsRequired"]);
             return View("CompleteSignup");
         }
 
@@ -313,8 +327,8 @@ public class AccountController(
             throw;
         }
 
-#pragma warning disable CS0618 // result.User is a record field on MagicLinkSignupCompletionResult, not a cross-domain nav read; arch test pattern-matches the literal `.User`.
-        if (result.User is null)
+        var user = await FindIdentityUserAsync(result.UserId);
+        if (user is null)
         {
             // Provisioning failed and rolled itself back, so the redemption
             // accomplished nothing. Hand the link back rather than making the
@@ -323,12 +337,15 @@ public class AccountController(
             return View("MagicLinkError");
         }
 
-        await signInManager.SignInAsync(result.User, isPersistent: true);
-#pragma warning restore CS0618
+        await signInManager.SignInAsync(user, isPersistent: true);
         loginMethods.RecordMagicLink();
 
         return RedirectToLocal(returnUrl);
     }
+
+    // Auth and Users contracts hand back ids; the Identity entity SignInManager needs is loaded here.
+    private async Task<User?> FindIdentityUserAsync(Guid? userId) =>
+        userId is { } id ? await userManager.FindByIdAsync(id.ToString()) : null;
 
     // --- Gate terminal ---
 

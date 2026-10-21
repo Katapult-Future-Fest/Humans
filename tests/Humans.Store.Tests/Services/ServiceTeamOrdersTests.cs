@@ -242,7 +242,7 @@ public class ServiceTeamOrdersTests
             });
         var orderId = Guid.NewGuid();
         var productId = Guid.NewGuid();
-        _repo.GetOrdersForTeamsWithLinesAsync(
+        _repo.GetOrdersForTeamsWithLinesAndPaymentsAsync(
                 Arg.Is<IReadOnlyCollection<Guid>>(ids => ids.SequenceEqual(new[] { deptId })),
                 2026, Arg.Any<CancellationToken>())
             .Returns([new Order
@@ -326,7 +326,7 @@ public class ServiceTeamOrdersTests
                 UnitPriceEur = 10m, VatRatePercent = 0m,
                 OrderableUntil = new LocalDate(2026,12,31), IsActive = true }
         ]);
-        _repo.GetOrdersForTeamsWithLinesAsync(
+        _repo.GetOrdersForTeamsWithLinesAndPaymentsAsync(
                 Arg.Is<IReadOnlyCollection<Guid>>(ids => ids.Contains(deptId)),
                 2026, Arg.Any<CancellationToken>())
             .Returns([new Order {
@@ -455,13 +455,13 @@ public class ServiceTeamOrdersTests
 
     [HumansFact]
     public Task DeleteOrderAsync_rejects_an_order_holding_only_a_pending_payment() =>
-        AssertDeleteRefusedWithOnlyPayment(PaymentStatus.Pending);
+        AssertDeleteRefusedWithOnlyPaymentAsync(PaymentStatus.Pending);
 
     [HumansFact]
     public Task DeleteOrderAsync_rejects_an_order_holding_only_a_failed_payment() =>
-        AssertDeleteRefusedWithOnlyPayment(PaymentStatus.Failed);
+        AssertDeleteRefusedWithOnlyPaymentAsync(PaymentStatus.Failed);
 
-    private async Task AssertDeleteRefusedWithOnlyPayment(PaymentStatus status)
+    private async Task AssertDeleteRefusedWithOnlyPaymentAsync(PaymentStatus status)
     {
         // Only Paid counts toward the balance, so an order holding only a Pending or Failed row
         // reads zero — the row itself still has to survive.

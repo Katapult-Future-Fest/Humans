@@ -1,10 +1,8 @@
 using Humans.Auth.Data;
 using Humans.Auth.Contracts;
-using Microsoft.Extensions.Logging;
 using NodaTime;
 using Humans.Base.Attributes;
 using Humans.Base.Extensions;
-using Humans.Base.Interfaces.Caching;
 using Humans.Base.Constants;
 using Humans.Auth.Domain;
 using Humans.AuditLog.Contracts;
@@ -26,9 +24,7 @@ internal sealed class RoleAssignmentService(
     IAuditLogService auditLogService,
     INotificationEmitter notificationService,
     ISystemTeamSync systemTeamSyncJob,
-    INavBadgeCacheInvalidator navBadge,
-    IRoleAssignmentClaimsCacheInvalidator claimsInvalidator,
-    IRoleAssignmentCacheInvalidator roleAssignmentCacheInvalidator,
+    CachingRoleAssignmentService rowCache,
     IClock clock,
     ILogger<RoleAssignmentService> logger) : IRoleAssignmentManagement, IUserDataContributor, IUserMerge
 {
@@ -120,15 +116,13 @@ internal sealed class RoleAssignmentService(
         };
 
         await repository.AddAsync(roleAssignment, ct);
-        roleAssignmentCacheInvalidator.InvalidateAll();
+        // Evict before anything below reads roles back (the Board team sync).
+        rowCache.Clear();
 
         await auditLogService.LogAsync(
             AuditAction.RoleAssigned, nameof(User), userId,
             $"'{roleName}'",
             assignerId);
-
-        navBadge.Invalidate();
-        claimsInvalidator.Invalidate(userId);
 
         // Best-effort in-app notification.
         try
@@ -183,15 +177,13 @@ internal sealed class RoleAssignmentService(
         }
 
         await repository.UpdateAsync(roleAssignment, ct);
-        roleAssignmentCacheInvalidator.InvalidateAll();
+        // Evict before anything below reads roles back (the Board team sync).
+        rowCache.Clear();
 
         await auditLogService.LogAsync(
             AuditAction.RoleEnded, nameof(User), roleAssignment.UserId,
             $"'{roleAssignment.RoleName}'",
             enderId);
-
-        navBadge.Invalidate();
-        claimsInvalidator.Invalidate(roleAssignment.UserId);
 
         // Best-effort in-app notification.
         try
@@ -255,24 +247,26 @@ internal sealed class RoleAssignmentService(
         }
 
         await repository.UpdateManyAsync(activeRoles, ct);
-        roleAssignmentCacheInvalidator.InvalidateAll();
-        claimsInvalidator.Invalidate(userId);
+        rowCache.Clear();
 
         return activeRoles.Count;
     }
 
-    public Task ReassignAsync(Guid sourceUserId, Guid targetUserId, Guid actorUserId, Instant updatedAt,
+    public async Task ReassignAsync(Guid sourceUserId, Guid targetUserId, Guid actorUserId, Instant updatedAt,
         CancellationToken cancellationToken)
     {
-        // Caller invalidates caches after the merge's commit point — see AccountMergeService.MergeAsync.
-        return repository.ReassignToUserAsync(sourceUserId, targetUserId, updatedAt, cancellationToken);
+        // The merge fold commits each section's step on its own (no wrapping transaction),
+        // so the re-FK is final when it returns. Evict even when it throws, as the
+        // orchestrator's finally used to.
+        try
+        {
+            await repository.ReassignToUserAsync(sourceUserId, targetUserId, updatedAt, cancellationToken);
+        }
+        finally
+        {
+            rowCache.Clear();
+        }
     }
-
-    public void InvalidateClaimsCacheForUser(Guid userId) => claimsInvalidator.Invalidate(userId);
-
-    public void InvalidateNavBadgeCache() => navBadge.Invalidate();
-
-    public void InvalidateRoleAssignmentCache() => roleAssignmentCacheInvalidator.InvalidateAll();
 
     public async Task<IReadOnlyList<RoleAssignmentSnapshot>> GetActiveForUserAsync(Guid userId, CancellationToken ct = default)
     {

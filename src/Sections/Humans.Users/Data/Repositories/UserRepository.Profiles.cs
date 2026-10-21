@@ -108,7 +108,7 @@ internal sealed partial class UserRepository
     }
 
     public async Task UpdateAsync(
-        Profile profile, CancellationToken ct = default, IReadOnlyList<CVEntry>? volunteerHistory = null, string? displayName = null)
+        Profile profile, CancellationToken ct = default, IReadOnlyList<CVEntry>? volunteerHistory = null)
     {
         await using var ctx = await _factory.CreateDbContextAsync(ct);
         // Attach the detached entity and mark only its own scalar properties as
@@ -119,12 +119,12 @@ internal sealed partial class UserRepository
         ctx.Entry(profile).State = EntityState.Modified;
         if (volunteerHistory is not null)
             await ReconcileCVEntriesAsync(ctx, profile.Id, volunteerHistory, ct);
-        await UpdateUserStateFromProfileAsync(ctx, profile, ct, displayName);
+        await UpdateUserStateFromProfileAsync(ctx, profile, ct);
         await ctx.SaveChangesAsync(ct);
     }
 
     private static async Task UpdateUserStateFromProfileAsync(
-        UsersDbContext ctx, Profile profile, CancellationToken ct, string? displayName = null)
+        UsersDbContext ctx, Profile profile, CancellationToken ct)
     {
         var user = await ctx.Users.FindAsync([profile.UserId], ct);
         if (user is null)
@@ -133,8 +133,6 @@ internal sealed partial class UserRepository
         // #1097 dual-write: the names belong to the human, not the membership profile.
         // Every Profile write funnels through AddAsync/UpdateAsync, so this is the one seam.
         CopyNamesToUser(user, profile);
-        if (displayName is not null)
-            user.DisplayName = displayName;
         user.State = UserStateEvaluator.Classify(user, profile);
     }
 
@@ -235,39 +233,6 @@ internal sealed partial class UserRepository
             await ctx.SaveChangesAsync(ct);
 
         return suspended;
-    }
-
-    public async Task<IReadOnlyList<(Guid UserId, MembershipTier NewTier)>>
-        DowngradeTierForExpiredAsync(
-            MembershipTier currentTier,
-            IReadOnlyCollection<Guid> userIdsToKeep,
-            IReadOnlyDictionary<Guid, MembershipTier> fallbackTierByUser,
-            Instant now,
-            CancellationToken ct = default)
-    {
-        await using var ctx = await _factory.CreateDbContextAsync(ct);
-        var keepList = userIdsToKeep is IList<Guid> list ? list : userIdsToKeep.ToList();
-        var profiles = await ctx.Profiles
-            .Where(p => p.MembershipTier == currentTier && !keepList.Contains(p.UserId))
-            .ToListAsync(ct);
-
-        var result = new List<(Guid UserId, MembershipTier NewTier)>(profiles.Count);
-        foreach (var profile in profiles)
-        {
-            var newTier = fallbackTierByUser.TryGetValue(profile.UserId, out var other)
-                ? other
-                : MembershipTier.Volunteer;
-            profile.MembershipTier = newTier;
-            profile.UpdatedAt = now;
-            result.Add((profile.UserId, newTier));
-        }
-
-        if (profiles.Count > 0)
-        {
-            await ctx.SaveChangesAsync(ct);
-        }
-
-        return result;
     }
 
     public async Task<(Guid ProfileId, string? ContentType, string? StorageKey)?> ReassignSubAggregatesToUserAsync(

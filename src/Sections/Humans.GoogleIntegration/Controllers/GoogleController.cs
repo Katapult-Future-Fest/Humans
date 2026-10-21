@@ -4,7 +4,6 @@ using Humans.Base.Controllers;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Humans.GoogleIntegration.Models;
-using Humans.AuditLog.Contracts;
 using Humans.Users.Contracts;
 using Humans.Teams.Contracts;
 using Humans.Base.Authorization;
@@ -21,6 +20,7 @@ internal sealed class GoogleController(
     ITeamResourceManagement teamResourceService,
     IEmailProvisioningService emailProvisioningService,
     IGoogleAdminService googleAdminService,
+    IGoogleIntegrationService workspaceIdentities,
     IGoogleSyncLogService syncLog,
     ILogger<GoogleController> logger) : HumansControllerBase(userService)
 {
@@ -286,13 +286,17 @@ internal sealed class GoogleController(
         return View();
     }
 
-    [HttpGet("Sync/Preview/{resourceType}")]
+    // POST, not GET (HUM0038): a preview stamps the resource's error column
+    // when a Google lookup fails, so it writes. CancellationToken.None, as on
+    // the execute paths (HUM0033).
+    [HttpPost("Sync/Preview/{resourceType}")]
     [Authorize(Policy = PolicyNames.TeamsAdminBoardOrAdmin)]
+    [ValidateAntiForgeryToken]
     public async Task<IActionResult> SyncPreview(GoogleResourceType resourceType)
     {
         var result = resourceType == GoogleResourceType.Group
-            ? await googleGroupSync.ReconcileAllAsync(SyncAction.Preview, HttpContext.RequestAborted, GoogleSyncSource.ManualSync)
-            : await googleSyncService.SyncResourcesByTypeAsync(resourceType, SyncAction.Preview, HttpContext.RequestAborted);
+            ? await googleGroupSync.ReconcileAllAsync(SyncAction.Preview, CancellationToken.None, GoogleSyncSource.ManualSync)
+            : await googleSyncService.SyncResourcesByTypeAsync(resourceType, SyncAction.Preview, CancellationToken.None);
 
         result.Diffs.Sort((a, b) =>
             string.Compare(a.ResourceName, b.ResourceName, StringComparison.Ordinal));
@@ -616,14 +620,15 @@ internal sealed class GoogleController(
         ViewData["GoogleNotConfigured"] = !googleClient.IsConfigured;
         var events = (await googleSyncService.GetRecentOutboxEventsAsync(200, ct)).ToList();
 
-        // Display info via the UserInfo batch lookup. GoogleEmail from IsGoogle row, else primary. BurnerName per burnername-is-the-display-name.
+        // Display info via the UserInfo batch lookup. Google identity address, else primary. BurnerName per burnername-is-the-display-name.
         var userIds = events.Select(e => e.UserId).Distinct().ToList();
         var teamIds = events.Select(e => e.TeamId).Distinct().ToList();
         IReadOnlyDictionary<Guid, UserInfo> infos = userIds.Count == 0
             ? new Dictionary<Guid, UserInfo>()
             : await UserService.GetUserInfosAsync(userIds, ct);
+        var identities = await workspaceIdentities.GetWorkspaceIdentitiesAsync(userIds, ct);
         var googleEmailLookup = userIds.ToDictionary(userId => userId,
-            userId => infos.GetValueOrDefault(userId)?.GoogleEmail ?? infos.GetValueOrDefault(userId)?.Email ?? "unknown");
+            userId => identities.GetValueOrDefault(userId)?.Email ?? infos.GetValueOrDefault(userId)?.Email ?? "unknown");
         var displayNameLookup = userIds.ToDictionary(userId => userId,
             userId => infos.GetValueOrDefault(userId)?.BurnerName ?? "(unknown)");
         var teamsById = await teamService.GetTeamsAsync(ct);
@@ -645,26 +650,17 @@ internal sealed class GoogleController(
     [HttpPost("SyncOutbox/{id:guid}/Requeue")]
     [Authorize(Policy = PolicyNames.AdminOnly)]
     [ValidateAntiForgeryToken]
-    public async Task<IActionResult> RequeueOutboxEvent(
-        Guid id,
-        [FromServices] IAuditLogService auditLogService)
+    public async Task<IActionResult> RequeueOutboxEvent(Guid id)
     {
         var currentUser = await GetCurrentUserInfoAsync();
         if (currentUser is null) return Unauthorized();
 
-        var requeued = await googleSyncService.RequeueOutboxEventAsync(id);
+        var requeued = await googleSyncService.RequeueOutboxEventAsync(id, currentUser.Id);
         if (!requeued)
         {
             SetError("Event not found or not in a failed state.");
             return RedirectToAction(nameof(SyncOutbox));
         }
-
-        await auditLogService.LogAsync(
-            AuditAction.GoogleSyncRetryScheduled,
-            "GoogleSyncOutboxEvent",
-            id,
-            $"Admin manually requeued Google sync outbox event {id}",
-            currentUser.Id);
 
         SetSuccess("Event requeued for retry.");
         return RedirectToAction(nameof(SyncOutbox));
@@ -673,20 +669,12 @@ internal sealed class GoogleController(
     [HttpPost("SyncOutbox/RequeueAll")]
     [Authorize(Policy = PolicyNames.AdminOnly)]
     [ValidateAntiForgeryToken]
-    public async Task<IActionResult> RequeueAllFailedOutboxEvents(
-        [FromServices] IAuditLogService auditLogService)
+    public async Task<IActionResult> RequeueAllFailedOutboxEvents()
     {
         var currentUser = await GetCurrentUserInfoAsync();
         if (currentUser is null) return Unauthorized();
 
-        var count = await googleSyncService.RequeueAllFailedOutboxEventsAsync();
-
-        await auditLogService.LogAsync(
-            AuditAction.GoogleSyncRetryScheduled,
-            "GoogleSyncOutbox",
-            Guid.Empty,
-            $"Admin requeued all {count} permanently-failed Google sync outbox event(s)",
-            currentUser.Id);
+        var count = await googleSyncService.RequeueAllFailedOutboxEventsAsync(currentUser.Id);
 
         SetSuccess(count == 0
             ? "No permanently-failed events to requeue."
@@ -697,21 +685,12 @@ internal sealed class GoogleController(
     [HttpPost("Human/{id:guid}/RerunSync")]
     [Authorize(Policy = PolicyNames.AdminOnly)]
     [ValidateAntiForgeryToken]
-    public async Task<IActionResult> RerunGoogleSync(
-        Guid id,
-        [FromServices] IAuditLogService auditLogService)
+    public async Task<IActionResult> RerunGoogleSync(Guid id)
     {
         var currentUser = await GetCurrentUserInfoAsync();
         if (currentUser is null) return Unauthorized();
 
-        var count = await googleSyncService.EnqueueUserSyncAsync(id);
-
-        await auditLogService.LogAsync(
-            AuditAction.GoogleSyncRetryScheduled,
-            "User",
-            id,
-            $"Admin enqueued Google sync re-run for user {id} ({count} team event(s))",
-            currentUser.Id);
+        var count = await googleSyncService.EnqueueUserSyncAsync(id, currentUser.Id);
 
         SetSuccess(count == 0
             ? "User is not a member of any teams — no sync events enqueued."

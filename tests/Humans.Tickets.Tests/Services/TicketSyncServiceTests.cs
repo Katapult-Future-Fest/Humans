@@ -22,11 +22,9 @@ public sealed class TicketSyncServiceTests : TicketsTestHarness
     private readonly IStripeService _stripeService;
     private readonly ICampaignWrite _campaignService;
     private readonly IUserService _userService;
-    private readonly IUserWrite _userServiceWrite;
+    private readonly IEventParticipationManagement _participations;
     private readonly ISettingsService _shiftManagementService;
     private readonly ITicketRepository _ticketRepository;
-    private readonly ITicketCacheInvalidator _ticketCache;
-    private readonly ITicketVendorCacheInvalidator _vendorCache;
     private readonly TicketSyncService _service;
 
     public TicketSyncServiceTests()
@@ -44,15 +42,13 @@ public sealed class TicketSyncServiceTests : TicketsTestHarness
 
         _stripeService = Substitute.For<IStripeService>();
         _userService = NewDbBackedUserService();
-        _userServiceWrite = Substitute.For<IUserWrite>();
-        _userService.GetAllParticipationsForYearAsync(Arg.Any<int>(), Arg.Any<CancellationToken>())
+        _participations = Substitute.For<IEventParticipationManagement>();
+        _participations.GetAllParticipationsAsync(Arg.Any<CancellationToken>())
             .Returns([]);
         _campaignService = Substitute.For<ICampaignWrite>();
         _shiftManagementService = Substitute.For<ISettingsService>();
 
         _ticketRepository = new TicketRepository(TicketsDbFactory, Clock);
-        _vendorCache = Substitute.For<ITicketVendorCacheInvalidator>();
-        _ticketCache = Substitute.For<ITicketCacheInvalidator>();
 
         _service = new TicketSyncService(
             _ticketRepository,
@@ -62,10 +58,8 @@ public sealed class TicketSyncServiceTests : TicketsTestHarness
             Clock,
             settings,
             NullLogger<TicketSyncService>.Instance,
-            _ticketCache,
-            _vendorCache,
             _userService,
-            _userServiceWrite,
+            _participations,
             _campaignService,
             _shiftManagementService);
 
@@ -107,28 +101,39 @@ public sealed class TicketSyncServiceTests : TicketsTestHarness
         dbOrders.Select(o => o.VendorOrderId).Should().BeEquivalentTo("ord_001", "ord_002");
     }
 
-    // ==========================================================================
-    // SyncOrdersAndAttendeesAsync_InvalidatesVendorEventSummary
-    // ==========================================================================
-
     [HumansFact]
-    public async Task SyncOrdersAndAttendeesAsync_InvalidatesVendorEventSummary()
+    public async Task SyncOrdersAndAttendeesAsync_StoresEveryStripeFeeBucket_AndKeepsThemOnResync()
     {
+        var orders = new List<VendorOrderDto>
+        {
+            MakeOrderDto("ord_fees", "Alice Smith", "alice@example.com") with { StripePaymentIntentId = "pi_fees" }
+        };
         _vendorService.GetOrdersAsync(Arg.Any<Instant?>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
-            .Returns([]);
+            .Returns(orders);
         _vendorService.GetIssuedTicketsAsync(Arg.Any<Instant?>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
-            .Returns([]);
+            .Returns(new List<VendorTicketDto>());
+        _stripeService.IsConfigured.Returns(true);
+        _stripeService.GetPaymentDetailsAsync("pi_fees", Arg.Any<CancellationToken>())
+            .Returns(new StripePaymentDetails("card", "visa", StripeFee: 1.20m, ApplicationFee: 0.45m,
+                FeeTax: 0.25m, WithheldTax: 0.10m));
 
         await _service.SyncOrdersAndAttendeesAsync(Xunit.TestContext.Current.CancellationToken);
+        await _service.SyncOrdersAndAttendeesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        _vendorCache.Received(1).InvalidateEventSummary("ev_test_123");
-        _ticketCache.Received(1).InvalidateAll();
+        var order = await TicketsDb.TicketOrders.AsNoTracking().SingleAsync(Xunit.TestContext.Current.CancellationToken);
+        order.StripeFee.Should().Be(1.20m);
+        order.ApplicationFee.Should().Be(0.45m);
+        order.FeeTax.Should().Be(0.25m);
+        order.WithheldTax.Should().Be(0.10m);
+        await _stripeService.Received(1).GetPaymentDetailsAsync("pi_fees", Arg.Any<CancellationToken>());
     }
 
+    // Cache eviction around a failed sync is the caching decorator's job
+    // (CachingTicketQueryServiceTests); this pins the rows it must reload.
     [HumansTheory]
     [Xunit.InlineData(false)]
     [Xunit.InlineData(true)]
-    public async Task SyncOrdersAndAttendeesAsync_ClearsTicketSnapshotsWhenRedemptionFailsAfterWrites(bool oversizedError)
+    public async Task SyncOrdersAndAttendeesAsync_KeepsCommittedRowsWhenRedemptionFailsAfterWrites(bool oversizedError)
     {
         var error = oversizedError
             ? new string('e', 1999) + "😀" + new string('e', 100)
@@ -152,7 +157,6 @@ public sealed class TicketSyncServiceTests : TicketsTestHarness
         var state = await TicketsDb.TicketSyncStates.AsNoTracking().SingleAsync(Xunit.TestContext.Current.CancellationToken);
         state.SyncStatus.Should().Be(TicketSyncStatus.Error);
         state.LastError.Should().Be(oversizedError ? new string('e', 1999) : error);
-        _ticketCache.Received(1).InvalidateAll();
     }
 
     // ==========================================================================
@@ -373,10 +377,8 @@ public sealed class TicketSyncServiceTests : TicketsTestHarness
             Clock,
             settings,
             NullLogger<TicketSyncService>.Instance,
-            Substitute.For<ITicketCacheInvalidator>(),
-            Substitute.For<ITicketVendorCacheInvalidator>(),
             _userService,
-            Substitute.For<IUserWrite>(),
+            Substitute.For<IEventParticipationManagement>(),
             Substitute.For<ICampaignWrite>(),
             Substitute.For<ISettingsService>());
 
@@ -624,7 +626,7 @@ public sealed class TicketSyncServiceTests : TicketsTestHarness
 
         await _service.SyncOrdersAndAttendeesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        await _userServiceWrite.Received(1).SetParticipationFromTicketSyncAsync(
+        await _participations.Received(1).RecordParticipationAsync(
             userId, 2026, ParticipationStatus.Attended,
             checkInInstant, Arg.Any<CancellationToken>());
 
@@ -665,7 +667,7 @@ public sealed class TicketSyncServiceTests : TicketsTestHarness
 
         await _service.SyncOrdersAndAttendeesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        await _userServiceWrite.Received(1).SetParticipationFromTicketSyncAsync(
+        await _participations.Received(1).RecordParticipationAsync(
             userId, 2026, ParticipationStatus.Attended,
             earlier, Arg.Any<CancellationToken>());
     }
@@ -691,7 +693,7 @@ public sealed class TicketSyncServiceTests : TicketsTestHarness
 
         await _service.SyncOrdersAndAttendeesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        await _userServiceWrite.Received(1).SetParticipationFromTicketSyncAsync(
+        await _participations.Received(1).RecordParticipationAsync(
             userId, 2026, ParticipationStatus.Ticketed,
             null, Arg.Any<CancellationToken>());
     }
@@ -710,10 +712,10 @@ public sealed class TicketSyncServiceTests : TicketsTestHarness
         _shiftManagementService.GetActiveEventSettingsAsync()
             .Returns(BurnFixtures.Burn(year: 2026));
 
-        _userService.GetAllParticipationsForYearAsync(2026, Arg.Any<CancellationToken>())
-            .Returns(new List<UserParticipationRow>
+        _participations.GetAllParticipationsAsync(Arg.Any<CancellationToken>())
+            .Returns(new List<EventParticipationInfo>
             {
-                new(userId, ParticipationStatus.Ticketed, ParticipationSource.TicketSync, null)
+                new(userId, 2026, ParticipationStatus.Ticketed, ParticipationSource.TicketSync, null, null)
             });
 
         _vendorService.GetOrdersAsync(Arg.Any<Instant?>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
@@ -726,10 +728,10 @@ public sealed class TicketSyncServiceTests : TicketsTestHarness
 
         await _service.SyncOrdersAndAttendeesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        await _userServiceWrite.DidNotReceive().SetParticipationFromTicketSyncAsync(
+        await _participations.DidNotReceive().RecordParticipationAsync(
             Arg.Any<Guid>(), Arg.Any<int>(), Arg.Any<ParticipationStatus>(),
             Arg.Any<Instant?>(), Arg.Any<CancellationToken>());
-        await _userServiceWrite.DidNotReceive().RemoveTicketSyncParticipationAsync(
+        await _participations.DidNotReceive().RemoveTicketSyncParticipationAsync(
             Arg.Any<Guid>(), Arg.Any<int>(), Arg.Any<CancellationToken>());
     }
 
@@ -745,10 +747,10 @@ public sealed class TicketSyncServiceTests : TicketsTestHarness
         _shiftManagementService.GetActiveEventSettingsAsync()
             .Returns(BurnFixtures.Burn(year: 2026));
 
-        _userService.GetAllParticipationsForYearAsync(2026, Arg.Any<CancellationToken>())
-            .Returns(new List<UserParticipationRow>
+        _participations.GetAllParticipationsAsync(Arg.Any<CancellationToken>())
+            .Returns(new List<EventParticipationInfo>
             {
-                new(userId, ParticipationStatus.Ticketed, ParticipationSource.TicketSync, null)
+                new(userId, 2026, ParticipationStatus.Ticketed, ParticipationSource.TicketSync, null, null)
             });
 
         _vendorService.GetOrdersAsync(Arg.Any<Instant?>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
@@ -761,9 +763,9 @@ public sealed class TicketSyncServiceTests : TicketsTestHarness
 
         await _service.SyncOrdersAndAttendeesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        await _userServiceWrite.Received(1).RemoveTicketSyncParticipationAsync(
+        await _participations.Received(1).RemoveTicketSyncParticipationAsync(
             userId, 2026, Arg.Any<CancellationToken>());
-        await _userServiceWrite.DidNotReceive().SetParticipationFromTicketSyncAsync(
+        await _participations.DidNotReceive().RecordParticipationAsync(
             Arg.Any<Guid>(), Arg.Any<int>(), Arg.Any<ParticipationStatus>(),
             Arg.Any<Instant?>(), Arg.Any<CancellationToken>());
     }
@@ -781,10 +783,10 @@ public sealed class TicketSyncServiceTests : TicketsTestHarness
         _shiftManagementService.GetActiveEventSettingsAsync()
             .Returns(BurnFixtures.Burn(year: 2026));
 
-        _userService.GetAllParticipationsForYearAsync(2026, Arg.Any<CancellationToken>())
-            .Returns(new List<UserParticipationRow>
+        _participations.GetAllParticipationsAsync(Arg.Any<CancellationToken>())
+            .Returns(new List<EventParticipationInfo>
             {
-                new(userId, ParticipationStatus.Ticketed, ParticipationSource.TicketSync, null)
+                new(userId, 2026, ParticipationStatus.Ticketed, ParticipationSource.TicketSync, null, null)
             });
 
         var checkInInstant = Instant.FromUtc(2026, 7, 8, 14, 30);
@@ -801,7 +803,7 @@ public sealed class TicketSyncServiceTests : TicketsTestHarness
 
         await _service.SyncOrdersAndAttendeesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        await _userServiceWrite.Received(1).SetParticipationFromTicketSyncAsync(
+        await _participations.Received(1).RecordParticipationAsync(
             userId, 2026, ParticipationStatus.Attended,
             checkInInstant, Arg.Any<CancellationToken>());
     }

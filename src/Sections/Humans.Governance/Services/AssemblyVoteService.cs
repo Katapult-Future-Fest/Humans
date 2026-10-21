@@ -1,3 +1,4 @@
+using Humans.Governance.Contracts;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
@@ -15,7 +16,6 @@ using Humans.Governance.Services.Dtos;
 using Humans.Notifications.Contracts;
 using Humans.Teams.Contracts;
 using Humans.Users.Contracts;
-using Microsoft.Extensions.Logging;
 using NodaTime;
 using NodaTime.Serialization.SystemTextJson;
 

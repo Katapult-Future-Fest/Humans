@@ -13,7 +13,7 @@
 
 # Roslyn Analyzer Candidates
 
-Forward-looking inventory of *additional* in-repo analyzer rules beyond the currently-shipped set — 26 live rules: `HUM0001`–`HUM0003`, `HUM0005`–`HUM0011`, `HUM0014`–`HUM0016`, `HUM0019`–`HUM0020`, `HUM0025`–`HUM0028`, `HUM0030`–`HUM0031`, `HUM0033`–`HUM0037`, catalogued in [`code-analysis.md`](code-analysis.md). **Retired ids are never reassigned:** `HUM0004` (Profile.IsSuspended write guard, dropped with the column in nobodies-collective/Humans#1217), `HUM0017`/`HUM0018` (cross-section repository injection and "cannot determine the section", retired in nobodies-collective/Humans#1064 — the assembly boundary makes the first a compile error and `[Section]` no longer exists to be missing), `HUM0022`/`HUM0023` (the per-section Notification and Event DbSet-write analyzers, subsumed by the universal `HUM0025`), `HUM0021`/`HUM0024` (retired in nobodies-collective/Humans#1278), `HUM0012`/`HUM0013`/`HUM0029` (all keyed on a `Humans.Application.*` namespace layout the section assemblies replaced), and `HUM0032` (cross-section injection of a write-capable `I*Service`, retired with the `I<Section>ServiceRead` rule). **IDs are assigned at ship time from the next free slot in `AnalyzerReleases.Unshipped.md` — currently `HUM0038`.** The candidate headings below are deliberately *un-numbered*: several once carried provisional `HUM00xx` numbers that later shipped for unrelated rules, so do not pre-claim an id here. This file is the queue we draw from when adding the next analyzer; do not start writing one without checking here first.
+Forward-looking inventory of *additional* in-repo analyzer rules beyond the currently-shipped set — 27 live rules: `HUM0001`–`HUM0003`, `HUM0005`–`HUM0011`, `HUM0014`–`HUM0016`, `HUM0019`–`HUM0020`, `HUM0025`–`HUM0028`, `HUM0030`–`HUM0031`, `HUM0033`–`HUM0038`, catalogued in [`code-analysis.md`](code-analysis.md). **Retired ids are never reassigned:** `HUM0004` (Profile.IsSuspended write guard, dropped with the column in nobodies-collective/Humans#1217), `HUM0017`/`HUM0018` (cross-section repository injection and "cannot determine the section", retired in nobodies-collective/Humans#1064 — the assembly boundary makes the first a compile error and `[Section]` no longer exists to be missing), `HUM0022`/`HUM0023` (the per-section Notification and Event DbSet-write analyzers, subsumed by the universal `HUM0025`), `HUM0021`/`HUM0024` (retired in nobodies-collective/Humans#1278), `HUM0012`/`HUM0013`/`HUM0029` (all keyed on a `Humans.Application.*` namespace layout the section assemblies replaced), and `HUM0032` (cross-section injection of a write-capable `I*Service`, retired with the `I<Section>ServiceRead` rule). **IDs are assigned at ship time from the next free slot in `AnalyzerReleases.Unshipped.md` — currently `HUM0039`.** The candidate headings below are deliberately *un-numbered*: several once carried provisional `HUM00xx` numbers that later shipped for unrelated rules, so do not pre-claim an id here. This file is the queue we draw from when adding the next analyzer; do not start writing one without checking here first.
 
 ## Framing
 
@@ -313,6 +313,43 @@ have the supporting machinery. Each notes the missing piece.
   attribute on a base class). Without a baseline-aware analyzer the
   false-positive rate is too high.
 
+### Controller-intent candidates (HUM0031's intent half)
+
+HUM0031 counts statements and branches; the intent question ("is this a domain
+decision?") belongs to section-doctor. Each candidate below is one narrow,
+intent-shaped pattern from the 2026-06-12 controller-intent audit
+(`docs/debt/controller-intent-audit-2026-06-12.md`) that an analyzer could own
+outright, taking that slice off the judgment pass. The first shipped; the other two
+were surveyed and left with section-doctor.
+
+- **A read action that writes** — **shipped as `HUM0038`** for the mechanical slice: a GET
+  action or view component calling an `I*Write` member or an `[ExternalWrite]` method. It shipped
+  at one violation, fixed in the same PR (`GoogleController.SyncPreview`, now a POST). Mutating
+  `I*Service` / `I*Management` members are still the doctor's call: a method-name verb list was
+  surveyed (2026-10-21) and was mostly noise (`SetError`, CSV `Write*`, `Record*` metrics).
+
+- **Post-mutation sequencing.** One action that calls two or more distinct
+  write members across services, so the controller decides which domain side
+  effects follow a mutation. Audit theme 1 (Teams coordinator-sync trio, event
+  lifecycle emails, the profile save chain); which consequences follow a
+  change is a fact, not presentation. **Needs:** a mutating-member
+  classification for `I*Service` / `I*Management`. Surveyed 2026-10-21 with only the HUM0038
+  signals (`I*Write`, `[ExternalWrite]`): two actions call two writes, and both branch between
+  them rather than sequence them, so the analyzer would catch nothing real. Not built.
+
+- **Status predicates in controllers.** A comparison, `is` pattern or switch
+  arm against a member of a section's `*Status` / `*State` contract enum inside
+  a controller method. Audit theme 2 (`CanEdit`/`CanWithdraw` predicates
+  re-derived beside the service's own rule). **Needs:** a carve-out for pure
+  display mapping (status → badge CSS class), which is presentation; expect
+  this one to stay advisory (Warning) because that line is fuzzy. Surveyed 2026-10-21: ~85
+  comparisons in ~50 controller methods, most of them result-status switches or display filters,
+  so no syntax shape separates the facts. Not built; stays with section-doctor.
+
+Patterns that stay with section-doctor because no syntax shape separates them
+from honest presentation: the same rule written twice in one controller, and
+read-DTO enrichment a controller computes instead of the service.
+
 ---
 
 ## Tier 3 — Captured for completeness (covered by ratchet tests)
@@ -324,7 +361,7 @@ analyzer.
 - `NoConcurrencyTokensRule` — replaced by semantic analyzer `HUM0007`.
 - `NoCrossSectionEfJoinsRule` — was replaced by analyzer `HUM0024`; both are gone, the analyzer retired in nobodies-collective/Humans#1278 (per-section `DbContext`s make the join structurally impossible). Do not resurrect either.
 - `NoLinqAtDbLayerRule` — retired. It scanned a hardcoded `src/Humans.Application/Services`, which the section split drained to 28 files while 360 service files moved to `src/Sections/*/Services`; its baseline reached zero through lost coverage, not through fixes. The `no-linq-at-db-layer` rule itself still stands (`memory/architecture/no-linq-at-db-layer.md`) — only the regex ratchet is gone. Do not resurrect it in this form.
-- `NoBusinessLogicInControllersRule` — retired (the regex heuristic was noisy and only saw public action signatures; nobodies-collective/Humans#793). Replaced by semantic analyzer `HUM0031` (`ControllerBusinessLogicAnalyzer`): statements > 40 or cyclomatic complexity > 15 on any controller method, method-level `[Grandfathered]`, **thresholds frozen at 40/15 until 2027**. The freeze is Peter's call and is not up for revisiting — do not propose tightening, unfreezing, or "re-evaluating now that #866 has progressed". He will lower them when he decides to.
+- `NoBusinessLogicInControllersRule` — retired (the regex heuristic was noisy and only saw public action signatures; nobodies-collective/Humans#793). Replaced by semantic analyzer `HUM0031` (`ControllerBusinessLogicAnalyzer`): statements > 40 or cyclomatic complexity > 15 on any controller method, method-level `[Grandfathered]`, **thresholds fixed at 40/15** (Peter, 2026-10-21): a backstop that never ratchets. Statement and branch counts are a smell, not a measure of intent, so whether a controller carries business logic is judged by section-doctor's controller-intent check on every run (the line: a controller may change how a fact looks, never what the fact is). Do not propose moving the numbers. Intent-shaped analyzers that could take part of that judgment are listed under Tier 2.
 - `NoObsoleteNavReadsRule` — was replaced by semantic analyzer `HUM0021`; both are gone, the analyzer retired in nobodies-collective/Humans#1278 as a dead rule (zero live `[Obsolete("Cross-domain nav…")]` markers since nobodies-collective/Humans#996). Do not resurrect either.
 - `NoDestructiveMigrationOpsRule` (`tests/.../Rules/NoDestructiveMigrationOpsRule.cs`) — operates on EF-generated migration files which legitimately contain destructive ops in other contexts. Filesystem-aware. Stay as ratchet.
 - `NoStartupGuardsRule` — retired alongside `NoLinqAtDbLayerRule` (Peter's call). Its scan root `src/Humans.Web` was still valid and its baseline genuinely zero, but it was a regex over one project out of 36+ and saw no section's `Section.Register`. The `no-startup-guards` rule itself still stands (`memory/architecture/no-startup-guards.md`).

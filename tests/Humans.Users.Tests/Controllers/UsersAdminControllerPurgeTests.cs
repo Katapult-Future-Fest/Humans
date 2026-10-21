@@ -1,12 +1,8 @@
 using Xunit;
 using System.Security.Claims;
 using AwesomeAssertions;
-using Humans.AuditLog.Contracts;
-using Humans.Auth.Contracts;
 using Humans.Base;
-using Humans.Campaigns.Contracts;
 using Humans.Consent.Contracts;
-using Humans.Email.Contracts;
 using Humans.Governance.Contracts;
 using Humans.Onboarding.Contracts;
 using Humans.Users.Contracts;
@@ -14,7 +10,7 @@ using Humans.Users.Controllers;
 using Humans.Users.Models;
 using Humans.Users.Services;
 using Humans.Users.Tests.Infrastructure;
-using Microsoft.AspNetCore.Authorization;
+using Humans.Application.Services.Users.AccountLifecycle;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -30,7 +26,7 @@ using NSubstitute;
 namespace Humans.Users.Tests.Controllers;
 
 /// <summary>
-/// Purge never runs in Production and never on oneself.
+/// Admin per-user actions forward to their services and map the result; purge refusals are the service's.
 /// </summary>
 public class UsersAdminControllerPurgeTests
 {
@@ -39,9 +35,7 @@ public class UsersAdminControllerPurgeTests
     private readonly IAccountDeletionService _deletion = Substitute.For<IAccountDeletionService>();
     private readonly IHumanLifecycleService _lifecycle = Substitute.For<IHumanLifecycleService>();
     private readonly IOnboardingIntake _onboarding = Substitute.For<IOnboardingIntake>();
-    private readonly IRoleAssignmentService _roleAssignments = Substitute.For<IRoleAssignmentService>();
     private readonly IUsersAudienceService _audience = Substitute.For<IUsersAudienceService>();
-    private readonly IAuditLogService _auditLog = Substitute.For<IAuditLogService>();
     private readonly IWebHostEnvironment _environment = Substitute.For<IWebHostEnvironment>();
     private readonly IClock _clock = Substitute.For<IClock>();
     private readonly IStringLocalizer<SharedResource> _localizer = Substitute.For<IStringLocalizer<SharedResource>>();
@@ -66,20 +60,15 @@ public class UsersAdminControllerPurgeTests
         var c = new UsersAdminController(
             _userService,
             _userEmails,
-            Substitute.For<IEmailOutboxService>(),
-            _roleAssignments,
-            Substitute.For<IRoleAssignmentWrite>(),
             Substitute.For<IGovernanceService>(),
             Substitute.For<IConsentService>(),
-            Substitute.For<ICampaignService>(),
             _lifecycle,
             _onboarding,
-            _auditLog,
             _audience,
             _deletion,
+            Substitute.For<Humans.GoogleIntegration.Contracts.IGoogleIntegrationService>(),
             _environment,
             _clock,
-            Substitute.For<IAuthorizationService>(),
             NullLogger<UsersAdminController>.Instance,
             _localizer);
 
@@ -104,32 +93,6 @@ public class UsersAdminControllerPurgeTests
         return c;
     }
 
-    [HumansFact]
-    public async Task Roles_PreservesRequestCancellation()
-    {
-        using var source = new CancellationTokenSource();
-        var controller = BuildController();
-        controller.HttpContext.RequestAborted = source.Token;
-        _roleAssignments.GetFilteredAsync(null, true, 1, 50, Arg.Any<Instant>(), Arg.Any<CancellationToken>())
-            .Returns((Array.Empty<RoleAssignmentSummarySnapshot>(), 0));
-
-        (await controller.Roles(null)).Should().BeOfType<ViewResult>();
-
-        await _roleAssignments.Received(1).GetFilteredAsync(null, true, 1, 50, Arg.Any<Instant>(), source.Token);
-    }
-
-    [HumansFact]
-    public async Task AddRoleGet_PreservesRequestCancellation()
-    {
-        using var source = new CancellationTokenSource();
-        var controller = BuildController();
-        controller.HttpContext.RequestAborted = source.Token;
-
-        (await controller.AddRole(_adminUserId)).Should().BeOfType<ViewResult>();
-
-        await _userService.Received(1).GetRawUserInfoAsync(_adminUserId, source.Token);
-    }
-
     [HumansTheory]
     [InlineData(" \tBare Human\n")]
     [InlineData("  member@example.org\t")]
@@ -148,10 +111,10 @@ public class UsersAdminControllerPurgeTests
             .Returns(new Dictionary<Guid, string> { [userId] = "member@example.org" });
 
         var controller = BuildController();
-        var cleanResult = await controller.AdminList(search.Trim(), null, ct: Xunit.TestContext.Current.CancellationToken);
+        var cleanResult = await controller.AdminList(search.Trim(), null, ct: TestContext.Current.CancellationToken);
         cleanResult.Should().BeOfType<ViewResult>().Subject.Model.Should().BeOfType<AdminHumanListViewModel>()
             .Subject.Humans.Should().ContainSingle().Which.UserId.Should().Be(userId);
-        var result = await controller.AdminList(search, null, ct: Xunit.TestContext.Current.CancellationToken);
+        var result = await controller.AdminList(search, null, ct: TestContext.Current.CancellationToken);
 
         var model = result.Should().BeOfType<ViewResult>().Subject.Model.Should().BeOfType<AdminHumanListViewModel>().Subject;
         model.Humans.Should().ContainSingle().Which.UserId.Should().Be(userId);
@@ -159,27 +122,27 @@ public class UsersAdminControllerPurgeTests
     }
 
     [HumansFact]
-    public async Task PurgeHuman_InProduction_ReturnsNotFoundWithoutPurging()
+    public async Task PurgeHuman_ServiceRefusesProduction_ReturnsNotFound()
     {
-        _environment.EnvironmentName.Returns("Production");
         var target = Guid.NewGuid();
-        _userService.GetRawUserInfoAsync(target, Arg.Any<CancellationToken>())
-            .Returns(new ValueTask<UserInfo?>(new User { Id = target }.ToUserInfo()));
+        _deletion.PurgeAsync(target, _adminUserId, Arg.Any<CancellationToken>())
+            .Returns(new OnboardingResult(false, AccountDeletionService.PurgeRefusedInProduction));
 
         var result = await BuildController().PurgeHuman(target);
 
         result.Should().BeOfType<NotFoundResult>();
-        await _deletion.DidNotReceive().PurgeAsync(Arg.Any<Guid>(), Arg.Any<Guid?>(), Arg.Any<CancellationToken>());
     }
 
     [HumansFact]
-    public async Task PurgeHuman_TargetIsSelf_RedirectsToDetailWithoutPurging()
+    public async Task PurgeHuman_ServiceRefusesSelf_RedirectsToDetail()
     {
+        _deletion.PurgeAsync(_adminUserId, _adminUserId, Arg.Any<CancellationToken>())
+            .Returns(new OnboardingResult(false, AccountDeletionService.PurgeRefusedSelf));
+
         var result = await BuildController().PurgeHuman(_adminUserId);
 
         result.Should().BeOfType<RedirectToActionResult>()
             .Which.ActionName.Should().Be(nameof(UsersAdminController.AdminDetail));
-        await _deletion.DidNotReceive().PurgeAsync(Arg.Any<Guid>(), Arg.Any<Guid?>(), Arg.Any<CancellationToken>());
     }
 
     [HumansFact]
@@ -225,21 +188,6 @@ public class UsersAdminControllerPurgeTests
     }
 
     [HumansFact]
-    public async Task Roles_ForwardsFilterAndBuildsTheSharedRolesView()
-    {
-        var now = Instant.FromUtc(2026, 9, 21, 6, 0);
-        _clock.GetCurrentInstant().Returns(now);
-        _roleAssignments.GetFilteredAsync("Board", activeOnly: false, page: 2, pageSize: 50, now, Arg.Any<CancellationToken>())
-            .Returns((Array.Empty<RoleAssignmentSummarySnapshot>(), 0));
-
-        var result = await BuildController().Roles("Board", showInactive: true, page: 2);
-
-        result.Should().BeOfType<ViewResult>()
-            .Which.ViewName.Should().Be("~/Views/Shared/Roles.cshtml");
-        await _roleAssignments.Received(1).GetFilteredAsync("Board", activeOnly: false, page: 2, pageSize: 50, now, Arg.Any<CancellationToken>());
-    }
-
-    [HumansFact]
     public async Task Audience_ProjectsSegmentationForTheSelectedYear()
     {
         var segmentation = new AudienceSegmentation(10, 6, 8, 5, 1, [2025, 2026], 2026);
@@ -269,27 +217,5 @@ public class UsersAdminControllerPurgeTests
         var act = () => BuildController().Audience(2026, aborted.Token);
 
         await act.Should().ThrowAsync<OperationCanceledException>();
-    }
-
-    [HumansFact]
-    public async Task RevealIban_StoresTheIbanAndAuditsTheAdminAction()
-    {
-        var target = Guid.NewGuid();
-        var user = new User { Id = target, PreferredLanguage = "en" };
-        var profile = new Profile { Id = Guid.NewGuid(), UserId = target, Iban = "ES91 2100 0418 4502 0005 1332" };
-        var targetInfo = UserInfoFactory.Create(user, [], [], [], profile, [], [], [], []);
-        _userService.GetRawUserInfoAsync(target, Arg.Any<CancellationToken>())
-            .Returns(new ValueTask<UserInfo?>(targetInfo));
-
-        var controller = BuildController();
-        var result = await controller.RevealIban(target, CancellationToken.None);
-
-        result.Should().BeOfType<RedirectToActionResult>()
-            .Which.ActionName.Should().Be(nameof(UsersAdminController.AdminDetail));
-        controller.TempData["RevealedIban"].Should().Be(profile.Iban);
-        await _auditLog.Received(1).LogAsync(
-            AuditAction.IbanReveal, nameof(User), target,
-            Arg.Is<string>(message => message.Contains(target.ToString(), StringComparison.Ordinal)),
-            _adminUserId, Arg.Any<Guid?>(), Arg.Any<string?>());
     }
 }

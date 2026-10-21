@@ -1,10 +1,13 @@
 using System.Security.Claims;
 using System.Globalization;
 using AwesomeAssertions;
+using Humans.Budget.Contracts;
+using Humans.Expenses.Contracts;
 using Humans.Finance.Contracts;
 using Humans.Finance.Controllers;
 using Humans.Finance.Models;
 using Humans.Finance.Services;
+using Humans.Tickets.Contracts;
 using Humans.Users.Contracts;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -33,9 +36,16 @@ public class FinanceControllerTests
     private readonly IHoldedFinanceManagement _finance = Substitute.For<IHoldedFinanceManagement>();
     private readonly IHoldedFinanceAdminService _connector = Substitute.For<IHoldedFinanceAdminService>();
     private readonly IUserService _users = Substitute.For<IUserService>();
+    private readonly IBudgetService _budget = Substitute.For<IBudgetService>();
+    private readonly IExpenseReportService _expenses = Substitute.For<IExpenseReportService>();
+
+    public FinanceControllerTests() =>
+        _expenses.GetReviewQueueAsync(Arg.Any<Guid>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
+            .Returns(Array.Empty<ExpenseReportDto>());
 
     private FinanceController MakeController() =>
-        new(_users, _finance, _connector, NullLogger<FinanceController>.Instance)
+        new(_users, _finance, _connector, _expenses, new CashFlowService(_budget, Substitute.For<ITicketService>()),
+            NullLogger<FinanceController>.Instance)
         {
             ControllerContext = new() { HttpContext = new DefaultHttpContext() }
         };
@@ -63,6 +73,35 @@ public class FinanceControllerTests
         controller.TempData = new TempDataDictionary(http, Substitute.For<ITempDataProvider>());
         controller.Url = Substitute.For<IUrlHelper>();
         return controller;
+    }
+
+    [HumansFact]
+    public async Task CashFlow_NoActiveYear_RedirectsToBudgetOverview()
+    {
+        var controller = MakeControllerWithHttpContext(Guid.NewGuid());
+        _budget.GetActiveYearAsync(Arg.Any<CancellationToken>()).Returns((BudgetYearDetail?)null);
+
+        var result = await controller.CashFlow();
+
+        var redirect = result.Should().BeOfType<RedirectToActionResult>().Subject;
+        redirect.ControllerName.Should().Be("BudgetAdmin");
+        redirect.ActionName.Should().Be("Index");
+        controller.TempData.Values.Should().ContainSingle().Which.Should().Be("No active budget year.");
+    }
+
+    [HumansFact]
+    public async Task CashFlow_RequestCancellation_IsNotRenderedAsLoadFailure()
+    {
+        using var request = new CancellationTokenSource();
+        var controller = MakeControllerWithHttpContext(Guid.NewGuid());
+        controller.HttpContext.RequestAborted = request.Token;
+        _budget.GetActiveYearAsync(Arg.Any<CancellationToken>())
+            .Returns(Task.FromException<BudgetYearDetail?>(new OperationCanceledException(request.Token)));
+
+        await controller.Invoking(c => c.CashFlow()).Should().ThrowAsync<OperationCanceledException>();
+
+        controller.TempData.Should().BeEmpty();
+        _ = _budget.Received(1).GetActiveYearAsync(request.Token);
     }
 
     [HumansTheory]
@@ -179,7 +218,7 @@ public class FinanceControllerTests
             .Returns(call =>
             {
                 call.Arg<CancellationToken>().ThrowIfCancellationRequested();
-                return (IReadOnlyDictionary<Guid, UserInfo>)new Dictionary<Guid, UserInfo>();
+                return new Dictionary<Guid, UserInfo>();
             });
         var controller = MakeControllerWithHttpContext(Ana);
         (await controller.Creditors(null, null)).Should().BeOfType<ViewResult>();
@@ -328,16 +367,16 @@ public class FinanceControllerTests
     // ─── SEPA generation cap ─────────────────────────────────────────────────────
 
     [HumansTheory]
-    [Xunit.InlineData("not-a-number")]
-    [Xunit.InlineData("0")]
-    [Xunit.InlineData("-5.00")]
+    [InlineData("not-a-number")]
+    [InlineData("0")]
+    [InlineData("-5.00")]
     public async Task GenerateSepa_UnparseableOrNonPositiveCap_RefusesWithoutCallingTheService(string cap)
     {
         var controller = MakeControllerWithHttpContext(Ana);
 
         var result = await controller.GenerateSepa(
             [40000004], new Dictionary<int, string> { [40000004] = "10.00" }, cap,
-            Xunit.TestContext.Current.CancellationToken);
+            TestContext.Current.CancellationToken);
 
         result.Should().BeOfType<RedirectToActionResult>().Subject.ActionName
             .Should().Be(nameof(FinanceController.Creditors));
@@ -377,11 +416,11 @@ public class FinanceControllerTests
 
         var result = await controller.GenerateSepa(selected,
             new Dictionary<int, string> { [40000004] = "10.00" }, "100.00",
-            Xunit.TestContext.Current.CancellationToken);
+            TestContext.Current.CancellationToken);
 
         if (hasActor) result.Should().BeOfType<BadRequestObjectResult>();
         else result.Should().BeOfType<ChallengeResult>();
-        await _connector.DidNotReceiveWithAnyArgs().GenerateSepaPayoutAsync(default!, default, default, default);
+        await _connector.DidNotReceiveWithAnyArgs().GenerateSepaPayoutAsync(default!, default, default);
     }
 
     [HumansFact]
@@ -394,7 +433,7 @@ public class FinanceControllerTests
 
         await controller.GenerateSepa(
             [40000004], new Dictionary<int, string> { [40000004] = "10.00" }, "75.00",
-            Xunit.TestContext.Current.CancellationToken);
+            TestContext.Current.CancellationToken);
 
         await _connector.Received(1).GenerateSepaPayoutAsync(
             Arg.Any<IReadOnlyList<SepaPayoutSelection>>(), 75.00m, Ana, Arg.Any<CancellationToken>());
@@ -408,7 +447,7 @@ public class FinanceControllerTests
         _finance.GetCreditorLedgerAsync(40000002, Arg.Any<CancellationToken>())
             .Returns((HoldedCreditorLedger?)null);
 
-        (await MakeController().CreditorStatement(40000002)).Should().BeOfType<NotFoundResult>();
+        (await MakeControllerWithHttpContext(Ana).CreditorStatement(40000002)).Should().BeOfType<NotFoundResult>();
     }
 
     [HumansFact]
@@ -425,7 +464,7 @@ public class FinanceControllerTests
                 Ledger(entry: 7, line: 1, day2),
             ]));
 
-        var controller = MakeController();
+        var controller = MakeControllerWithHttpContext(Ana);
         var result = await controller.CreditorStatement(40000002);
         var model = result.Should().BeOfType<ViewResult>().Subject.Model
             .Should().BeOfType<CreditorStatementVm>().Subject;
@@ -435,22 +474,22 @@ public class FinanceControllerTests
     }
 
     [HumansFact]
-    public async Task CreditorStatement_RunningBalance_AccumulatesOldestFirst_ShownNewestFirst()
+    public async Task CreditorStatement_ShowsTheServiceRunningBalance_NewestFirst()
     {
         var day1 = Instant.FromUtc(2026, 3, 1, 0, 0);
         var day2 = Instant.FromUtc(2026, 3, 2, 0, 0);
         _finance.GetCreditorLedgerAsync(40000002, Arg.Any<CancellationToken>()).Returns(
             new HoldedCreditorLedger(40000002, -30m, 30m,
             [
-                Ledger(entry: 9, line: 1, day2) with { Credit = 0m, Debit = 50m },  // paid out 50
-                Ledger(entry: 5, line: 1, day1) with { Credit = 100m }, // owed 100
-                Ledger(entry: 7, line: 1, day2) with { Credit = 0m, Debit = 20m },  // paid out 20
+                Ledger(entry: 9, line: 1, day2) with { Credit = 0m, Debit = 50m, RunningBalance = 30m },
+                Ledger(entry: 5, line: 1, day1) with { Credit = 100m, RunningBalance = 100m },
+                Ledger(entry: 7, line: 1, day2) with { Credit = 0m, Debit = 20m, RunningBalance = 80m },
             ]));
 
-        var model = (await MakeController().CreditorStatement(40000002))
+        var model = (await MakeControllerWithHttpContext(Ana).CreditorStatement(40000002))
             .Should().BeOfType<ViewResult>().Subject.Model.Should().BeOfType<CreditorStatementVm>().Subject;
 
-        // Chronological: +100 → 100, −20 → 80, −50 → 30; presented newest first.
+        // The service accumulates; the page only presents newest first.
         model.Lines.Select(r => (r.Line.EntryNumber, r.RunningBalance)).Should().Equal((9, 30m), (7, 80m), (5, 100m));
         model.Lines[0].RunningBalance.Should().Be(model.OwedBalance);
     }
@@ -461,11 +500,69 @@ public class FinanceControllerTests
         _finance.GetCreditorLedgerAsync(40000002, Arg.Any<CancellationToken>())
             .Returns(new HoldedCreditorLedger(40000002, 25m, 0m, []));
 
-        var result = await MakeController().CreditorStatement(40000002);
+        var result = await MakeControllerWithHttpContext(Ana).CreditorStatement(40000002);
 
         result.Should().BeOfType<ViewResult>().Subject.Model
             .Should().BeOfType<CreditorStatementVm>().Subject.OwedBalance.Should().Be(-25m);
     }
+
+    [HumansFact]
+    public async Task CreditorStatement_PaymentLines_ShowTheMoneyMovement_NotThePurchaseText()
+    {
+        var day = Instant.FromUtc(2026, 3, 1, 0, 0);
+        _finance.GetCreditorLedgerAsync(40000002, Arg.Any<CancellationToken>()).Returns(
+            new HoldedCreditorLedger(40000002, 0m, 0m,
+            [
+                Ledger(entry: 1, line: 1, day) with { Type = "purchase", Description = "Tent pegs" },
+                Ledger(entry: 2, line: 1, day) with { Type = "payment", Description = "Tent pegs", Credit = 0m, Debit = 1m },
+                Ledger(entry: 3, line: 1, day) with { Type = "payment", Description = "Tent pegs" },
+            ],
+            new HoldedContactInfo("Ana López", null, null, null, null, null, null, null)));
+
+        var model = (await MakeControllerWithHttpContext(Ana).CreditorStatement(40000002))
+            .Should().BeOfType<ViewResult>().Subject.Model.Should().BeOfType<CreditorStatementVm>().Subject;
+
+        model.Lines.Select(r => (r.Line.EntryNumber, r.Description)).Should().Equal(
+            (3, "Payment: Ana López → NCA"), (2, "Payment: NCA → Ana López"), (1, "Tent pegs"));
+    }
+
+    [HumansFact]
+    public async Task CreditorStatement_ListsOnlyTheExpenseReportsBookedToTheAccount_NewestApprovalFirst()
+    {
+        _finance.GetCreditorLedgerAsync(40000002, Arg.Any<CancellationToken>())
+            .Returns(new HoldedCreditorLedger(40000002, 0m, 0m, []));
+        _expenses.GetReviewQueueAsync(Ana, true, Arg.Any<CancellationToken>()).Returns(
+        [
+            Report(40000002, Instant.FromUtc(2026, 3, 1, 0, 0)),
+            Report(40000009, Instant.FromUtc(2026, 3, 5, 0, 0)),
+            Report(40000002, Instant.FromUtc(2026, 3, 9, 0, 0)),
+            Report(null, Instant.FromUtc(2026, 3, 7, 0, 0)),
+        ]);
+
+        var model = (await MakeControllerWithHttpContext(Ana).CreditorStatement(40000002))
+            .Should().BeOfType<ViewResult>().Subject.Model.Should().BeOfType<CreditorStatementVm>().Subject;
+
+        model.ExpenseReports.Select(r => r.ApprovedAt).Should().Equal(
+            Instant.FromUtc(2026, 3, 9, 0, 0), Instant.FromUtc(2026, 3, 1, 0, 0));
+    }
+
+    private static ExpenseReportDto Report(int? supplierAccountNum, Instant approvedAt) => new()
+    {
+        Id = Guid.NewGuid(),
+        SubmitterUserId = Ana,
+        HoldedAccountNumber = 0,
+        BudgetCategoryId = null,
+        BudgetYearId = null,
+        Status = ExpenseReportStatus.Approved,
+        PayeeName = "Ana",
+        PayeeIban = "",
+        Total = 10m,
+        ApprovedAt = approvedAt,
+        HoldedSupplierAccountNum = supplierAccountNum,
+        CreatedAt = approvedAt,
+        UpdatedAt = approvedAt,
+        Lines = [],
+    };
 
     // ─── Connector index ─────────────────────────────────────────────────────────
 
@@ -478,7 +575,7 @@ public class FinanceControllerTests
             new HoldedDocSyncVm(null, "Idle", null, 0, null, IsStale: true), 3, [], [], []);
         _connector.GetConnectorOverviewAsync(Arg.Any<CancellationToken>()).Returns(vm);
 
-        var result = await MakeController().Holded(Xunit.TestContext.Current.CancellationToken);
+        var result = await MakeController().Holded(TestContext.Current.CancellationToken);
 
         result.Should().BeOfType<ViewResult>().Subject.Model.Should().BeSameAs(vm);
     }
@@ -501,7 +598,7 @@ public class FinanceControllerTests
             null, [], null));
         NameThem((Ana, "Ada"), (Bo, "Zoe"), (admin, "Treasurer"));
 
-        var page = SepaPageOf(await MakeController().Sepa(Xunit.TestContext.Current.CancellationToken));
+        var page = SepaPageOf(await MakeController().Sepa(TestContext.Current.CancellationToken));
 
         page.Files.Select(f => f.FileName).Should().Equal("new.xml", "old.xml");
         page.Files[0].GeneratedByName.Should().Be("Treasurer");
@@ -534,9 +631,9 @@ public class FinanceControllerTests
     {
         _connector.GetSepaPayoutsAsync(Arg.Any<int>(), Arg.Any<CancellationToken>())
             .Returns((new List<SepaPayoutTransferRow>(), "Sepa:TreasuryAccountId is not configured.",
-                (IReadOnlyList<SepaBankMovementVm>)[], (string?)null));
+                [], null));
 
-        var page = SepaPageOf(await MakeController().Sepa(Xunit.TestContext.Current.CancellationToken));
+        var page = SepaPageOf(await MakeController().Sepa(TestContext.Current.CancellationToken));
 
         page.UnavailableReason.Should().Be("Sepa:TreasuryAccountId is not configured.");
         page.Files.Should().BeEmpty();
@@ -551,10 +648,10 @@ public class FinanceControllerTests
                 "pending", "its text names no creditor account"),
         };
         _connector.GetSepaPayoutsAsync(Arg.Any<int>(), Arg.Any<CancellationToken>())
-            .Returns((new List<SepaPayoutTransferRow>(), (string?)null,
-                (IReadOnlyList<SepaBankMovementVm>)unmatched, (string?)null));
+            .Returns((new List<SepaPayoutTransferRow>(), null,
+                unmatched, null));
 
-        var page = SepaPageOf(await MakeController().Sepa(Xunit.TestContext.Current.CancellationToken));
+        var page = SepaPageOf(await MakeController().Sepa(TestContext.Current.CancellationToken));
 
         page.UnmatchedMovements.Should().BeSameAs(unmatched);
     }
@@ -564,10 +661,10 @@ public class FinanceControllerTests
     {
         _connector.GetSepaPayoutsAsync(Arg.Any<int>(), Arg.Any<CancellationToken>()).Returns((
             new List<SepaPayoutTransferRow> { Transfer(Guid.NewGuid(), "f.xml", Stamp(1), Ana, Ana, 40000002) },
-            (string?)null, (IReadOnlyList<SepaBankMovementVm>)[], "Holded's bank feed did not answer."));
+            null, [], "Holded's bank feed did not answer."));
         NameThem((Ana, "Ada"));
 
-        var page = SepaPageOf(await MakeController().Sepa(Xunit.TestContext.Current.CancellationToken));
+        var page = SepaPageOf(await MakeController().Sepa(TestContext.Current.CancellationToken));
 
         page.BankFeedError.Should().Be("Holded's bank feed did not answer.");
         page.Files.Should().ContainSingle();
@@ -630,7 +727,7 @@ public class FinanceControllerTests
             .Returns((new List<SepaPayoutTransferRow> { row }, null, [], null));
         NameThem((Ana, "Ada"), (Bo, "Zoe"), (admin, "Treasurer"));
 
-        var page = SepaPageOf(await MakeController().Sepa(Xunit.TestContext.Current.CancellationToken));
+        var page = SepaPageOf(await MakeController().Sepa(TestContext.Current.CancellationToken));
 
         var transfer = page.Files.Single().Transfers.Single();
         transfer.Row.IsWithdrawn.Should().BeTrue();
@@ -646,7 +743,7 @@ public class FinanceControllerTests
         NameThem((Ana, "Ada"));
         var controller = MakeController();
 
-        var result = await controller.HoldedDuplicates(Xunit.TestContext.Current.CancellationToken);
+        var result = await controller.HoldedDuplicates(TestContext.Current.CancellationToken);
 
         result.Should().BeOfType<ViewResult>().Subject.Model.Should().BeSameAs(vm);
         ((Dictionary<Guid, string>)controller.ViewBag.MemberNames)[Ana].Should().Be("Ada");
@@ -710,7 +807,7 @@ public class FinanceControllerTests
         _connector.GetSepaPayoutsAsync(Arg.Any<int>(), Arg.Any<CancellationToken>())
             .Returns((new List<SepaPayoutTransferRow>(), null, new List<SepaBankMovementVm>(), null));
 
-        var page = SepaPageOf(await MakeController().Sepa(Xunit.TestContext.Current.CancellationToken, days: 7));
+        var page = SepaPageOf(await MakeController().Sepa(TestContext.Current.CancellationToken, days: 7));
 
         page.ToleranceDays.Should().Be(7);
         await _connector.Received(1).GetSepaPayoutsAsync(7, Arg.Any<CancellationToken>());
@@ -749,9 +846,6 @@ public class FinanceControllerTests
         DeletionRequestedAt: null,
         DeletionScheduledFor: null,
         DeletionEligibleAfter: null,
-        UnsubscribedFromCampaigns: false,
-        SuppressScheduleChangeEmails: false,
-        MagicLinkSentAt: null,
         ContactSource: null,
         ExternalSourceId: null,
         MergedToUserId: null,

@@ -23,8 +23,8 @@ to this section too and has its own doc ([`Holded-connector.md`](Holded-connecto
 - **Rate-limit retries are read-only**: the connector retries a content-free GET once after 429; writes, including bodyless sales-approval POSTs, surface the transient failure without an automatic retry.
 - **Page rows are required**: null items fail the complete connector read as a permanent error; silently dropping malformed rows must never turn a page into an incomplete or empty reconciliation input.
 - **Cursor walks must progress**: a repeated cursor fails the complete read immediately, before refetching that page. Distinct cursors retain each endpoint's page cap; incomplete lists never reach replace-semantics reconciliation.
-- **Creation identities are required**: accepted purchase/contact/sales/expense-account creates must return a nonblank ID. Null bodies or missing/blank IDs fail permanently, so callers cannot automatically repeat an already accepted create or persist an unusable account reference. A contact update may reuse its known ID when the parsed response omits or blanks it.
-- **Write responses stay typed**: unreadable purchase-create, contact-upsert, sales-create and expense-account-create success bodies fail as permanent connector errors, including text-decoding failures, so callers can record failure rather than losing queue bookkeeping to a raw parsing exception. Accepted payments and ledger postings retain their operation-specific `unconfirmed:` reference when their id cannot be read — a payment's id comes from the document's `payments_detail` re-read after the POST (the POST body is `{"status":"paid"}` alone), an entry's from its own response body; callers must not repeat a posting because its reference is unconfirmed.
+- **Creation identities are required**: accepted purchase/contact/sales/expense-account creates must return a nonblank ID. Null bodies or missing/blank IDs fail permanently, so callers cannot automatically repeat an already accepted create or persist an unusable account reference. There is no contact update: `UpsertContactAsync` only POSTs, because v2's contact PUT is a full replacement that resets every omitted field, `supplier_record` included, and so mints the contact a second creditor account ([`holded-contact-put-is-full-replacement`](../../../../memory/code/holded-contact-put-is-full-replacement.md)).
+- **Write responses stay typed**: unreadable purchase-create, contact-create, sales-create and expense-account-create success bodies fail as permanent connector errors, including text-decoding failures, so callers can record failure rather than losing queue bookkeeping to a raw parsing exception. Accepted payments and ledger postings retain their operation-specific `unconfirmed:` reference when their id cannot be read — a payment's id comes from the document's `payments_detail` re-read after the POST (the POST body is `{"status":"paid"}` alone), an entry's from its own response body; callers must not repeat a posting because its reference is unconfirmed.
 - **Purchase document identity is required**: purchase documents need a nonblank ID; a missing or blank ID rejects the page. An absent `payments_pending` reads as 0 (nothing owed), which refuses a booking rather than over-paying.
 - Sales-document totals are required: a missing or null `total` fails as a permanent connector error before Store can finish issuance or compare a recovered invoice. Explicit zero remains valid.
 - **Chart totals are required**: missing or null debit, credit or balance fails the account page as a permanent connector error before replacing cached totals. Explicit zero totals remain valid.
@@ -55,7 +55,7 @@ mirror tables runs before this baseline recreates them.
 
 - `/Holded` — admin screen: usage meter (API's number displayed; budget = config
   `Holded:MonthlyCallBudget`, default 2000), calls-by-month, per-kind sync states plus
-  Finance's doc-sync row, Sync now / Full sync buttons, and the chart of accounts with
+  Finance's doc-sync row (read-only; its trigger is Finance's), Sync now / Full sync buttons, and the chart of accounts with
   reconciliation flags — split by PGC group (named in English from the account number's leading
   digit, not Holded's Spanish `group` string), accounts with no cached lines hidden by default.
   Account balances read in the association's POV (below).
@@ -140,12 +140,12 @@ in the table above is still fetched through `IHoldedFinanceService.GetDocSyncInf
 
 ## Triggers
 
-- `HoldedSyncJob` (nightly at 03:00, this section's `Jobs/`; scheduled by this section's `SectionJobs`, job id `holded-sync`): Finance's doc sync, then `SyncLedgerAsync(full: false)`.
-- `/Holded` buttons: `SyncNow` (incremental + reconcile), `FullSync`.
+- `HoldedSyncJob` (nightly at 03:00, this section's `Jobs/`; scheduled by this section's `SectionJobs`, job id `holded-sync`): `SyncLedgerAsync(full: false)` only. Finance's purchase-doc sync is Finance's own job (`HoldedDocSyncJob`, 02:45); the sweep reads none of its output. Both jobs take the shared `holded-api` Hangfire job lock, so they never run on the rate-limited API at once.
+- `/Holded` buttons: `SyncNow` (incremental + reconcile, ledger only), `FullSync`.
 
 ## Cross-Section Dependencies
 
-- Outbound: `IHoldedClient` (this section's own connector); Finance's `IHoldedFinanceWrite.SyncAsync` (the nightly job's first step) and `IHoldedFinanceService.GetDocSyncInfoAsync` (the doc-sync row on `/Holded`).
+- Outbound: `IHoldedClient` (this section's own connector); Finance's `IHoldedFinanceService.GetDocSyncInfoAsync` (the doc-sync row on `/Holded`).
 - Inbound: Finance (creditor statuses/statements/actuals via `IHoldedService`), the nightly job.
 
 ## Architecture

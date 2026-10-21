@@ -103,7 +103,13 @@ public class User : IdentityUser<Guid>
         set => base.NormalizedUserName = value;
     }
 
-    /// <summary>When the last re-consent reminder email was sent (rate limiting).</summary>
+    /// <summary>
+    /// FROZEN: the re-consent reminder cooldown stamp now lives in Consent's
+    /// <c>consent_reminders</c>. Users no longer writes this column except to clear it on GDPR erasure; it is read only through the
+    /// obsolete <see cref="UserInfo.LastConsentReminderSentAt"/> by the
+    /// <c>consent.reminder-stamps</c> copy and fallback, and the column is dropped once that copy
+    /// is done in production.
+    /// </summary>
     public Instant? LastConsentReminderSentAt { get; set; }
 
     /// <summary>When the user requested account deletion; null if none pending.</summary>
@@ -117,22 +123,20 @@ public class User : IdentityUser<Guid>
 
     public bool IsDeletionPending => DeletionRequestedAt.HasValue;
 
+    /// <summary>
+    /// DEPRECATED: Email's per-category preferences (<c>email_communication_preferences</c>) are the
+    /// source of truth. No reader or writer remains; the column is retained until its drop PR
+    /// (debt ledger USERS-12).
+    /// </summary>
+    [Obsolete("No reader or writer; retained for the DB column until a drop migration (debt ledger USERS-12).")]
     public bool UnsubscribedFromCampaigns { get; set; }
 
-    public bool SuppressScheduleChangeEmails { get; set; }
-
-    /// <summary>When the last magic link login email was sent (rate limiting).</summary>
-    public Instant? MagicLinkSentAt { get; set; }
-
     /// <summary>
-    /// DEPRECATED (nobodies-collective/Humans#687): the Google rejection/validation state is now
-    /// per-address on <see cref="UserEmail.GoogleEmailStatus"/> — the address Google actually
-    /// rejected — instead of stranded on the user. Hanging it here meant switching the canonical
-    /// Google email left the stale rejection in place and kept sync paused. No live reader/writer
-    /// remains; the column is retained only so EF keeps it until a later drop migration.
+    /// DEPRECATED: nothing reads this opt-out any more. No reader or writer remains; the column is
+    /// retained until its drop PR (debt ledger USERS-13).
     /// </summary>
-    [Obsolete("Moved to UserEmail.GoogleEmailStatus (per-address) — #687. Do not read or write; retained for the DB column until a drop migration.")]
-    public GoogleEmailStatus GoogleEmailStatus { get; set; } = GoogleEmailStatus.Unknown;
+    [Obsolete("No reader or writer; retained for the DB column until a drop migration (debt ledger USERS-13).")]
+    public bool SuppressScheduleChangeEmails { get; set; }
 
     /// <summary>Source of this user; null for self-registered.</summary>
     public ContactSource? ContactSource { get; set; }

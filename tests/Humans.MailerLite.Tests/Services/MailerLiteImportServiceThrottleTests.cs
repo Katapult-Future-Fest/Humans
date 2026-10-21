@@ -1,3 +1,4 @@
+using Humans.Email.Contracts;
 using AwesomeAssertions;
 using Humans.AuditLog.Contracts;
 using Humans.MailerLite.Services.Dtos;
@@ -155,8 +156,7 @@ internal sealed class ThrottleHarness
             .FindOrCreateUserByEmailAsync(
                 Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<ContactSource>(),
                 Arg.Any<CancellationToken>())
-            .Returns(_ => new AccountProvisioningResult(
-                new User { Id = Guid.NewGuid(), MergedToUserId = null }, Created: true));
+            .Returns(_ => new AccountProvisioningResult(Guid.NewGuid(), Created: true));
 
         // Default: no pref row for new humans → first write counts as a flip.
         _prefs
@@ -170,7 +170,7 @@ internal sealed class ThrottleHarness
 
         Service = new MailerLiteImportService(
             _ml, _userEmails, Substitute.For<IUserService>(),
-            _provisioning, _prefs, _audit,
+            _provisioning, _prefs, Substitute.For<ICommunicationPreferenceWrite>(), _audit,
             InMemoryMailerLiteRepository.New(),
             new FakeClock(Instant.FromUtc(2026, 5, 12, 12, 0)),
             NullLogger<MailerLiteImportService>.Instance);

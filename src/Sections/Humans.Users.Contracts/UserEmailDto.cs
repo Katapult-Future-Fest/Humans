@@ -8,7 +8,6 @@ public record UserEmailDto(
     Guid Id,
     string Email,
     bool IsVerified,
-    bool IsGoogle,
     string? Provider,
     string? ProviderKey,
     bool IsPrimary,
@@ -17,18 +16,21 @@ public record UserEmailDto(
 /// <summary>
 /// User email data for the Manage Emails page.
 /// </summary>
+/// <remarks>
+/// <c>CanUnlink</c>: the row carries a provider login and another verified address would
+/// remain after it goes — the invariant <see cref="IUserEmailService.UnlinkAsync"/> enforces.
+/// </remarks>
 public record UserEmailEditDto(
     Guid Id,
     string Email,
     bool IsVerified,
-    bool IsGoogle,
     string? Provider,
     string? ProviderKey,
     bool IsPrimary,
     ContactFieldVisibility? Visibility,
     bool IsPendingVerification,
-    GoogleEmailStatus GoogleEmailStatus,
-    bool IsMergePending = false);
+    bool IsMergePending = false,
+    bool CanUnlink = false);
 
 /// <summary>
 /// Result of adding an email address.

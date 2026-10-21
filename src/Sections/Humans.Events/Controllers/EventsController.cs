@@ -179,8 +179,8 @@ internal sealed class EventsController(
             IsRecurring = model.IsRecurring,
             RecurrenceDays = model.IsRecurring ? model.RecurrenceDays : null,
         };
-        guideEvent.Submit(clock);
 
+        // SubmitEventAsync owns the submission window, recurrence-day rule and the Submit transition.
         var viewUrl = Url.Action(nameof(MySubmissions), "Events", null, Request.Scheme)!;
         await guide.SubmitEventAsync(guideEvent, viewUrl);
 
@@ -202,7 +202,7 @@ internal sealed class EventsController(
         if (guideEvent.SubmitterUserId != user.Id && !RoleChecks.IsEventsAdmin(User))
             return Forbid();
 
-        if (!guideEvent.CanBeEditedBySubmitter)
+        if (!guideEvent.CanEdit)
         {
             SetError(localizer["Events_NotEditable"].Value);
             return RedirectToAction(nameof(MySubmissions));
@@ -234,7 +234,7 @@ internal sealed class EventsController(
         model.Host = guideEvent.Host;
         model.IsRecurring = guideEvent.IsRecurring;
         model.RecurrenceDays = guideEvent.RecurrenceDays;
-        model.IsResubmit = guideEvent.Status is EventStatus.Rejected or EventStatus.ResubmitRequested;
+        model.IsResubmit = guideEvent.IsResubmission;
 
         return View("IndividualEventForm", model);
     }
@@ -251,7 +251,7 @@ internal sealed class EventsController(
         if (guideEvent.SubmitterUserId != user.Id && !RoleChecks.IsEventsAdmin(User))
             return Forbid();
 
-        if (!guideEvent.CanBeEditedBySubmitter)
+        if (!guideEvent.CanEdit)
         {
             SetError(localizer["Events_NotEditable"].Value);
             return RedirectToAction(nameof(MySubmissions));
@@ -280,12 +280,10 @@ internal sealed class EventsController(
         var (startTime, durationMinutes) = Event.ResolveAllDaySchedule(
             model.IsAllDay, model.StartTime, model.DurationMinutes);
 
-        guideEvent.ApplyIndividualEdit(
+        await guide.UpdateAndResubmitAsync(eventId, new EventEdit(
             model.CategoryId, model.VenueId, model.Title, model.Description,
             ToInstant(model.StartDate.Add(startTime), tz), durationMinutes,
-            model.LocationNote, model.Host, model.IsRecurring, model.RecurrenceDays);
-
-        await guide.UpdateAndResubmitAsync(guideEvent);
+            model.LocationNote, model.Host, model.IsRecurring, model.RecurrenceDays, PriorityRank: null));
 
         logger.LogInformation("User {UserId} updated event '{Title}' ({EventId})", user.Id, model.Title, eventId);
 
@@ -303,13 +301,13 @@ internal sealed class EventsController(
         var guideEvent = await guide.GetUserEventAsync(eventId, user.Id);
         if (guideEvent == null) return NotFound();
 
-        if (!guideEvent.CanBeWithdrawnBySubmitter)
+        if (!guideEvent.CanWithdraw)
         {
             SetError(localizer["Events_NotWithdrawable"].Value);
             return RedirectToAction(nameof(MySubmissions));
         }
 
-        await guide.WithdrawEventAsync(guideEvent);
+        await guide.WithdrawEventAsync(guideEvent.Id);
 
         logger.LogInformation("User {UserId} withdrew event '{Title}' ({EventId})", user.Id, guideEvent.Title, eventId);
         SetSuccess(FormatEventFeedback("Events_Withdrawn", guideEvent.Title));
@@ -590,8 +588,8 @@ internal sealed class EventsController(
             RecurrenceDays = model.IsRecurring ? model.RecurrenceDays : null,
             PriorityRank = model.PriorityRank
         };
-        guideEvent.Submit(clock);
 
+        // SubmitEventAsync owns the submission window, recurrence-day rule and the Submit transition.
         var viewUrl = Url.Action(nameof(MySubmissions), "Events", null, Request.Scheme)!;
         await guide.SubmitEventAsync(guideEvent, viewUrl);
         logger.LogInformation("User {UserId} submitted barrio event '{Title}' for camp {CampId}", user.Id, model.Title, camp.Id);
@@ -610,7 +608,7 @@ internal sealed class EventsController(
         var guideEvent = await guide.GetCampEventAsync(eventId, camp.Id, ct);
         if (guideEvent == null) return NotFound();
 
-        if (!guideEvent.CanBeEditedBySubmitter)
+        if (!guideEvent.CanEdit)
         {
             SetError(localizer["Events_NotEditable"].Value);
             return RedirectToAction(nameof(MySubmissions));
@@ -636,7 +634,7 @@ internal sealed class EventsController(
         model.IsRecurring = guideEvent.IsRecurring;
         model.RecurrenceDays = guideEvent.RecurrenceDays;
         model.PriorityRank = guideEvent.PriorityRank;
-        model.IsResubmit = guideEvent.Status is EventStatus.Rejected or EventStatus.ResubmitRequested;
+        model.IsResubmit = guideEvent.IsResubmission;
 
         return View("BarrioEventForm", model);
     }
@@ -651,7 +649,7 @@ internal sealed class EventsController(
         var guideEvent = await guide.GetCampEventAsync(eventId, camp.Id);
         if (guideEvent == null) return NotFound();
 
-        if (!guideEvent.CanBeEditedBySubmitter)
+        if (!guideEvent.CanEdit)
         {
             SetError(localizer["Events_NotEditable"].Value);
             return RedirectToAction(nameof(MySubmissions));
@@ -675,12 +673,10 @@ internal sealed class EventsController(
         }
 
         var tz = GetTimeZone(eventSettings);
-        guideEvent.ApplyBarrioEdit(
-            model.CategoryId, model.Title, model.Description,
+        await guide.UpdateAndResubmitAsync(eventId, new EventEdit(
+            model.CategoryId, VenueId: null, model.Title, model.Description,
             ToInstant(model.StartDate.Add(model.StartTime), tz), model.DurationMinutes,
-            model.LocationNote, model.Host, model.IsRecurring, model.RecurrenceDays, model.PriorityRank);
-
-        await guide.UpdateAndResubmitAsync(guideEvent);
+            model.LocationNote, model.Host, model.IsRecurring, model.RecurrenceDays, model.PriorityRank));
 
         logger.LogInformation("User {UserId} updated barrio event '{Title}' ({EventId})", user.Id, model.Title, eventId);
 
@@ -698,13 +694,13 @@ internal sealed class EventsController(
         var guideEvent = await guide.GetCampEventAsync(eventId, camp.Id);
         if (guideEvent == null) return NotFound();
 
-        if (!guideEvent.CanBeWithdrawnBySubmitter)
+        if (!guideEvent.CanWithdraw)
         {
             SetError(localizer["Events_NotWithdrawable"].Value);
             return RedirectToAction(nameof(MySubmissions));
         }
 
-        await guide.WithdrawEventAsync(guideEvent);
+        await guide.WithdrawEventAsync(guideEvent.Id);
         logger.LogInformation("User {UserId} withdrew barrio event '{Title}' ({EventId})", user.Id, guideEvent.Title, eventId);
 
         SetSuccess(FormatEventFeedback("Events_Withdrawn", guideEvent.Title));

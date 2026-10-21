@@ -5,14 +5,12 @@ namespace Humans.Finance.Contracts;
 
 /// <summary>
 /// The writes other sections make on Finance, alongside the read-only
-/// <see cref="IHoldedFinanceService"/>: the Holded sync trigger, expense-account resolution and
-/// retirement for workgroups, and creditor-contact binding for expense payouts. Everything else
-/// the section's service does is internal to <c>Humans.Finance</c>.
+/// <see cref="IHoldedFinanceService"/>: expense-account resolution and retirement for workgroups,
+/// and creditor-contact binding for expense payouts. Everything else the section's service does —
+/// the purchase-doc sync included — is internal to <c>Humans.Finance</c>.
 /// </summary>
 public interface IHoldedFinanceWrite : IApplicationService
 {
-    Task<HoldedSyncResult> SyncAsync(CancellationToken ct = default);
-
     /// <summary>Resolves an expense account for a caller that has no budget category: an explicit
     /// <paramref name="existingAccountNum"/> is verified against the live chart and returned; else an
     /// account whose name normalizes equal to <paramref name="name"/> is returned; else one is created
@@ -31,12 +29,16 @@ public interface IHoldedFinanceWrite : IApplicationService
     /// <summary>Ensures the member has a Holded creditor contact and binding, returning the contact id.
     /// Reuses the existing binding, else the seed from a prior report, else creates a new contact. A
     /// linked contact is never updated in Holded (its PUT is a full replacement that resets the
-    /// creditor account). A Manual binding is never downgraded to Auto.</summary>
+    /// creditor account). A Manual binding is never downgraded to Auto. A contact this call creates and
+    /// then retracts, because a concurrent push bound the member first, is audited under
+    /// <paramref name="jobName"/>, the background job making the call.</summary>
     [ExternalWrite]
     Task<string> EnsureCreditorContactAsync(
         Guid userId, string legalName, string? burnerName, string? iban,
-        string? seedContactId, int? seedAccountNum, CancellationToken ct = default);
+        string? seedContactId, int? seedAccountNum, string jobName, CancellationToken ct = default);
 
-    /// <summary>Records the resolved 400000xx number on the member's binding (once the payable exists).</summary>
-    Task SetCreditorAccountNumAsync(Guid userId, int supplierAccountNum, CancellationToken ct = default);
+    /// <summary>Records the resolved 400000xx number on the member's binding (once the payable exists).
+    /// A number that differs from the binding's is audited under <paramref name="jobName"/>, the
+    /// background job making the call.</summary>
+    Task SetCreditorAccountNumAsync(Guid userId, int supplierAccountNum, string jobName, CancellationToken ct = default);
 }

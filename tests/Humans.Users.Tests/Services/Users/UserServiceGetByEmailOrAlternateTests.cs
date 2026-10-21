@@ -1,6 +1,5 @@
 using AwesomeAssertions;
 using Humans.Base.Interfaces;
-using Humans.Base.Interfaces.Caching;
 using Humans.Users.Contracts;
 using Humans.Users.Data.Repositories;
 using Humans.Users.Services;
@@ -32,7 +31,6 @@ public sealed class UserServiceGetByEmailOrAlternateTests : ServiceTestHarness
             _repo,
             communicationPreferenceRepository,
             AdminAuthorization,
-            Substitute.For<IRoleAssignmentClaimsCacheInvalidator>(),
             Substitute.For<IFileStorage>(),
             Clock,
             NullLogger<UserService>.Instance, AuditLog);
@@ -44,9 +42,9 @@ public sealed class UserServiceGetByEmailOrAlternateTests : ServiceTestHarness
         _repo.GetByIdAsync(userId, Arg.Any<CancellationToken>())
             .Returns(new User { Id = userId, DisplayName = "Test User", PreferredLanguage = "en" });
         _repo.GetUserEmailsByUserIdReadOnlyAsync(userId, Arg.Any<CancellationToken>())
-            .Returns((IReadOnlyList<UserEmail>)[]);
+            .Returns([]);
         _repo.GetEventParticipationsByUserIdAsync(userId, Arg.Any<CancellationToken>())
-            .Returns((IReadOnlyList<EventParticipation>)[]);
+            .Returns([]);
         _repo.GetExternalLoginsByUserIdsAsync(
                 Arg.Is<IReadOnlyCollection<Guid>>(ids => ids.Contains(userId)), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<Guid, IReadOnlyList<(string Provider, string ProviderKey)>>());
@@ -60,7 +58,7 @@ public sealed class UserServiceGetByEmailOrAlternateTests : ServiceTestHarness
         var userId = Guid.NewGuid();
         StubUserInfoReads(userId);
         _repo.GetUserEmailsByAddressAsync("alice@example.com", null, Arg.Any<CancellationToken>())
-            .Returns((IReadOnlyList<UserEmail>)
+            .Returns(
             [
                 new UserEmail { Id = Guid.NewGuid(), UserId = userId, Email = "alice@example.com", IsVerified = true }
             ]);
@@ -69,7 +67,7 @@ public sealed class UserServiceGetByEmailOrAlternateTests : ServiceTestHarness
             "alice@example.com", TestContext.Current.CancellationToken);
 
         result.Should().NotBeNull();
-        result!.Id.Should().Be(userId);
+        result.Id.Should().Be(userId);
     }
 
     [HumansFact]
@@ -80,7 +78,7 @@ public sealed class UserServiceGetByEmailOrAlternateTests : ServiceTestHarness
         // The row is stored on the googlemail.com twin; the query normalizes to gmail.com
         // and computes googlemail.com as the alternate (GetAlternateEmail).
         _repo.GetUserEmailsByAddressAsync("a.b@gmail.com", "a.b@googlemail.com", Arg.Any<CancellationToken>())
-            .Returns((IReadOnlyList<UserEmail>)
+            .Returns(
             [
                 new UserEmail { Id = Guid.NewGuid(), UserId = userId, Email = "a.b@googlemail.com", IsVerified = true }
             ]);
@@ -89,7 +87,7 @@ public sealed class UserServiceGetByEmailOrAlternateTests : ServiceTestHarness
             "a.b@gmail.com", TestContext.Current.CancellationToken);
 
         result.Should().NotBeNull();
-        result!.Id.Should().Be(userId);
+        result.Id.Should().Be(userId);
     }
 
     [HumansFact]
@@ -101,7 +99,7 @@ public sealed class UserServiceGetByEmailOrAlternateTests : ServiceTestHarness
         // would pass even if the filter were deleted.
         StubUserInfoReads(userId);
         _repo.GetUserEmailsByAddressAsync("alice@example.com", null, Arg.Any<CancellationToken>())
-            .Returns((IReadOnlyList<UserEmail>)
+            .Returns(
             [
                 new UserEmail { Id = Guid.NewGuid(), UserId = userId, Email = "alice@example.com", IsVerified = false }
             ]);
@@ -118,7 +116,7 @@ public sealed class UserServiceGetByEmailOrAlternateTests : ServiceTestHarness
     public async Task GetByEmailOrAlternateAsync_NoMatchingRow_ReturnsNull()
     {
         _repo.GetUserEmailsByAddressAsync("nobody@example.com", null, Arg.Any<CancellationToken>())
-            .Returns((IReadOnlyList<UserEmail>)[]);
+            .Returns([]);
 
         var result = await _service.GetByEmailOrAlternateAsync(
             "nobody@example.com", TestContext.Current.CancellationToken);

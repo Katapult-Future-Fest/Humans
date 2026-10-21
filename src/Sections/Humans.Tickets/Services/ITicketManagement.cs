@@ -1,4 +1,5 @@
 using Humans.Base.Interfaces;
+using Humans.Gdpr.Contracts;
 using Humans.Tickets.Contracts;
 using Humans.Tickets.Services.Dtos;
 using NodaTime;
@@ -69,12 +70,12 @@ internal interface ITicketManagement : ITicketService, IApplicationService
         int page, int pageSize, CancellationToken ct = default);
 
     /// <summary>
-    /// Get all attendees for CSV export, ordered by name.
+    /// Get all attendees for CSV export, unordered; the export controller orders them.
     /// </summary>
     Task<List<AttendeeExportRow>> GetAttendeeExportDataAsync(Guid actorUserId, CancellationToken ct = default);
 
     /// <summary>
-    /// Get all orders for CSV export, ordered by purchase date descending.
+    /// Get all orders for CSV export, unordered; the export controller orders them.
     /// </summary>
     Task<List<OrderExportRow>> GetOrderExportDataAsync(Guid actorUserId, CancellationToken ct = default);
 
@@ -90,6 +91,18 @@ internal interface ITicketManagement : ITicketService, IApplicationService
     /// less than the total number of attendees on the order.
     /// </summary>
     Task<IReadOnlyList<OrderDriftRow>> GetOrderDriftAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// GDPR export slices for <paramref name="userId"/>. The caching decorator fronts this
+    /// as the section's <c>IUserDataContributor</c>.
+    /// </summary>
+    Task<IReadOnlyList<UserDataSlice>> ContributeForUserAsync(Guid userId, CancellationToken ct);
+
+    /// <summary>
+    /// GDPR erasure: tombstones the user's ticket PII. The caching decorator fronts this as
+    /// the section's <c>IUserDataContributor</c> and evicts the slices that carried it.
+    /// </summary>
+    Task EraseForUserAsync(Guid userId, CancellationToken ct);
 }
 
 /// <summary>

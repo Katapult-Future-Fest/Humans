@@ -1,8 +1,8 @@
+using Humans.Email.Contracts;
 using Humans.AuditLog.Contracts;
 using Humans.MailerLite.Data;
 using Humans.MailerLite.Domain;
 using Humans.MailerLite.Services.Dtos;
-using Humans.MailerLite.Services;
 using Humans.Users.Contracts;
 using NodaTime;
 
@@ -14,6 +14,7 @@ internal sealed class MailerLiteImportService(
     IUserService users,
     IAccountProvisioningService provisioning,
     ICommunicationPreferenceService prefs,
+    ICommunicationPreferenceWrite prefWrite,
     IAuditLogService audit,
     IMailerLiteRepository repository,
     IClock clock,
@@ -67,6 +68,7 @@ internal sealed class MailerLiteImportService(
         var websiteGroupId = await ResolveWebsiteGroupIdAsync(ct);
 
         var decisions = new List<SubscriberDecision>();
+        var verified = new List<(int Index, MailerLiteSubscriber Sub, Guid UserId)>();
         var subs = new List<MailerLiteSubscriber>();
         await foreach (var s in ml.ListSubscribersAsync(ct))
             if (s.GroupIds.Contains(websiteGroupId, StringComparer.Ordinal))
@@ -94,10 +96,10 @@ internal sealed class MailerLiteImportService(
             if (verifiedUserIds.Count == 1)
             {
                 var targetId = (await users.GetUserInfoAsync(verifiedUserIds[0], ct))?.Id ?? verifiedUserIds[0];
-                var existing = await prefs.GetPreferenceOrNullAsync(targetId, MessageCategory.Marketing, ct);
-                var outcome = ClassifyVerifiedMatch(s, existing);
+                // Outcome placeholder: classified below, once all of this human's addresses are known.
+                verified.Add((decisions.Count, s, targetId));
                 decisions.Add(new SubscriberDecision(s.Email, s.Status,
-                    outcome, targetId, null, null));
+                    SubscriberOutcome.VerifiedPrefsAlreadyMatch, targetId, null, null));
                 continue;
             }
 
@@ -124,13 +126,25 @@ internal sealed class MailerLiteImportService(
                 SubscriberOutcome.CreateNewHuman, null, null, null));
         }
 
+        // One Marketing preference per human: every verified address of the same human
+        // carries the outcome of that human's governing subscriber (MAILERLITE-3).
+        foreach (var group in verified.GroupBy(v => v.UserId))
+        {
+            var governing = GoverningSubscriber(group.Select(v => v.Sub));
+            var existing = await prefs.GetPreferenceOrNullAsync(group.Key, MessageCategory.Marketing, ct);
+            var outcome = ClassifyVerifiedMatch(governing, existing);
+            foreach (var v in group)
+                decisions[v.Index] = decisions[v.Index] with { Outcome = outcome };
+        }
+
         // GDPR remediation: revert Marketing opt-ins the erroneous whole-account
         // import set on people who aren't in the Website group at all. Discovered
         // from the Humans side — these users have no Website subscriber row, so they
         // never appear in the subscriber loop above.
         var websiteEmails = WebsiteSubscriberEmails(subs);
+        var marketingPrefs = await prefs.GetPreferencesForCategoryAsync(MessageCategory.Marketing, ct);
         foreach (var u in await users.GetAllUserInfosAsync(ct))
-            if (IsResetCandidate(u, websiteEmails))
+            if (IsResetCandidate(u, marketingPrefs.GetValueOrDefault(u.Id), websiteEmails))
                 decisions.Add(new SubscriberDecision(
                     u.Email ?? "(no verified email)", "n/a",
                     SubscriberOutcome.ResetMarketingFlag, u.Id, null, null));
@@ -197,6 +211,14 @@ internal sealed class MailerLiteImportService(
 
         var (toProcess, throttled) = ApplyThrottle(plan.Decisions, maxPerOutcome);
 
+        // Each human's verified Website addresses, from the whole plan (not just the
+        // throttled slice) so a held-back opt-out still governs (MAILERLITE-3).
+        var verifiedEmailsByUser = plan.Decisions
+            .Where(d => IsVerifiedMatch(d.Outcome) && d.TargetUserId is not null)
+            .GroupBy(d => d.TargetUserId!.Value)
+            .ToDictionary(g => g.Key, g => g.Select(d => d.Email).ToList());
+        var appliedUsers = new HashSet<Guid>();
+
         foreach (var d in toProcess)
         {
             try
@@ -227,7 +249,12 @@ internal sealed class MailerLiteImportService(
                     case SubscriberOutcome.VerifiedFlipToOptOut:
                     case SubscriberOutcome.VerifiedKeepHumansPref:
                         {
-                            var delta = await ApplyMarketingDeltaAsync(d.TargetUserId!.Value, subscriber, ct);
+                            var userId = d.TargetUserId!.Value;
+                            if (!appliedUsers.Add(userId)) break; // applied once per human, not per address
+                            var governing = GoverningSubscriber(verifiedEmailsByUser[userId]
+                                .Select(e => subsByEmail.GetValueOrDefault(e))
+                                .OfType<MailerLiteSubscriber>());
+                            var delta = await ApplyMarketingDeltaAsync(userId, governing, ct);
                             if (delta == DeltaResult.FlippedToOptIn) flippedIn++;
                             else if (delta == DeltaResult.FlippedToOptOut) flippedOut++;
                             else if (delta == DeltaResult.Preserved) preserved++;
@@ -236,11 +263,14 @@ internal sealed class MailerLiteImportService(
 
                     case SubscriberOutcome.ReplaceUnverifiedEmail:
                         {
-                            var (provUser, provCreated) = await provisioning.ReplaceUnverifiedEmailAndProvisionAsync(
+                            // Not grouped with TargetUserId's verified addresses: replacement deletes
+                            // that user's unverified row and provisions a separate contact (provUserId),
+                            // whose Marketing pref this write targets.
+                            var (provUserId, provCreated) = await provisioning.ReplaceUnverifiedEmailAndProvisionAsync(
                                 d.TargetUserId!.Value, d.UnverifiedEmailIdToDelete!.Value,
                                 subscriber.Email, displayName: null, ContactSource.MailerLite, ct);
                             if (provCreated) created++;
-                            var delta = await ApplyMarketingDeltaAsync(provUser.Id, subscriber, ct);
+                            var delta = await ApplyMarketingDeltaAsync(provUserId, subscriber, ct);
                             if (delta == DeltaResult.FlippedToOptIn) flippedIn++;
                             else if (delta == DeltaResult.FlippedToOptOut) flippedOut++;
                             replacedUnverified++;
@@ -249,10 +279,10 @@ internal sealed class MailerLiteImportService(
 
                     case SubscriberOutcome.CreateNewHuman:
                         {
-                            var (provUser, provCreated) = await provisioning.FindOrCreateUserByEmailAsync(
+                            var (provUserId, provCreated) = await provisioning.FindOrCreateUserByEmailAsync(
                                 subscriber.Email, displayName: null, ContactSource.MailerLite, ct);
                             if (provCreated) created++;
-                            var delta = await ApplyMarketingDeltaAsync(provUser.Id, subscriber, ct);
+                            var delta = await ApplyMarketingDeltaAsync(provUserId, subscriber, ct);
                             if (delta == DeltaResult.FlippedToOptIn) flippedIn++;
                             else if (delta == DeltaResult.FlippedToOptOut) flippedOut++;
                             break;
@@ -337,6 +367,28 @@ internal sealed class MailerLiteImportService(
         return (toProcess, throttled);
     }
 
+    private static bool IsVerifiedMatch(SubscriberOutcome outcome) => outcome
+        is SubscriberOutcome.VerifiedPrefsAlreadyMatch
+        or SubscriberOutcome.VerifiedFlipToOptIn
+        or SubscriberOutcome.VerifiedFlipToOptOut
+        or SubscriberOutcome.VerifiedKeepHumansPref;
+
+    /// <summary>
+    /// The subscriber that decides a human's single Marketing preference when several of
+    /// their verified addresses sit in the Website group. Any opt-out beats active (an
+    /// active address never overrides an explicit opt-out); bounce/junk beat unsubscribed
+    /// (delivery facts skip the Humans-wins rule); then the most recent ML action; then
+    /// email and id, so the result never depends on enumeration order.
+    /// </summary>
+    private static MailerLiteSubscriber GoverningSubscriber(IEnumerable<MailerLiteSubscriber> subs) =>
+        subs.OrderBy(s => string.Equals(s.Status, "active", StringComparison.OrdinalIgnoreCase) ? 1 : 0)
+            .ThenBy(s => s.Status.Equals("bounced", StringComparison.OrdinalIgnoreCase)
+                      || s.Status.Equals("junk", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+            .ThenByDescending(s => s.UnsubscribedAt ?? s.SubscribedAt)
+            .ThenBy(s => s.Email, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(s => s.Id, StringComparer.Ordinal)
+            .First();
+
     private enum DeltaResult { NoChange, FlippedToOptIn, FlippedToOptOut, Preserved }
 
     private async Task<DeltaResult> ApplyMarketingDeltaAsync(
@@ -354,7 +406,7 @@ internal sealed class MailerLiteImportService(
                 return DeltaResult.NoChange;
         }
 
-        await prefs.UpdatePreferenceAsync(userId, MessageCategory.Marketing,
+        await prefWrite.UpdatePreferenceAsync(userId, MessageCategory.Marketing,
             optedOut: mlOptedOut, source: SyncSource, ct);
         return mlOptedOut ? DeltaResult.FlippedToOptOut : DeltaResult.FlippedToOptIn;
     }
@@ -386,10 +438,9 @@ internal sealed class MailerLiteImportService(
     /// being nulled here. Non-members are pure collateral: the row is deleted to
     /// revert to "no preference" (null).
     /// </summary>
-    private static bool IsResetCandidate(UserInfo user, HashSet<string> websiteEmails)
+    private static bool IsResetCandidate(
+        UserInfo user, CommunicationPreferenceSnapshot? marketing, HashSet<string> websiteEmails)
     {
-        var marketing = user.CommunicationPreferences
-            .FirstOrDefault(c => c.Category == MessageCategory.Marketing);
         if (marketing is null || marketing.OptedOut) return false;
         if (!string.Equals(marketing.UpdateSource, SyncSource, StringComparison.Ordinal)) return false;
         if (marketing.SubscribedAt is { } subscribedAt && subscribedAt < BadImportCutoff) return false;
@@ -402,9 +453,10 @@ internal sealed class MailerLiteImportService(
         Guid userId, HashSet<string> websiteEmails, CancellationToken ct)
     {
         var info = await users.GetUserInfoAsync(userId, ct);
-        if (info is null || !IsResetCandidate(info, websiteEmails))
+        if (info is null
+            || !IsResetCandidate(info, await prefs.GetPreferenceOrNullAsync(userId, MessageCategory.Marketing, ct), websiteEmails))
             return false;
-        await prefs.ResetPreferenceAsync(userId, MessageCategory.Marketing, ResetSource, ct);
+        await prefWrite.ResetPreferenceAsync(userId, MessageCategory.Marketing, ResetSource, ct);
         return true;
     }
 }

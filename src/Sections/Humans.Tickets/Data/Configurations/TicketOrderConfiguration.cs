@@ -2,7 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using Humans.Tickets.Domain;
 
-namespace Humans.Tickets.Data;
+namespace Humans.Tickets.Data.Configurations;
 
 internal sealed class TicketOrderConfiguration : IEntityTypeConfiguration<TicketOrder>
 {
@@ -73,6 +73,12 @@ internal sealed class TicketOrderConfiguration : IEntityTypeConfiguration<Ticket
             .HasPrecision(10, 2);
 
         builder.Property(o => o.ApplicationFee)
+            .HasPrecision(10, 2);
+
+        builder.Property(o => o.FeeTax)
+            .HasPrecision(10, 2);
+
+        builder.Property(o => o.WithheldTax)
             .HasPrecision(10, 2);
 
         builder.Property(o => o.DiscountAmount)

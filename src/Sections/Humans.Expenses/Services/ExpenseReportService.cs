@@ -31,13 +31,14 @@ internal sealed class ExpenseReportService(
     IBudgetService budgetService,
     ITeamService teamService,
     IUserService userService,
-    IUserWrite userWrite,
     IUserEmailService userEmailService,
     IEmailService emailService,
     ExpensesEmails emails,
     IAuditLogService auditLogService,
     IHoldedClient holdedClient,
     IHoldedFinanceService holdedFinance,
+    IFinanceService finance,
+    IFinanceWrite financeWrite,
     IPreapprovalService preapprovals,
     IPreapprovalWrite preapprovalWrites,
     IClock clock,
@@ -96,8 +97,9 @@ internal sealed class ExpenseReportService(
             var submitter = await userService.GetUserInfoAsync(report.SubmitterUserId, ct);
             foreach (var id in submitter?.AllUserIds ?? [report.SubmitterUserId])
             {
-                // Withdrawal does not undo a Holded booking. Count the actual documents regardless of
-                // report status; RegisteredAmount excludes lines that have not been pushed yet.
+                // Count the actual documents regardless of report status: reports withdrawn after
+                // approval before that was refused still have their Holded booking.
+                // RegisteredAmount excludes lines that have not been pushed yet.
                 memberRegisteredTotal += (await repo.GetForSubmitterAsync(id, ct)).Sum(RegisteredAmount);
             }
 
@@ -902,16 +904,15 @@ internal sealed class ExpenseReportService(
             // submitting on a member's behalf must snapshot the *member's* IBAN and legal name, or the
             // money goes to the wrong account.
             var profile = (await userService.GetUserInfoAsync(report.SubmitterUserId, ct))?.Profile;
-            if (profile?.Iban is null)
+            if (await finance.GetIbanAsync(report.SubmitterUserId, ct) is not { Length: > 0 } payeeIban)
                 return ExpenseMutationResult.Failure("Expenses_Validation_SubmitterNeedsIban");
 
             // Financial records use legal name (not BurnerName). See memory/architecture/burnername-is-the-display-name.md.
-            var legalName = $"{profile.FirstName} {profile.LastName}".Trim();
-            if (string.IsNullOrWhiteSpace(legalName))
+            if (string.IsNullOrWhiteSpace(profile?.FirstName) || string.IsNullOrWhiteSpace(profile.LastName))
             {
                 return ExpenseMutationResult.Failure("Expenses_Validation_SubmitterNeedsFirstAndLastName");
             }
-            var payeeIban = profile.Iban;
+            var legalName = $"{profile.FirstName} {profile.LastName}".Trim();
 
             var now = clock.GetCurrentInstant();
             if (report.PreapprovalGrantId is not { } grantId)
@@ -998,11 +999,16 @@ internal sealed class ExpenseReportService(
             if (!await IsSubmitterAsync(report, submitterUserId, ct))
                 return ExpenseMutationResult.Failure("Expenses_Validation_OnlySubmitterCanWithdraw");
 
+            // Approval queues the Holded push, so only a report still pending approval can be
+            // withdrawn; the repository refuses anything else too.
+            if (!IsPendingApproval(report.Status))
+                return ExpenseMutationResult.Failure("Expenses_Flash_WithdrawFailed");
+
             var now = clock.GetCurrentInstant();
-            // Withdrawn before approval, a held pre-approval goes back to the member to file again;
-            // after approval it was consumed and stays so. A grant revoked while the report was
-            // pending is not held any more and is left alone, so the withdrawal still goes through.
-            var heldGrant = report.PreapprovalGrantId is { } grantId && IsPendingApproval(report.Status)
+            // A held pre-approval goes back to the member to file again. A grant revoked while
+            // the report was pending is not held any more and is left alone, so the withdrawal
+            // still goes through.
+            var heldGrant = report.PreapprovalGrantId is { } grantId
                 ? await preapprovals.GetGrantAsync(grantId, ct)
                 : null;
             var releasesGrant = heldGrant?.Status == GrantStatus.Claimed;
@@ -1065,7 +1071,7 @@ internal sealed class ExpenseReportService(
         try
         {
             submitterUserId = (await userService.GetUserInfoAsync(submitterUserId, ct))?.Id ?? submitterUserId;
-            var saved = await userWrite.SetProfileIbanAsync(submitterUserId, normalized, ct);
+            var saved = await financeWrite.SetIbanAsync(submitterUserId, normalized, ct);
             if (!saved)
                 return IbanFailure("Expenses_Iban_SaveFailed", isValidationError: false);
 
@@ -1483,8 +1489,8 @@ internal sealed class ExpenseReportService(
 
         }, "Error finance-rejecting expense report {ReportId}", reportId);
 
-    public Task<IReadOnlyList<Guid>> GetFailedHoldedPushReportIdsAsync(CancellationToken ct = default)
-        => repo.GetFailedOutboxReportIdsAsync(ct);
+    public async Task<IReadOnlyList<Guid>> GetFailedHoldedPushReportIdsAsync(bool actorIsFinanceAdmin, CancellationToken ct = default)
+        => actorIsFinanceAdmin ? await repo.GetFailedOutboxReportIdsAsync(ct) : [];
 
     public Task<ExpenseMutationResult> RequeueHoldedPushWithResultAsync(
         Guid reportId, Guid actorUserId, CancellationToken ct = default) =>
@@ -1606,7 +1612,8 @@ internal sealed class ExpenseReportService(
         return null;
     }
 
-    /// <summary>User's reports (lines+attachment metadata), masked IBAN, audit. Includes accounts merged into this one.</summary>
+    /// <summary>User's reports (lines+attachment metadata) and audit. Includes accounts merged into this one.
+    /// The member's IBAN is Finance's slice (<c>PaymentDetails</c>).</summary>
     public async Task<IReadOnlyList<UserDataSlice>> ContributeForUserAsync(
         Guid userId, CancellationToken ct)
     {
@@ -1621,11 +1628,6 @@ internal sealed class ExpenseReportService(
             var reports = await repo.GetForSubmitterAsync(id, ct);
             allReports.AddRange(reports);
         }
-
-        var profile = user?.Profile;
-        var maskedIban = string.IsNullOrEmpty(profile?.Iban)
-            ? null
-            : IbanFormatter.Mask(profile.Iban);
 
         var expenseActions = new List<AuditAction>
         {
@@ -1727,7 +1729,7 @@ internal sealed class ExpenseReportService(
                 shapedReports.Count > 0 ? shapedReports : null),
             new UserDataSlice(ExpenseAuditLog,
                 shapedAudit.Count > 0
-                    ? new { MaskedIban = maskedIban, Entries = shapedAudit }
+                    ? new { Entries = shapedAudit }
                     : (object?)null),
         ];
     }

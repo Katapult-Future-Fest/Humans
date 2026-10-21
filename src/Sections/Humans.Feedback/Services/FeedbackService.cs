@@ -1,19 +1,14 @@
 using System.Globalization;
-using Humans.Base.Threading;
 using Microsoft.Extensions.Caching.Memory;
 using NodaTime;
 using Humans.Base.Extensions;
 using Humans.Base.Interfaces;
-using Humans.Base.Interfaces.Caching;
 using Humans.Gdpr.Contracts;
-using Humans.Base.Caching;
 using Humans.Feedback.Contracts;
 using Humans.Feedback.Data;
 using Humans.Feedback.Domain;
 using Humans.AuditLog.Contracts;
-using Humans.Email.Contracts;
 using Humans.Teams.Contracts;
-using Humans.Notifications.Contracts;
 using Humans.Users.Contracts;
 
 namespace Humans.Feedback.Services;
@@ -22,26 +17,24 @@ namespace Humans.Feedback.Services;
 /// The Feedback section's service. Admin triage over the historical rows —
 /// Feedback stopped accepting new reports in nobodies-collective/Humans#977, so
 /// there is deliberately no create path.
-/// Nav-badge invalidation routes through <see cref="INavBadgeCacheInvalidator"/>.
+/// Owns the nav-badge actionable count and evicts it after every write that can move it.
 /// </summary>
 internal sealed class FeedbackService(
     IFeedbackRepository repository,
     IUserService userService,
-    IUserEmailService userEmailService,
     ITeamService teamService,
-    IEmailService emailService,
-    FeedbackEmails emailMessages,
-    INotificationEmitter notificationService,
+    FeedbackReplyDelivery replyDelivery,
     IAuditLogService auditLogService,
-    INavBadgeCacheInvalidator navBadge,
     IFileStorage fileStorage,
     IMemoryCache cache,
     IClock clock,
-    ILogger<FeedbackService> logger) : IFeedbackService, IFeedbackTriage, IUserDataContributor, IUserMerge, IRecurringJob
+    ILogger<FeedbackService> logger) : IFeedbackService, IFeedbackTriage, IUserDataContributor, IUserMerge
 {
     internal const string FeedbackReports = "FeedbackReports";
-    private static readonly TrackedLock ReplyDeliveryLock = new("Feedback.ReplyDelivery");
+    internal const string FeedbackReplies = "FeedbackReplies";
 
+    /// <summary>The nav-badge actionable count's cache key; this service is its only reader and evicter.</summary>
+    internal const string BadgeCacheKey = "FeedbackBadgeCount";
     private static readonly TimeSpan BadgeCacheDuration = TimeSpan.FromMinutes(2);
 
     public async Task<FeedbackReportInfo?> GetFeedbackByIdAsync(
@@ -119,7 +112,7 @@ internal sealed class FeedbackService(
                 "API");
         }
 
-        navBadge.Invalidate();
+        cache.Remove(BadgeCacheKey);
         return FeedbackMutationResult.Success;
     }
 
@@ -132,6 +125,12 @@ internal sealed class FeedbackService(
         {
             logger.LogWarning("Feedback report {ReportId} not found during triage", id);
             return FeedbackMutationResult.Missing;
+        }
+
+        if (issueNumber is <= 0)
+        {
+            logger.LogWarning("Feedback report {ReportId} rejected nonpositive GitHub issue number {IssueNumber}", id, issueNumber);
+            return new(true, Rejection: "GitHub issue numbers must be positive.");
         }
 
         report.GitHubIssueNumber = issueNumber;
@@ -184,120 +183,14 @@ internal sealed class FeedbackService(
         await repository.AddMessageAndSaveReportAsync(message, report, cancellationToken);
 
         // The reply is durable. A failed handoff remains visible and the recurring job retries it.
-        await TryCompleteReplyEmailAsync(message, CancellationToken.None);
+        await replyDelivery.CompleteAsync(message, CancellationToken.None);
 
-        navBadge.Invalidate();
+        cache.Remove(BadgeCacheKey);
         logger.LogInformation(
             "Feedback admin reply posted on {ReportId} by {UserId}", reportId, senderUserId);
         return new(true, Message: new FeedbackMessageInfo(
             message.Id, message.FeedbackReportId, message.SenderUserId,
             SenderName: null, message.Content, message.CreatedAt, message.EmailEnqueuePending == true));
-    }
-
-    /// <summary>Retries durable replies whose Email handoff has not yet been acknowledged.</summary>
-    public async Task ExecuteAsync(CancellationToken cancellationToken = default)
-    {
-        var pending = await repository.GetPendingReplyEmailsAsync(cancellationToken);
-        foreach (var message in pending.OrderBy(m => m.CreatedAt))
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            await TryCompleteReplyEmailAsync(message, cancellationToken);
-        }
-    }
-
-    private async Task TryCompleteReplyEmailAsync(FeedbackMessage message, CancellationToken ct)
-    {
-        try
-        {
-            using var delivery = await ReplyDeliveryLock.AcquireAsync(logger, ct);
-            var report = await repository.GetByIdAsync(message.FeedbackReportId, ct);
-            var current = report?.Messages.FirstOrDefault(m => m.Id == message.Id);
-            if (current?.EmailEnqueuePending != true)
-            {
-                message.EmailEnqueuePending = false;
-                return;
-            }
-
-            var queued = await SendAdminResponseEmailAsync(report!, current, ct);
-            if (!await repository.CompleteReplyEmailAsync(message.Id, ct)) return;
-            message.EmailEnqueuePending = false;
-            delivery.Dispose();
-
-            if (queued)
-            {
-                var description = $"Queued response email for feedback {report!.Id}, reply {message.Id}";
-                if (current.SenderUserId.HasValue)
-                    await auditLogService.LogAsync(AuditAction.FeedbackResponseSent, AuditEntityTypes.FeedbackReport,
-                        report.Id, description, current.SenderUserId.Value);
-                else
-                    await auditLogService.LogAsync(AuditAction.FeedbackResponseSent, AuditEntityTypes.FeedbackReport,
-                        report.Id, description, "API");
-            }
-            await DispatchAdminReplyNotificationAsync(report!, ct);
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Feedback reply {MessageId} email handoff failed; pending replies retry automatically", message.Id);
-        }
-    }
-
-    private async Task<bool> SendAdminResponseEmailAsync(
-        FeedbackReport report, FeedbackMessage message, CancellationToken ct)
-    {
-        var reporter = await userService.GetUserInfoAsync(report.UserId, ct);
-        var emails = await userEmailService.GetNotificationTargetEmailsAsync(
-            [report.UserId], ct);
-
-        if (reporter is not null && !reporter.IsTombstone && emails.TryGetValue(report.UserId, out var recipientEmail) &&
-            !string.IsNullOrWhiteSpace(recipientEmail))
-        {
-            await emailService.SendAsync(emailMessages.FeedbackResponse(
-                recipientEmail, reporter.BurnerName,
-                report.Description, message.Content,
-                reporter.PreferredLanguage.IsSupportedCultureCode()
-                    ? reporter.PreferredLanguage : CultureCatalog.DefaultCultureCode) with
-            { UserId = reporter.Id, DeliveryId = message.Id }, ct);
-            return true;
-        }
-        else
-        {
-            logger.LogWarning(
-                "Skipping feedback response email for report {ReportId} because user {UserId} has no effective email",
-                report.Id, report.UserId);
-            return false;
-        }
-    }
-
-    private async Task DispatchAdminReplyNotificationAsync(
-        FeedbackReport report, CancellationToken ct)
-    {
-        try
-        {
-            var reporter = await userService.GetUserInfoAsync(report.UserId, ct);
-            if (reporter is null || reporter.IsTombstone) return;
-            var language = reporter.PreferredLanguage;
-            var notification = emailMessages.FeedbackResponseNotification(
-                language.IsSupportedCultureCode() ? language : CultureCatalog.DefaultCultureCode);
-
-            // No action link: /Feedback/{id} is Admin-only now, so the reporter would land on a 403.
-            // The response text itself reaches them in the FeedbackResponse email.
-            await notificationService.SendAsync(
-                NotificationSource.FeedbackResponse,
-                NotificationClass.Informational,
-                NotificationPriority.Normal,
-                notification.Title,
-                [report.UserId],
-                body: notification.Body,
-                cancellationToken: ct);
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Failed to dispatch FeedbackResponse notification for report {ReportId}", report.Id);
-        }
     }
 
     public async Task<FeedbackMutationResult> UpdateAssignmentAsync(
@@ -383,7 +276,7 @@ internal sealed class FeedbackService(
 
     public async Task<int> GetActionableCountAsync(
         CancellationToken cancellationToken = default) =>
-        await cache.GetOrCreateAsync(CacheKeys.FeedbackBadgeCount, async entry =>
+        await cache.GetOrCreateAsync(BadgeCacheKey, async entry =>
         {
             entry.AbsoluteExpirationRelativeToNow = BadgeCacheDuration;
             return await repository.GetActionableCountAsync(cancellationToken);
@@ -418,6 +311,7 @@ internal sealed class FeedbackService(
         var reports = await repository.GetForUserExportAsync(userId, ct);
 
         var shaped = reports
+            .Where(fr => fr.UserId == userId)
             .OrderByDescending(fr => fr.CreatedAt)
             .Select(fr => new
             {
@@ -438,17 +332,29 @@ internal sealed class FeedbackService(
                 })
             }).ToList();
 
-        return [new UserDataSlice(FeedbackReports, shaped)];
+        var replies = reports
+            .Where(fr => fr.UserId != userId)
+            .SelectMany(fr => fr.Messages)
+            .Where(m => m.SenderUserId == userId)
+            .OrderBy(m => m.CreatedAt)
+            .Select(m => new
+            {
+                m.FeedbackReportId,
+                m.Content,
+                m.EmailEnqueuePending,
+                CreatedAt = m.CreatedAt.ToIso8601()
+            }).ToList();
+
+        return [new UserDataSlice(FeedbackReports, shaped), new UserDataSlice(FeedbackReplies, replies)];
     }
 
     private static readonly IReadOnlyDictionary<string, string?> Erasure =
         new Dictionary<string, string?>(StringComparer.Ordinal)
         {
-            [FeedbackReports] =
-                "Partially retained: reports the person filed are deleted outright, messages and " +
-                "screenshots with them. A reply they left on someone else's report is that report's content and " +
-                "stays, with the authorship detached (SenderUserId nulled) — GDPR Art. 17(3)(b), " +
-                "since removing it would gut another human's thread."
+            [FeedbackReports] = null, // Own reports, messages and screenshots are deleted outright.
+            [FeedbackReplies] =
+                "Partially retained: replies on other people's reports remain as that report's content, " +
+                "with authorship detached (SenderUserId nulled), per GDPR Art. 17(3)(b)."
         };
 
     public IReadOnlyDictionary<string, string?> ErasureDeclaration => Erasure;
@@ -457,7 +363,7 @@ internal sealed class FeedbackService(
     public async Task EraseForUserAsync(Guid userId, CancellationToken ct)
     {
         var screenshotKeys = await repository.EraseForUserAsync(userId, ct);
-        navBadge.Invalidate();
+        cache.Remove(BadgeCacheKey);
 
         // The screenshots are the reporter's own uploads — they go with the rows.
         foreach (var key in screenshotKeys)

@@ -93,9 +93,9 @@ internal interface IExpenseReportManagement : IExpenseReportService, IApplicatio
     Task<ExpenseMutationResult> SubmitWithResultAsync(
         Guid reportId, Guid actorUserId, bool actorIsFinanceAdmin, CancellationToken ct = default);
 
-    /// <summary>Withdrawal stays the submitter's own decision — there is no on-behalf path. Withdrawn
-    /// before approval, a pre-approved report releases its grant; after approval the grant stays
-    /// consumed.</summary>
+    /// <summary>Withdrawal stays the submitter's own decision; there is no on-behalf path. Only a
+    /// Submitted or CoordinatorEndorsed report can be withdrawn; a pre-approved one releases its
+    /// grant. Approved reports are refused: approval has already queued the Holded push.</summary>
     Task<ExpenseMutationResult> WithdrawWithResultAsync(
         Guid reportId, Guid submitterUserId, CancellationToken ct = default);
 
@@ -160,8 +160,12 @@ internal interface IExpenseReportManagement : IExpenseReportService, IApplicatio
     Task<ExpenseMutationResult> RequeueHoldedPushWithResultAsync(
         Guid reportId, Guid actorUserId, CancellationToken ct = default);
 
-    /// <summary>Reports with a written-off Holded push — the /Expenses/Review banner and flags.</summary>
-    Task<IReadOnlyList<Guid>> GetFailedHoldedPushReportIdsAsync(CancellationToken ct = default);
+    /// <summary>
+    /// Reports with a written-off Holded push — the /Expenses/Review banner and flags. Empty unless
+    /// <paramref name="actorIsFinanceAdmin"/>: only finance admins can act on a written-off push,
+    /// and the list is queue-wide rather than scoped to the actor.
+    /// </summary>
+    Task<IReadOnlyList<Guid>> GetFailedHoldedPushReportIdsAsync(bool actorIsFinanceAdmin, CancellationToken ct = default);
 }
 
 internal sealed record ExpenseMutationResult(bool Succeeded, ExpenseError? Error)

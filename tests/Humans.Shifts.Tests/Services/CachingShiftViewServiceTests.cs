@@ -1,7 +1,6 @@
 using Humans.Shifts.Domain;
 using Humans.Shifts.Services;
 using AwesomeAssertions;
-using Humans.Settings.Contracts;
 using Humans.Shifts.Services.Dtos;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -281,7 +280,7 @@ public class CachingShiftViewServiceTests
         await sut.GetUserAsync(userId, Xunit.TestContext.Current.CancellationToken);
         await sut.GetRotaAsync(rotaId, Xunit.TestContext.Current.CancellationToken);
 
-        ((IEventSettingsChangeListener)sut).EventSettingsChanged(Guid.NewGuid());
+        (sut).EventSettingsChanged(Guid.NewGuid());
 
         await sut.GetUserAsync(userId, Xunit.TestContext.Current.CancellationToken);
         await sut.GetRotaAsync(rotaId, Xunit.TestContext.Current.CancellationToken);
@@ -404,7 +403,7 @@ public class CachingShiftViewServiceTests
         // on its own. The Shifts-owned write did this inline before the write moved lanes.
         var eventSettingsId = Guid.NewGuid();
 
-        ((IEventSettingsChangeListener)CreateSut()).EventSettingsChanged(eventSettingsId);
+        (CreateSut()).EventSettingsChanged(eventSettingsId);
 
         _management.Received(1).InvalidateDashboardCaches(eventSettingsId);
     }

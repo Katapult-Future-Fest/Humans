@@ -46,12 +46,6 @@ internal interface ITeamRepository : IRepository
     Task<Team?> FindForMutationAsync(Guid teamId, CancellationToken ct = default);
 
     /// <summary>
-    /// Load a team by its slug or custom slug with active members, parent,
-    /// and children. Detached. Used by the public team detail page.
-    /// </summary>
-    Task<Team?> GetBySlugWithRelationsAsync(string normalizedSlug, CancellationToken ct = default);
-
-    /// <summary>
     /// Load every team id whose <c>Slug</c> OR <c>CustomSlug</c> matches one
     /// of the given candidates, optionally excluding a specific team id.
     /// Used by create/update to detect slug collisions.
@@ -216,11 +210,14 @@ internal interface ITeamRepository : IRepository
     /// <summary>
     /// Leave/remove flow: remove a member's role assignments and set
     /// <c>LeftAt</c> on the membership. Returns the role assignments that
-    /// were removed (for shift-auth invalidation decisions in the service
-    /// layer).
+    /// were removed.
+    /// Account merges can supply a same-team active survivor membership: assignments
+    /// move there with their slot and provenance intact, duplicate role definitions
+    /// keep the survivor's assignment, and Coordinator status is preserved. This fold
+    /// and the source's LeftAt commit together.
     /// </summary>
     Task<IReadOnlyList<TeamRoleAssignment>> MarkMemberLeftAsync(
-        Guid teamMemberId, Instant leftAt, CancellationToken ct = default);
+        Guid teamMemberId, Instant leftAt, Guid? mergeIntoMemberId = null, CancellationToken ct = default);
 
     /// <summary>
     /// Sets <see cref="TeamMember.Role"/> for the given membership (looked up
@@ -269,7 +266,7 @@ internal interface ITeamRepository : IRepository
     /// has no other management assignments, demote them from
     /// <see cref="TeamMemberRole.Coordinator"/> to
     /// <see cref="TeamMemberRole.Member"/>. Returns the removed-assignment's
-    /// owning user id (for shift-auth invalidation).
+    /// owning user id.
     /// </summary>
     Task<(bool Demoted, Guid TargetUserId)> UnassignFromRoleAsync(
         Guid roleDefinitionId, Guid teamMemberId, CancellationToken ct = default);
@@ -362,10 +359,7 @@ internal interface ITeamRepository : IRepository
     /// <summary>
     /// Load a role definition (tracked) with Team + Assignments +
     /// Assignments.TeamMember loaded, for mutations like
-    /// <c>UpdateRoleDefinitionAsync</c>. The nested <c>TeamMember</c> is
-    /// required because the service reads <c>TeamMember.UserId</c> off the
-    /// assignments to build the shift-authorization invalidation set when
-    /// <c>IsManagement</c> flips.
+    /// <c>UpdateRoleDefinitionAsync</c>.
     /// </summary>
     Task<TeamRoleDefinition?> FindRoleDefinitionForMutationAsync(
         Guid roleDefinitionId, CancellationToken ct = default);
@@ -436,7 +430,7 @@ internal interface ITeamRepository : IRepository
         Guid userId, CancellationToken ct = default);
 
     // GoogleEmailStatus.Rejected suppresses outbox events for users whose Google account is dead.
-    // The application service owns that decision and reads it through IUserService.GetUserInfoAsync;
+    // The application service owns that decision and reads it through IGoogleIntegrationService;
     // there is no corresponding method on this repository.
 
     // ==========================================================================

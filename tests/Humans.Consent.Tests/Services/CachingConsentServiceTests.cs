@@ -23,16 +23,35 @@ public sealed class CachingConsentServiceTests
     private readonly IClock _clock = Substitute.For<IClock>();
     private readonly IUserService _userService = Substitute.For<IUserService>();
 
+    public CachingConsentServiceTests()
+    {
+        // The batched lookup answers per id exactly as the single one does, as the real one does.
+        _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(call => GetUserInfosOneByOneAsync(
+                call.ArgAt<IReadOnlyCollection<Guid>>(0), call.ArgAt<CancellationToken>(1)));
+    }
+
+    private async ValueTask<IReadOnlyDictionary<Guid, UserInfo>> GetUserInfosOneByOneAsync(
+        IReadOnlyCollection<Guid> ids, CancellationToken ct)
+    {
+        var infos = new Dictionary<Guid, UserInfo>();
+        foreach (var id in ids)
+        {
+            if (await _userService.GetUserInfoAsync(id, ct) is { } info)
+                infos[id] = info;
+        }
+        return infos;
+    }
+
     private CachingConsentService CreateSut()
     {
         var services = new ServiceCollection();
         services.AddKeyedScoped<IConsentManagement>(
             CachingConsentService.InnerServiceKey, (_, _) => _inner);
-        services.AddScoped<IUserService>(_ => _userService);
         var scopeFactory = services.BuildServiceProvider()
             .GetRequiredService<IServiceScopeFactory>();
         return new CachingConsentService(
-            _legalSync, _clock,
+            _legalSync, _userService, _clock,
             scopeFactory,
             NullLogger<CachingConsentService>.Instance);
     }
@@ -50,7 +69,7 @@ public sealed class CachingConsentServiceTests
 
         var sut = CreateSut();
 
-        var result = await sut.GetConsentMapForUsersAsync(userIds, Xunit.TestContext.Current.CancellationToken);
+        var result = await sut.GetConsentMapForUsersAsync(userIds, TestContext.Current.CancellationToken);
 
         result.Should().HaveCount(50);
         foreach (var id in userIds)
@@ -77,11 +96,11 @@ public sealed class CachingConsentServiceTests
         var sut = CreateSut();
 
         // Warm the cache.
-        _ = await sut.GetConsentMapForUsersAsync(userIds, Xunit.TestContext.Current.CancellationToken);
+        _ = await sut.GetConsentMapForUsersAsync(userIds, TestContext.Current.CancellationToken);
         _inner.ClearReceivedCalls();
 
         // All-hit path: no scope, no inner call.
-        var second = await sut.GetConsentMapForUsersAsync(userIds, Xunit.TestContext.Current.CancellationToken);
+        var second = await sut.GetConsentMapForUsersAsync(userIds, TestContext.Current.CancellationToken);
 
         second.Should().HaveCount(10);
         foreach (var id in userIds)
@@ -108,7 +127,7 @@ public sealed class CachingConsentServiceTests
             .Returns(stub);
 
         var sut = CreateSut();
-        var result = await sut.GetConsentMapForUsersAsync(userIds, Xunit.TestContext.Current.CancellationToken);
+        var result = await sut.GetConsentMapForUsersAsync(userIds, TestContext.Current.CancellationToken);
 
         result.Should().HaveCount(1);
         result[id].Should().BeEquivalentTo(stub[id]);
@@ -133,7 +152,7 @@ public sealed class CachingConsentServiceTests
             .Returns(hitStub);
 
         var sut = CreateSut();
-        _ = await sut.GetConsentMapForUsersAsync(hitIds, Xunit.TestContext.Current.CancellationToken); // warm
+        _ = await sut.GetConsentMapForUsersAsync(hitIds, TestContext.Current.CancellationToken); // warm
 
         var missStub = missIds.ToDictionary(
             id => id,
@@ -145,7 +164,7 @@ public sealed class CachingConsentServiceTests
             .Returns(missStub);
 
         var combined = hitIds.Concat(missIds).ToList();
-        var result = await sut.GetConsentMapForUsersAsync(combined, Xunit.TestContext.Current.CancellationToken);
+        var result = await sut.GetConsentMapForUsersAsync(combined, TestContext.Current.CancellationToken);
 
         result.Should().HaveCount(7);
 
@@ -154,6 +173,70 @@ public sealed class CachingConsentServiceTests
             Arg.Is<IReadOnlyList<Guid>>(ids => ids.Count == missIds.Count
                 && ids.All(missIds.Contains)),
             Arg.Any<CancellationToken>());
+    }
+
+    // ── Account merge — entries rebuild against the new chain ────────────────
+
+    /// <summary>
+    /// The merge tombstone changes both humans' <c>AllUserIds</c>; the next read of either
+    /// id rebuilds over the merged chain with no signal from Users. Until then (and when
+    /// nothing changed) the entry is served from cache.
+    /// </summary>
+    [HumansTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Reads_AfterMergeChangesUserIds_RebuildEntries(bool bulk)
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var survivorId = Guid.NewGuid();
+        var archivedId = Guid.NewGuid();
+        var survivorVersion = Guid.NewGuid();
+        var archivedVersion = Guid.NewGuid();
+        IReadOnlySet<Guid> Set(params Guid[] ids) => new HashSet<Guid>(ids);
+        _userService.GetUserInfoAsync(survivorId, Arg.Any<CancellationToken>())
+            .Returns(UserInfo.Create(new User { Id = survivorId }, [], [], [], null, []));
+        _userService.GetUserInfoAsync(archivedId, Arg.Any<CancellationToken>())
+            .Returns(UserInfo.Create(new User { Id = archivedId }, [], [], [], null, []));
+        _inner.GetConsentedVersionIdsAsync(survivorId, Arg.Any<CancellationToken>()).Returns(Set(survivorVersion));
+        _inner.GetConsentedVersionIdsAsync(archivedId, Arg.Any<CancellationToken>()).Returns(Set(archivedVersion));
+        _inner.GetConsentMapForUsersAsync(Arg.Any<IReadOnlyList<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<Guid, IReadOnlySet<Guid>>
+            {
+                [survivorId] = Set(survivorVersion),
+                [archivedId] = Set(archivedVersion),
+            });
+        var sut = CreateSut();
+        async Task<IReadOnlyDictionary<Guid, IReadOnlySet<Guid>>> ReadBothAsync() => bulk
+            ? await sut.GetConsentMapForUsersAsync([survivorId, archivedId], ct)
+            : new Dictionary<Guid, IReadOnlySet<Guid>>
+            {
+                [survivorId] = await sut.GetConsentedVersionIdsAsync(survivorId, ct),
+                [archivedId] = await sut.GetConsentedVersionIdsAsync(archivedId, ct),
+            };
+        await ReadBothAsync();
+        await ReadBothAsync();
+        _inner.ClearReceivedCalls();
+
+        // The tombstone lands: both ids now resolve to the survivor's record.
+        var merged = UserInfo.Create(new User { Id = survivorId }, [], [], [], null, []) with { MergedUserIds = [archivedId] };
+        _userService.GetUserInfoAsync(survivorId, Arg.Any<CancellationToken>()).Returns(merged);
+        _userService.GetUserInfoAsync(archivedId, Arg.Any<CancellationToken>()).Returns(merged);
+        _inner.GetConsentedVersionIdsAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>())
+            .Returns(Set(survivorVersion, archivedVersion));
+        _inner.GetConsentMapForUsersAsync(Arg.Any<IReadOnlyList<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<Guid, IReadOnlySet<Guid>>
+            {
+                [survivorId] = Set(survivorVersion, archivedVersion),
+                [archivedId] = Set(survivorVersion, archivedVersion),
+            });
+
+        var after = await ReadBothAsync();
+
+        after[survivorId].Should().BeEquivalentTo(new[] { survivorVersion, archivedVersion });
+        after[archivedId].Should().BeEquivalentTo(new[] { survivorVersion, archivedVersion });
+        _inner.ClearReceivedCalls();
+        await ReadBothAsync();
+        _inner.ReceivedCalls().Should().BeEmpty("the rebuilt entries match the current chain");
     }
 
     // ── SubmitConsentAsync — synchronous cache refresh ───────────────────────
@@ -183,11 +266,11 @@ public sealed class CachingConsentServiceTests
             .Returns(call =>
             {
                 call.ArgAt<CancellationToken>(1).ThrowIfCancellationRequested();
-                return (IReadOnlySet<Guid>)new HashSet<Guid> { versionId };
+                return new HashSet<Guid> { versionId };
             });
 
         var sut = CreateSut();
-        await sut.GetConsentMapForUsersAsync(user.AllUserIds, Xunit.TestContext.Current.CancellationToken);
+        await sut.GetConsentMapForUsersAsync(user.AllUserIds, TestContext.Current.CancellationToken);
         _inner.ClearReceivedCalls();
         var result = await sut.SubmitConsentAsync(
             userId, versionId, true, "1.2.3.4", "agent", cancellation.Token);
@@ -198,7 +281,7 @@ public sealed class CachingConsentServiceTests
             await _inner.Received(1).GetConsentedVersionIdsAsync(id, CancellationToken.None);
 
         // Every merge-chain alias serves the committed set without another inner read.
-        var map = await sut.GetConsentMapForUsersAsync(user.AllUserIds, Xunit.TestContext.Current.CancellationToken);
+        var map = await sut.GetConsentMapForUsersAsync(user.AllUserIds, TestContext.Current.CancellationToken);
         foreach (var id in user.AllUserIds)
             map[id].Should().Contain(versionId);
         await _inner.DidNotReceive().GetConsentMapForUsersAsync(
@@ -222,18 +305,18 @@ public sealed class CachingConsentServiceTests
         _inner.GetConsentedVersionIdsAsync(userId, Arg.Any<CancellationToken>())
             .Returns(Task.FromException<IReadOnlySet<Guid>>(new InvalidOperationException("reload unavailable")));
         var sut = CreateSut();
-        await sut.GetConsentMapForUsersAsync(user.AllUserIds, Xunit.TestContext.Current.CancellationToken);
+        await sut.GetConsentMapForUsersAsync(user.AllUserIds, TestContext.Current.CancellationToken);
 
         var submit = () => sut.SubmitConsentAsync(
-            userId, versionId, true, "1.2.3.4", "agent", Xunit.TestContext.Current.CancellationToken);
+            userId, versionId, true, "1.2.3.4", "agent", TestContext.Current.CancellationToken);
         await submit.Should().ThrowAsync<InvalidOperationException>().WithMessage("reload unavailable");
 
         foreach (var id in user.AllUserIds)
             sut.ContainsKey(id).Should().BeFalse("no merge-chain alias may retain the pre-submit consent set");
         _inner.GetConsentedVersionIdsAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>())
-            .Returns((IReadOnlySet<Guid>)new HashSet<Guid> { versionId });
+            .Returns(new HashSet<Guid> { versionId });
         foreach (var id in user.AllUserIds)
-            (await sut.GetConsentedVersionIdsAsync(id, Xunit.TestContext.Current.CancellationToken))
+            (await sut.GetConsentedVersionIdsAsync(id, TestContext.Current.CancellationToken))
                 .Should().Contain(versionId);
     }
 
@@ -247,7 +330,7 @@ public sealed class CachingConsentServiceTests
 
         var sut = CreateSut();
         var result = await sut.SubmitConsentAsync(
-            userId, versionId, true, "1.2.3.4", "agent", Xunit.TestContext.Current.CancellationToken);
+            userId, versionId, true, "1.2.3.4", "agent", TestContext.Current.CancellationToken);
 
         result.Success.Should().BeFalse();
         // A failed submit changed nothing, so the cache row must not be touched.

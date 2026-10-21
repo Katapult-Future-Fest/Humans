@@ -23,14 +23,14 @@
 
             <div asp-validation-summary="ModelOnly" class="alert alert-danger"></div>
 
-            @await Html.PartialAsync("_EmailComposer", new Humans.Base.Models.EmailComposerViewModel
+            @await Html.PartialAsync("_EmailComposer", new EmailComposerViewModel
             {
                 BodyName = "Message",
                 BodyValue = Model.Message,
                 BodyLabel = Localizer["Camps_Contact_MessageLabel"].Value,
                 BodyRows = 8,
                 BodyMaxLength = 2000,
-                Category = nameof(Humans.Users.Contracts.MessageCategory.FacilitatedMessages),
+                Category = nameof(Humans.Email.Contracts.MessageCategory.FacilitatedMessages),
                 RecipientCount = 1,
                 RecipientSummary = Model.CampName,
             })

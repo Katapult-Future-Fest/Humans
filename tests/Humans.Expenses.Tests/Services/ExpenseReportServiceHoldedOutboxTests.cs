@@ -38,6 +38,7 @@ public class ExpenseReportServiceHoldedOutboxTests
     private readonly IBudgetService _budgetService;
     private readonly IUserService _userService;
     private readonly IHoldedClient _holdedClient;
+    private readonly IFinanceService _finance = Substitute.For<IFinanceService>();
     private readonly IHoldedFinanceService _holdedFinance;
     private readonly IHoldedFinanceWrite _holdedFinanceWrite;
     private readonly IFileStorage _fileStorage;
@@ -95,7 +96,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         _holdedFinanceWrite = Substitute.For<IHoldedFinanceWrite>();
         _holdedFinanceWrite.EnsureCreditorContactAsync(
                 Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<string?>(),
-                Arg.Any<string?>(), Arg.Any<int?>(), Arg.Any<CancellationToken>())
+                Arg.Any<string?>(), Arg.Any<int?>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns("holded-contact-1");
         _holdedClient.GetContactAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(new HoldedContactDto { Id = "holded-contact-1", SupplierAccountNum = 40000050 });
@@ -110,13 +111,15 @@ public class ExpenseReportServiceHoldedOutboxTests
             _fileStorage,
             _budgetService,
             Substitute.For<ITeamService>(),
-            _userService, Substitute.For<IUserWrite>(),
+            _userService,
             Substitute.For<IUserEmailService>(),
             Substitute.For<IEmailService>(),
             TestExpensesEmails.Create(),
             _auditLog,
             _holdedClient,
             _holdedFinance,
+            _finance,
+            Substitute.For<IFinanceWrite>(),
             Substitute.For<Humans.Preapprovals.Contracts.IPreapprovalService>(),
             Substitute.For<Humans.Preapprovals.Contracts.IPreapprovalWrite>(),
             _clock,
@@ -150,7 +153,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         var legacy = MakeReport("doc-legacy");
         _repo.GetAllAsync(Arg.Any<CancellationToken>()).Returns([report, legacy]);
 
-        var bookings = await new ExpenseHoldedBookingService(_repo, _userService).GetHoldedBookingsAsync(Xunit.TestContext.Current.CancellationToken);
+        var bookings = await new ExpenseHoldedBookingService(_repo, _userService).GetHoldedBookingsAsync(TestContext.Current.CancellationToken);
 
         bookings.Should().HaveCount(2);
         bookings[0].Should().Be(new ExpenseHoldedBooking(
@@ -171,7 +174,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         report = report with { Lines = [report.Lines[0] with { HoldedDocId = "doc-a" }] };
         _repo.GetAllAsync(Arg.Any<CancellationToken>()).Returns([report]);
 
-        var bookings = await new ExpenseHoldedBookingService(_repo, _userService).GetHoldedBookingsAsync(Xunit.TestContext.Current.CancellationToken);
+        var bookings = await new ExpenseHoldedBookingService(_repo, _userService).GetHoldedBookingsAsync(TestContext.Current.CancellationToken);
 
         bookings.Should().ContainSingle().Which.CreditorUserId.Should().Be(survivor.Id);
     }
@@ -287,7 +290,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         _repo.GetUnprocessedOutboxAsync(Arg.Any<Instant>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
             .Returns([]);
 
-        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, Xunit.TestContext.Current.CancellationToken);
+        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, TestContext.Current.CancellationToken);
 
         await _holdedClient.DidNotReceiveWithAnyArgs()
             .CreatePurchaseDocumentAsync(null!, Arg.Any<CancellationToken>());
@@ -302,7 +305,7 @@ public class ExpenseReportServiceHoldedOutboxTests
     [HumansFact]
     public async Task OverlappingDrain_IsSkipped_AndTheEventIsProcessedOnce()
     {
-        var ct = Xunit.TestContext.Current.CancellationToken;
+        var ct = TestContext.Current.CancellationToken;
         var report = MakeReport();
         var outboxEvent = MakeEvent(report.Id, HoldedExpenseOutboxEventType.CreateIncomingDoc);
         _repo.GetUnprocessedOutboxAsync(Arg.Any<Instant>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
@@ -343,7 +346,7 @@ public class ExpenseReportServiceHoldedOutboxTests
     public async Task NextDrain_RunsNormally_AfterADrainThatThrew()
     {
         // A non-Holded exception escapes the processor; the gate must still be released.
-        var ct = Xunit.TestContext.Current.CancellationToken;
+        var ct = TestContext.Current.CancellationToken;
         var report = MakeReport();
         var outboxEvent = MakeEvent(report.Id, HoldedExpenseOutboxEventType.CreateIncomingDoc);
         _repo.GetUnprocessedOutboxAsync(Arg.Any<Instant>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
@@ -381,7 +384,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         _holdedClient.CreatePurchaseDocumentAsync(Arg.Any<HoldedPurchaseDocumentInput>(), Arg.Any<CancellationToken>())
             .Returns(holdedDocId);
 
-        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, Xunit.TestContext.Current.CancellationToken);
+        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, TestContext.Current.CancellationToken);
 
         // The report's Note stays in Humans; the doc's description is "ER: " + the line, and the
         // report ref moves to Notes so it doesn't clutter the Holded-rendered ledger description.
@@ -424,7 +427,7 @@ public class ExpenseReportServiceHoldedOutboxTests
                 Arg.Any<CancellationToken>())
             .Returns([1, 2]);
 
-        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, Xunit.TestContext.Current.CancellationToken);
+        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, TestContext.Current.CancellationToken);
 
         await _holdedClient.Received(1).CreatePurchaseDocumentAsync(
             Arg.Is<HoldedPurchaseDocumentInput>(i =>
@@ -465,7 +468,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         _holdedClient.CreatePurchaseDocumentAsync(Arg.Any<HoldedPurchaseDocumentInput>(), Arg.Any<CancellationToken>())
             .Returns("doc-1");
 
-        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, Xunit.TestContext.Current.CancellationToken);
+        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, TestContext.Current.CancellationToken);
 
         await _holdedClient.Received(1).CreatePurchaseDocumentAsync(
             Arg.Is<HoldedPurchaseDocumentInput>(i =>
@@ -499,7 +502,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         _holdedClient.CreatePurchaseDocumentAsync(Arg.Any<HoldedPurchaseDocumentInput>(), Arg.Any<CancellationToken>())
             .Returns("doc-1");
 
-        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, Xunit.TestContext.Current.CancellationToken);
+        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, TestContext.Current.CancellationToken);
 
         await _holdedClient.Received(1).CreatePurchaseDocumentAsync(
             Arg.Is<HoldedPurchaseDocumentInput>(i =>
@@ -530,7 +533,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         _holdedClient.CreatePurchaseDocumentAsync(Arg.Any<HoldedPurchaseDocumentInput>(), Arg.Any<CancellationToken>())
             .Returns("doc-1");
 
-        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, Xunit.TestContext.Current.CancellationToken);
+        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, TestContext.Current.CancellationToken);
 
         await _holdedClient.Received(1).CreatePurchaseDocumentAsync(
             Arg.Is<HoldedPurchaseDocumentInput>(i => i.Lines[0].AccountId == null),
@@ -562,7 +565,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         _holdedClient.CreatePurchaseDocumentAsync(Arg.Any<HoldedPurchaseDocumentInput>(), Arg.Any<CancellationToken>())
             .Returns("doc-capped");
 
-        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, Xunit.TestContext.Current.CancellationToken);
+        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, TestContext.Current.CancellationToken);
 
         await _holdedClient.Received(1).CreatePurchaseDocumentAsync(
             Arg.Is<HoldedPurchaseDocumentInput>(i =>
@@ -594,7 +597,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         _holdedClient.CreatePurchaseDocumentAsync(Arg.Any<HoldedPurchaseDocumentInput>(), Arg.Any<CancellationToken>())
             .Returns("doc-uncapped");
 
-        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, Xunit.TestContext.Current.CancellationToken);
+        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, TestContext.Current.CancellationToken);
 
         await _holdedClient.Received(1).CreatePurchaseDocumentAsync(
             Arg.Is<HoldedPurchaseDocumentInput>(i => i.Lines.Count == 1),
@@ -655,7 +658,7 @@ public class ExpenseReportServiceHoldedOutboxTests
                 Arg.Any<CancellationToken>())
             .Returns([3, 4]);
 
-        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, Xunit.TestContext.Current.CancellationToken);
+        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, TestContext.Current.CancellationToken);
 
         await _holdedClient.Received(1).UploadAttachmentAsync(
             "doc-line-a",
@@ -695,7 +698,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         _holdedClient.CreatePurchaseDocumentAsync(Arg.Any<HoldedPurchaseDocumentInput>(), Arg.Any<CancellationToken>())
             .Returns("doc-no-att");
 
-        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, Xunit.TestContext.Current.CancellationToken);
+        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, TestContext.Current.CancellationToken);
 
         await _holdedClient.DidNotReceiveWithAnyArgs()
             .UploadAttachmentAsync(null!, null!, Arg.Any<CancellationToken>());
@@ -739,7 +742,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         _fileStorage.TryReadAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns((byte[]?)null);
 
-        var act = async () => await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, Xunit.TestContext.Current.CancellationToken);
+        var act = async () => await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, TestContext.Current.CancellationToken);
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*could not be read from storage*");
 
@@ -763,7 +766,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         _repo.GetByIdAsync(report.Id, Arg.Any<CancellationToken>())
             .Returns(report);
 
-        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, Xunit.TestContext.Current.CancellationToken);
+        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, TestContext.Current.CancellationToken);
 
         await _holdedClient.DidNotReceiveWithAnyArgs()
             .CreatePurchaseDocumentAsync(null!, Arg.Any<CancellationToken>());
@@ -797,7 +800,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         _holdedClient.CreatePurchaseDocumentAsync(Arg.Any<HoldedPurchaseDocumentInput>(), Arg.Any<CancellationToken>())
             .Returns("doc-line-b");
 
-        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, Xunit.TestContext.Current.CancellationToken);
+        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, TestContext.Current.CancellationToken);
 
         await _holdedClient.Received(1).CreatePurchaseDocumentAsync(
             Arg.Is<HoldedPurchaseDocumentInput>(i => i.Lines[0].Description == "Screws"),
@@ -841,7 +844,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         _holdedClient.CreatePurchaseDocumentAsync(Arg.Any<HoldedPurchaseDocumentInput>(), Arg.Any<CancellationToken>())
             .Returns("doc-a", "doc-b", "doc-c");
 
-        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, Xunit.TestContext.Current.CancellationToken);
+        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, TestContext.Current.CancellationToken);
 
         await _holdedClient.Received(3).CreatePurchaseDocumentAsync(
             Arg.Any<HoldedPurchaseDocumentInput>(), Arg.Any<CancellationToken>());
@@ -863,7 +866,7 @@ public class ExpenseReportServiceHoldedOutboxTests
             Arg.Is<string>(s =>
                 s.Contains("doc-a, doc-b, doc-c") &&
                 s.Contains("'C' booked €50.00 of €100.00")),
-            Arg.Any<string>(), null, null);
+            Arg.Any<string>());
     }
 
     [HumansFact]
@@ -894,7 +897,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         _fileStorage.TryReadAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(new byte[] { 1, 2, 3 });
 
-        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, Xunit.TestContext.Current.CancellationToken);
+        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, TestContext.Current.CancellationToken);
 
         await _holdedClient.Received(1).CreatePurchaseDocumentAsync(
             Arg.Any<HoldedPurchaseDocumentInput>(), Arg.Any<CancellationToken>());
@@ -909,12 +912,12 @@ public class ExpenseReportServiceHoldedOutboxTests
             Arg.Is<string>(s =>
                 s.Contains("doc-first") &&
                 s.Contains("'second.pdf' (€100.00) not booked — authorized maximum reached.")),
-            Arg.Any<string>(), null, null);
+            Arg.Any<string>());
     }
 
     [HumansTheory]
-    [Xunit.InlineData(0)]
-    [Xunit.InlineData(1)]
+    [InlineData(0)]
+    [InlineData(1)]
     public async Task CreateIncomingDoc_LongUnicodeSummary_RemainsValidUtf8(int padding)
     {
         var description = new string('a', padding) + string.Concat(Enumerable.Repeat("😀", 249));
@@ -935,7 +938,7 @@ public class ExpenseReportServiceHoldedOutboxTests
             .Returns("doc-emoji");
         _fileStorage.TryReadAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns(new byte[] { 1 });
 
-        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, Xunit.TestContext.Current.CancellationToken);
+        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, TestContext.Current.CancellationToken);
 
         var audit = _auditLog.ReceivedCalls().Single(c =>
             string.Equals(c.GetMethodInfo().Name, nameof(IAuditLogService.LogAsync), StringComparison.Ordinal)
@@ -963,7 +966,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         _repo.GetByIdAsync(report.Id, Arg.Any<CancellationToken>())
             .Returns(report);
 
-        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, Xunit.TestContext.Current.CancellationToken);
+        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, TestContext.Current.CancellationToken);
 
         await _repo.Received(1).MarkOutboxProcessedAsync(
             outboxEvent.Id, Now, Arg.Any<CancellationToken>());
@@ -975,9 +978,9 @@ public class ExpenseReportServiceHoldedOutboxTests
     // ─── Transient error ──────────────────────────────────────────────────────
 
     [HumansTheory]
-    [Xunit.InlineData(false, 0)]
-    [Xunit.InlineData(false, 9)]
-    [Xunit.InlineData(true, 0)]
+    [InlineData(false, 0)]
+    [InlineData(false, 9)]
+    [InlineData(true, 0)]
     public async Task Long_outbox_errors_fit_bookkeeping_and_keep_writeoffs_audited(bool permanent, int retries)
     {
         var report = MakeReport();
@@ -993,7 +996,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         _holdedClient.CreatePurchaseDocumentAsync(Arg.Any<HoldedPurchaseDocumentInput>(), Arg.Any<CancellationToken>())
             .Returns(Task.FromException<string>(failure));
 
-        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, Xunit.TestContext.Current.CancellationToken);
+        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, TestContext.Current.CancellationToken);
 
         var writeoff = permanent || retries == 9;
         var write = _repo.ReceivedCalls().Single(c => string.Equals(c.GetMethodInfo().Name,
@@ -1007,7 +1010,7 @@ public class ExpenseReportServiceHoldedOutboxTests
             await _auditLog.Received(1).LogAsync(
                 AuditAction.ExpenseHoldedFailed, Arg.Any<string>(), report.Id,
                 Arg.Is<string>(s => s.Length <= 4000 && s.Contains(savedError, StringComparison.Ordinal)),
-                Arg.Any<string>(), null, null);
+                Arg.Any<string>());
         }
     }
 
@@ -1024,7 +1027,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         _holdedClient.CreatePurchaseDocumentAsync(Arg.Any<HoldedPurchaseDocumentInput>(), Arg.Any<CancellationToken>())
             .Returns(Task.FromException<string>(new HoldedTransientException("timeout")));
 
-        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, Xunit.TestContext.Current.CancellationToken);
+        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, TestContext.Current.CancellationToken);
 
         await _repo.Received(1).IncrementOutboxRetryAsync(
             outboxEvent.Id, "timeout", Arg.Any<Instant>(), Arg.Any<CancellationToken>());
@@ -1035,9 +1038,9 @@ public class ExpenseReportServiceHoldedOutboxTests
     }
 
     [HumansTheory]
-    [Xunit.InlineData(0, 2)]
-    [Xunit.InlineData(1, 4)]
-    [Xunit.InlineData(3, 16)]
+    [InlineData(0, 2)]
+    [InlineData(1, 4)]
+    [InlineData(3, 16)]
     public async Task TransientException_BacksOffExponentially(int retryCount, int expectedMinutes)
     {
         var report = MakeReport();
@@ -1050,7 +1053,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         _holdedClient.CreatePurchaseDocumentAsync(Arg.Any<HoldedPurchaseDocumentInput>(), Arg.Any<CancellationToken>())
             .Returns(Task.FromException<string>(new HoldedTransientException("timeout")));
 
-        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, Xunit.TestContext.Current.CancellationToken);
+        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, TestContext.Current.CancellationToken);
 
         await _repo.Received(1).IncrementOutboxRetryAsync(
             outboxEvent.Id, "timeout",
@@ -1074,7 +1077,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         _holdedClient.CreatePurchaseDocumentAsync(Arg.Any<HoldedPurchaseDocumentInput>(), Arg.Any<CancellationToken>())
             .Returns(Task.FromException<string>(new HoldedTransientException("timeout")));
 
-        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, Xunit.TestContext.Current.CancellationToken);
+        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, TestContext.Current.CancellationToken);
 
         await _repo.Received(1).MarkOutboxFailedPermanentlyAsync(
             outboxEvent.Id,
@@ -1084,7 +1087,7 @@ public class ExpenseReportServiceHoldedOutboxTests
             .IncrementOutboxRetryAsync(Guid.Empty, null!, default, Arg.Any<CancellationToken>());
         await _auditLog.Received(1).LogAsync(
             AuditAction.ExpenseHoldedFailed, Arg.Any<string>(), report.Id,
-            Arg.Any<string>(), Arg.Any<string>(), null, null);
+            Arg.Any<string>(), Arg.Any<string>());
     }
 
     [HumansFact]
@@ -1093,7 +1096,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         // Every call would 401 — a permanent error — so draining would write off the whole queue.
         _holdedClient.IsConfigured.Returns(false);
 
-        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, Xunit.TestContext.Current.CancellationToken);
+        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, TestContext.Current.CancellationToken);
 
         await _repo.DidNotReceiveWithAnyArgs()
             .GetUnprocessedOutboxAsync(default, 0, Arg.Any<CancellationToken>());
@@ -1118,7 +1121,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         _fileStorage.TryReadAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(new byte[] { 1, 2, 3 });
 
-        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, Xunit.TestContext.Current.CancellationToken);
+        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, TestContext.Current.CancellationToken);
 
         await _holdedClient.Received(1).UploadAttachmentAsync(
             "holded-doc-1",
@@ -1143,7 +1146,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         _fileStorage.TryReadAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(new byte[] { 1, 2, 3 });
 
-        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, Xunit.TestContext.Current.CancellationToken);
+        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, TestContext.Current.CancellationToken);
 
         await _repo.Received(2).MarkAttachmentPushedAsync(
             Arg.Any<Guid>(), Now, Arg.Any<CancellationToken>());
@@ -1163,11 +1166,11 @@ public class ExpenseReportServiceHoldedOutboxTests
         _holdedClient.CreatePurchaseDocumentAsync(Arg.Any<HoldedPurchaseDocumentInput>(), Arg.Any<CancellationToken>())
             .Returns("holded-doc-42");
 
-        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, Xunit.TestContext.Current.CancellationToken);
+        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, TestContext.Current.CancellationToken);
 
         await _auditLog.Received(1).LogAsync(
             AuditAction.ExpenseHoldedPushed, Arg.Any<string>(), report.Id,
-            Arg.Is<string>(s => s.Contains("holded-doc-42")), Arg.Any<string>(), null, null);
+            Arg.Is<string>(s => s.Contains("holded-doc-42")), Arg.Any<string>());
     }
 
     // ─── purchase doc approval ─────────────────────────────────────────────────
@@ -1187,7 +1190,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         _holdedClient.GetPurchaseDocumentAsync("holded-doc-42", Arg.Any<CancellationToken>())
             .Returns(MakePurchaseDoc(approvedAt: null));
 
-        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, Xunit.TestContext.Current.CancellationToken);
+        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, TestContext.Current.CancellationToken);
 
         await _holdedClient.Received(1).ApprovePurchaseDocumentAsync(
             "holded-doc-42", Arg.Any<CancellationToken>());
@@ -1213,7 +1216,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         _holdedClient.GetPurchaseDocumentAsync("holded-doc-42", Arg.Any<CancellationToken>())
             .Returns(MakePurchaseDoc(approvedAt: Now - Duration.FromHours(1)));
 
-        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, Xunit.TestContext.Current.CancellationToken);
+        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, TestContext.Current.CancellationToken);
 
         await _holdedClient.DidNotReceiveWithAnyArgs()
             .ApprovePurchaseDocumentAsync(null!, Arg.Any<CancellationToken>());
@@ -1230,7 +1233,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         _repo.GetLatestOutboxForReportAsync(report.Id, Arg.Any<CancellationToken>())
             .Returns(MakeEvent(report.Id, HoldedExpenseOutboxEventType.CreateIncomingDoc));
 
-        var timeline = await _sut.GetHoldedTimelineAsync(report, Xunit.TestContext.Current.CancellationToken);
+        var timeline = await _sut.GetHoldedTimelineAsync(report, TestContext.Current.CancellationToken);
 
         timeline!.SyncState.Should().Be(ExpenseHoldedSyncState.Queued);
         timeline.CanRetry.Should().BeFalse();
@@ -1246,7 +1249,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         ev.NextRetryAt = Now + Duration.FromMinutes(16);
         _repo.GetLatestOutboxForReportAsync(report.Id, Arg.Any<CancellationToken>()).Returns(ev);
 
-        var timeline = await _sut.GetHoldedTimelineAsync(report, Xunit.TestContext.Current.CancellationToken);
+        var timeline = await _sut.GetHoldedTimelineAsync(report, TestContext.Current.CancellationToken);
 
         timeline!.SyncState.Should().Be(ExpenseHoldedSyncState.Retrying);
         timeline.RetryCount.Should().Be(3);
@@ -1266,7 +1269,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         ev.LastError = "400 Bad Request";
         _repo.GetLatestOutboxForReportAsync(report.Id, Arg.Any<CancellationToken>()).Returns(ev);
 
-        var timeline = await _sut.GetHoldedTimelineAsync(report, Xunit.TestContext.Current.CancellationToken);
+        var timeline = await _sut.GetHoldedTimelineAsync(report, TestContext.Current.CancellationToken);
 
         timeline!.SyncState.Should().Be(ExpenseHoldedSyncState.Failed);
         timeline.CanRetry.Should().BeTrue();
@@ -1281,7 +1284,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         _repo.GetLatestOutboxForReportAsync(report.Id, Arg.Any<CancellationToken>())
             .Returns(MakeEvent(report.Id, HoldedExpenseOutboxEventType.CreateIncomingDoc));
 
-        var timeline = await _sut.GetHoldedTimelineAsync(report, Xunit.TestContext.Current.CancellationToken);
+        var timeline = await _sut.GetHoldedTimelineAsync(report, TestContext.Current.CancellationToken);
 
         timeline!.SyncState.Should().Be(ExpenseHoldedSyncState.NotConfigured);
     }
@@ -1289,10 +1292,23 @@ public class ExpenseReportServiceHoldedOutboxTests
     [HumansFact]
     public async Task GetHoldedTimelineAsync_ReportsNotQueued_WhenNoPushWasEverQueued()
     {
-        var timeline = await _sut.GetHoldedTimelineAsync(MakeReport(), Xunit.TestContext.Current.CancellationToken);
+        var timeline = await _sut.GetHoldedTimelineAsync(MakeReport(), TestContext.Current.CancellationToken);
 
         timeline!.SyncState.Should().Be(ExpenseHoldedSyncState.NotQueued);
         timeline.CanRetry.Should().BeFalse();
+    }
+
+    [HumansTheory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task GetFailedHoldedPushReportIdsAsync_IsFinanceAdminOnly(bool isFinanceAdmin)
+    {
+        var failed = Guid.NewGuid();
+        _repo.GetFailedOutboxReportIdsAsync(Arg.Any<CancellationToken>()).Returns([failed]);
+
+        var ids = await _sut.GetFailedHoldedPushReportIdsAsync(isFinanceAdmin, TestContext.Current.CancellationToken);
+
+        ids.Should().BeEquivalentTo(isFinanceAdmin ? [failed] : Array.Empty<Guid>());
     }
 
     // ─── manual re-queue ──────────────────────────────────────────────────────
@@ -1305,12 +1321,12 @@ public class ExpenseReportServiceHoldedOutboxTests
         _repo.RequeueOutboxForReportAsync(reportId, Arg.Any<CancellationToken>()).Returns(true);
 
         var result = await _sut.RequeueHoldedPushWithResultAsync(
-            reportId, actorId, Xunit.TestContext.Current.CancellationToken);
+            reportId, actorId, TestContext.Current.CancellationToken);
 
         result.Succeeded.Should().BeTrue();
         await _auditLog.Received(1).LogAsync(
             AuditAction.ExpenseHoldedRequeued, Arg.Any<string>(), reportId,
-            Arg.Any<string>(), actorId, null, null);
+            Arg.Any<string>(), actorId);
     }
 
     [HumansFact]
@@ -1320,11 +1336,11 @@ public class ExpenseReportServiceHoldedOutboxTests
         _repo.RequeueOutboxForReportAsync(reportId, Arg.Any<CancellationToken>()).Returns(false);
 
         var result = await _sut.RequeueHoldedPushWithResultAsync(
-            reportId, Guid.NewGuid(), Xunit.TestContext.Current.CancellationToken);
+            reportId, Guid.NewGuid(), TestContext.Current.CancellationToken);
 
         result.Succeeded.Should().BeFalse();
         await _auditLog.DidNotReceiveWithAnyArgs()
-            .LogAsync(default, null!, default, null!, Guid.Empty, null, null);
+            .LogAsync(default, null!, default, null!, Guid.Empty);
     }
 
     [HumansFact]
@@ -1342,7 +1358,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         _holdedClient.CreatePurchaseDocumentAsync(Arg.Any<HoldedPurchaseDocumentInput>(), Arg.Any<CancellationToken>())
             .Returns(Task.FromException<string>(new HoldedTransientException("timeout")));
 
-        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, Xunit.TestContext.Current.CancellationToken);
+        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, TestContext.Current.CancellationToken);
 
         // Contact link persisted (with the upserted id, num still null) BEFORE the failed create.
         await _repo.Received(1).SetHoldedContactLinkAsync(
@@ -1364,7 +1380,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         _holdedClient.CreatePurchaseDocumentAsync(Arg.Any<HoldedPurchaseDocumentInput>(), Arg.Any<CancellationToken>())
             .Returns(Task.FromException<string>(new HoldedPermanentException(422, "body", "Unprocessable entity")));
 
-        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, Xunit.TestContext.Current.CancellationToken);
+        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, TestContext.Current.CancellationToken);
 
         await _repo.Received(1).MarkOutboxFailedPermanentlyAsync(
             outboxEvent.Id,
@@ -1398,7 +1414,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         _holdedClient.CreatePurchaseDocumentAsync(Arg.Any<HoldedPurchaseDocumentInput>(), Arg.Any<CancellationToken>())
             .Returns("doc-iban-test");
 
-        await sut.DrainHoldedOutboxAsync(BatchSize, Xunit.TestContext.Current.CancellationToken);
+        await sut.DrainHoldedOutboxAsync(BatchSize, TestContext.Current.CancellationToken);
 
         // Verify the raw IBAN never appears as a log argument
         logger.DidNotReceive().Log(
@@ -1427,11 +1443,11 @@ public class ExpenseReportServiceHoldedOutboxTests
         _holdedClient.CreatePurchaseDocumentAsync(Arg.Any<HoldedPurchaseDocumentInput>(), Arg.Any<CancellationToken>())
             .Returns("holded-doc-1");
 
-        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, Xunit.TestContext.Current.CancellationToken);
+        await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, TestContext.Current.CancellationToken);
 
         await _holdedFinanceWrite.Received(1).EnsureCreditorContactAsync(
             survivorId, Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<string?>(),
-            Arg.Any<string?>(), Arg.Any<int?>(), Arg.Any<CancellationToken>());
+            Arg.Any<string?>(), Arg.Any<int?>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
         await _repo.Received(1).GetForSubmitterAsync(survivorId, Arg.Any<CancellationToken>());
         await _repo.Received(1).GetForSubmitterAsync(SubmitterId, Arg.Any<CancellationToken>());
     }

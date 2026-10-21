@@ -7,18 +7,10 @@ using Humans.Users.Models;
 using Humans.Users.Controllers;
 using System.Security.Claims;
 using AwesomeAssertions;
-using Humans.Base.Configuration;
 using Humans.Tickets.Contracts;
 using Humans.AuditLog.Contracts;
-using Humans.Campaigns.Contracts;
-using Humans.Camps.Contracts;
 using Humans.Email.Contracts;
-using Humans.Gdpr.Contracts;
-using Humans.Governance.Contracts;
-using Humans.Onboarding.Contracts;
 using Humans.Users.Contracts;
-using Humans.Shifts.Contracts;
-using Humans.Teams.Contracts;
 
 using Humans.Users.Tests.Infrastructure;
 using Humans.Base;
@@ -29,12 +21,10 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Routing;
 using Microsoft.AspNetCore.Mvc.ViewFeatures;
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Localization;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NodaTime;
-using NodaTime.Testing;
 using NSubstitute;
 
 using Humans.GoogleIntegration.Contracts;
@@ -43,7 +33,8 @@ namespace Humans.Users.Tests.Controllers;
 
 /// <summary>
 /// Self-route <c>ProfileEmailsController</c> actions over the UserEmailService grid:
-/// SetGoogle, Link, Unlink, SetPrimary.
+/// Link, Unlink, SetPrimary. (The Google identity routes moved to GoogleIntegration's
+/// <c>WorkspaceIdentityController</c> in Users decomposition commit 15.)
 /// </summary>
 public class ProfileEmailsControllerGridTests
 {
@@ -161,15 +152,11 @@ public class ProfileEmailsControllerGridTests
     [InlineData("SetPrimary", true)]
     [InlineData("SetEmailVisibility", true)]
     [InlineData("DeleteEmail", false)]
-    [InlineData("SetGoogle", true)]
-    [InlineData("ClearGoogle", true)]
     [InlineData("ClearPrimary", true)]
     [InlineData("Unlink", false)]
     [InlineData("AdminSetPrimary", false)]
     [InlineData("AdminSetVisibility", false)]
     [InlineData("AdminDeleteEmail", false)]
-    [InlineData("AdminSetGoogle", false)]
-    [InlineData("AdminClearGoogle", false)]
     [InlineData("AdminClearPrimary", false)]
     [InlineData("AdminUnlink", false)]
     public async Task EmailMutation_RejectionLogsWarningWithReasonWithoutException(string action, bool validationFailure)
@@ -182,39 +169,31 @@ public class ProfileEmailsControllerGridTests
             .Returns(Task.FromException<UpdateEmailResult>(rejection));
         _userEmailService.DeleteEmailAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>())
             .Returns(Task.FromException<DeleteEmailResult>(rejection));
-        _userEmailService.SetGoogleAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>())
-            .Returns(Task.FromException<bool>(rejection));
-        _userEmailService.ClearGoogleAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>())
-            .Returns(Task.FromException<bool>(rejection));
         _userEmailService.ClearPrimaryAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>())
             .Returns(Task.FromException<bool>(rejection));
         _userEmailService.UnlinkAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>())
             .Returns(Task.FromException<UnlinkEmailResult>(rejection));
         var emailId = Guid.NewGuid();
         var targetId = Guid.NewGuid();
-        var ct = Xunit.TestContext.Current.CancellationToken;
+        var ct = TestContext.Current.CancellationToken;
 
         var result = action switch
         {
             "SetPrimary" => await _controller.SetPrimary(emailId, ct),
             "SetEmailVisibility" => await _controller.SetEmailVisibility(emailId, null),
             "DeleteEmail" => await _controller.DeleteEmail(emailId),
-            "SetGoogle" => await _controller.SetGoogle(emailId, ct),
-            "ClearGoogle" => await _controller.ClearGoogle(emailId, ct),
             "ClearPrimary" => await _controller.ClearPrimary(emailId, ct),
             "Unlink" => await _controller.Unlink(emailId, ct),
             "AdminSetPrimary" => await _controller.AdminSetPrimary(targetId, emailId, ct),
             "AdminSetVisibility" => await _controller.AdminSetVisibility(targetId, emailId, null, ct),
             "AdminDeleteEmail" => await _controller.AdminDeleteEmail(targetId, emailId, ct),
-            "AdminSetGoogle" => await _controller.AdminSetGoogle(targetId, emailId, ct),
-            "AdminClearGoogle" => await _controller.AdminClearGoogle(targetId, emailId, ct),
             "AdminClearPrimary" => await _controller.AdminClearPrimary(targetId, emailId, ct),
             "AdminUnlink" => await _controller.AdminUnlink(targetId, emailId, ct),
             _ => throw new ArgumentOutOfRangeException(nameof(action))
         };
 
         result.Should().BeOfType<RedirectToActionResult>();
-        var expectedError = action is "SetPrimary" or "SetEmailVisibility" or "SetGoogle" or "ClearGoogle" or "ClearPrimary"
+        var expectedError = action is "SetPrimary" or "SetEmailVisibility" or "ClearPrimary"
             ? "Common_Error"
             : (string.Equals(action, "Unlink", StringComparison.Ordinal) || string.Equals(action, "DeleteEmail", StringComparison.Ordinal))
                 ? validationFailure ? "LinkedAccounts_UnlinkBlockedLastSignInMethod" : "Common_Error"
@@ -287,7 +266,7 @@ public class ProfileEmailsControllerGridTests
             .Returns(new UpdateEmailResult(false, errorKey));
         _userEmailService.SetVisibilityAsync(targetId, emailId, Arg.Any<ContactFieldVisibility?>(), Arg.Any<CancellationToken>())
             .Returns(new UpdateEmailResult(false, errorKey));
-        var ct = Xunit.TestContext.Current.CancellationToken;
+        var ct = TestContext.Current.CancellationToken;
 
         var result = (adminRoute, primary) switch
         {
@@ -310,43 +289,11 @@ public class ProfileEmailsControllerGridTests
         _userEmailService.SetPrimaryAsync(_userId, emailId, Arg.Any<CancellationToken>())
             .Returns(Task.FromException<UpdateEmailResult>(new IOException("email store unavailable")));
 
-        var action = () => _controller.SetPrimary(emailId, Xunit.TestContext.Current.CancellationToken);
+        var action = () => _controller.SetPrimary(emailId, TestContext.Current.CancellationToken);
 
         await action.Should().ThrowAsync<IOException>().WithMessage("email store unavailable");
         _logger.ReceivedCalls().Should().NotContain(call =>
             string.Equals(call.GetMethodInfo().Name, "Log", StringComparison.Ordinal));
-    }
-
-    [HumansFact]
-    public async Task SetGoogle_AsSelf_CallsSetGoogleAsync_AndRedirectsToGrid()
-    {
-        var emailId = Guid.NewGuid();
-        _userEmailService.SetGoogleAsync(_userId, emailId, _userId, Arg.Any<CancellationToken>())
-            .Returns(true);
-
-        var result = await _controller.SetGoogle(emailId, Xunit.TestContext.Current.CancellationToken);
-
-        await _userEmailService.Received(1).SetGoogleAsync(
-            _userId, emailId, _userId, Arg.Any<CancellationToken>());
-        result.Should().BeOfType<RedirectToActionResult>()
-            .Which.ActionName.Should().Be("Emails");
-    }
-
-    [HumansFact]
-    public async Task SetGoogle_AuthorizationFails_ReturnsForbid()
-    {
-        var emailId = Guid.NewGuid();
-        _authorizationService.AuthorizeAsync(
-            Arg.Any<ClaimsPrincipal>(),
-            Arg.Any<object?>(),
-            Arg.Any<IEnumerable<IAuthorizationRequirement>>())
-            .Returns(AuthorizationResult.Failed());
-
-        var result = await _controller.SetGoogle(emailId, Xunit.TestContext.Current.CancellationToken);
-
-        result.Should().BeOfType<ForbidResult>();
-        await _userEmailService.DidNotReceive().SetGoogleAsync(
-            Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>());
     }
 
     [HumansFact]
@@ -401,7 +348,7 @@ public class ProfileEmailsControllerGridTests
         _userEmailService.UnlinkAsync(_userId, emailId, _userId, Arg.Any<CancellationToken>())
             .Returns(new UnlinkEmailResult(false, "LinkedAccounts_UnlinkBlockedLastSignInMethod"));
 
-        var result = await _controller.Unlink(emailId, Xunit.TestContext.Current.CancellationToken);
+        var result = await _controller.Unlink(emailId, TestContext.Current.CancellationToken);
 
         result.Should().BeOfType<RedirectToActionResult>().Which.ActionName.Should().Be("Emails");
         _controller.TempData["ErrorMessage"].Should().Be("LinkedAccounts_UnlinkBlockedLastSignInMethod");
@@ -415,7 +362,7 @@ public class ProfileEmailsControllerGridTests
         _userEmailService.UnlinkAsync(_userId, emailId, _userId, Arg.Any<CancellationToken>())
             .Returns(new UnlinkEmailResult(true));
 
-        var result = await _controller.Unlink(emailId, Xunit.TestContext.Current.CancellationToken);
+        var result = await _controller.Unlink(emailId, TestContext.Current.CancellationToken);
 
         await _userEmailService.Received(1).UnlinkAsync(
             _userId, emailId, _userId, Arg.Any<CancellationToken>());
@@ -433,7 +380,7 @@ public class ProfileEmailsControllerGridTests
             Arg.Any<IEnumerable<IAuthorizationRequirement>>())
             .Returns(AuthorizationResult.Failed());
 
-        var result = await _controller.Unlink(emailId, Xunit.TestContext.Current.CancellationToken);
+        var result = await _controller.Unlink(emailId, TestContext.Current.CancellationToken);
 
         result.Should().BeOfType<ForbidResult>();
         await _userEmailService.DidNotReceive().UnlinkAsync(
@@ -451,28 +398,12 @@ public class ProfileEmailsControllerGridTests
     // -------------------------------------------------------------------------
 
     [HumansFact]
-    public async Task AdminSetGoogle_AsAdmin_CallsServiceWithRouteUserId()
-    {
-        var targetUserId = Guid.NewGuid();
-        var emailId = Guid.NewGuid();
-        _userEmailService.SetGoogleAsync(targetUserId, emailId, _userId, Arg.Any<CancellationToken>())
-            .Returns(true);
-
-        var result = await _controller.AdminSetGoogle(targetUserId, emailId, Xunit.TestContext.Current.CancellationToken);
-
-        await _userEmailService.Received(1).SetGoogleAsync(
-            targetUserId, emailId, _userId, Arg.Any<CancellationToken>());
-        result.Should().BeOfType<RedirectToActionResult>()
-            .Which.ActionName.Should().Be("AdminEmails");
-    }
-
-    [HumansFact]
     public async Task AdminSetPrimary_AsAdmin_CallsServiceWithRouteUserId()
     {
         var targetUserId = Guid.NewGuid();
         var emailId = Guid.NewGuid();
 
-        var result = await _controller.AdminSetPrimary(targetUserId, emailId, Xunit.TestContext.Current.CancellationToken);
+        var result = await _controller.AdminSetPrimary(targetUserId, emailId, TestContext.Current.CancellationToken);
 
         await _userEmailService.Received(1).SetPrimaryAsync(
             targetUserId, emailId, Arg.Any<CancellationToken>());
@@ -499,7 +430,7 @@ public class ProfileEmailsControllerGridTests
 
         if (admin)
         {
-            var result = await _controller.AdminAddEmail(_userId, email, Xunit.TestContext.Current.CancellationToken);
+            var result = await _controller.AdminAddEmail(_userId, email, TestContext.Current.CancellationToken);
             result.Should().BeOfType<RedirectToActionResult>().Which.ActionName.Should().Be("AdminEmails");
             _controller.TempData["ErrorMessage"].Should().Be(expectedMessage);
         }
@@ -524,7 +455,7 @@ public class ProfileEmailsControllerGridTests
         _userEmailService.AddEmailAsync(targetUserId, newEmail, Arg.Any<CancellationToken>())
             .Returns(new AddEmailResult(Guid.NewGuid(), "token", IsConflict: false));
 
-        var result = await _controller.AdminAddEmail(targetUserId, newEmail, Xunit.TestContext.Current.CancellationToken);
+        var result = await _controller.AdminAddEmail(targetUserId, newEmail, TestContext.Current.CancellationToken);
 
         await _userEmailService.Received(1).AddEmailAsync(
             targetUserId, newEmail, Arg.Any<CancellationToken>());
@@ -542,7 +473,7 @@ public class ProfileEmailsControllerGridTests
         _userEmailService.AddEmailAsync(targetUserId, newEmail, Arg.Any<CancellationToken>())
             .Returns(new AddEmailResult(Guid.NewGuid(), "token", IsConflict: false));
 
-        var result = await _controller.AdminAddEmail(targetUserId, newEmail, Xunit.TestContext.Current.CancellationToken);
+        var result = await _controller.AdminAddEmail(targetUserId, newEmail, TestContext.Current.CancellationToken);
 
         // Admin-path audit symmetric with AdminSetPrimary / AdminDeleteEmail —
         // actor is the signed-in admin (_userId), entity is the target user.
@@ -630,7 +561,7 @@ public class ProfileEmailsControllerGridTests
         _userEmailService.AddEmailAsync(targetUserId, newEmail, Arg.Any<CancellationToken>())
             .Returns(new AddEmailResult(Guid.NewGuid(), token, IsConflict: false));
 
-        var result = await _controller.AdminAddEmail(targetUserId, newEmail, Xunit.TestContext.Current.CancellationToken);
+        var result = await _controller.AdminAddEmail(targetUserId, newEmail, TestContext.Current.CancellationToken);
 
         // Verification email goes to the target email being added, with the token
         // returned by AddEmailAsync — NOT discarded. Recipient name and culture
@@ -694,7 +625,7 @@ public class ProfileEmailsControllerGridTests
         _userEmailService.UnlinkAsync(targetUserId, emailId, _userId, Arg.Any<CancellationToken>())
             .Returns(new UnlinkEmailResult(true));
 
-        var result = await _controller.AdminUnlink(targetUserId, emailId, Xunit.TestContext.Current.CancellationToken);
+        var result = await _controller.AdminUnlink(targetUserId, emailId, TestContext.Current.CancellationToken);
 
         await _userEmailService.Received(1).UnlinkAsync(
             targetUserId, emailId, _userId, Arg.Any<CancellationToken>());
@@ -710,7 +641,7 @@ public class ProfileEmailsControllerGridTests
         _userEmailService.DeleteEmailAsync(targetUserId, emailId, Arg.Any<CancellationToken>())
             .Returns(new DeleteEmailResult(true));
 
-        var result = await _controller.AdminDeleteEmail(targetUserId, emailId, Xunit.TestContext.Current.CancellationToken);
+        var result = await _controller.AdminDeleteEmail(targetUserId, emailId, TestContext.Current.CancellationToken);
 
         await _userEmailService.Received(1).DeleteEmailAsync(
             targetUserId, emailId, Arg.Any<CancellationToken>());
@@ -725,30 +656,12 @@ public class ProfileEmailsControllerGridTests
         var emailId = Guid.NewGuid();
 
         var result = await _controller.AdminSetVisibility(
-            targetUserId, emailId, ContactFieldVisibility.BoardOnly, Xunit.TestContext.Current.CancellationToken);
+            targetUserId, emailId, ContactFieldVisibility.BoardOnly, TestContext.Current.CancellationToken);
 
         await _userEmailService.Received(1).SetVisibilityAsync(
             targetUserId, emailId, ContactFieldVisibility.BoardOnly, Arg.Any<CancellationToken>());
         result.Should().BeOfType<RedirectToActionResult>()
             .Which.ActionName.Should().Be("AdminEmails");
-    }
-
-    [HumansFact]
-    public async Task AdminSetGoogle_AuthorizationFails_ReturnsForbid()
-    {
-        var targetUserId = Guid.NewGuid();
-        var emailId = Guid.NewGuid();
-        _authorizationService.AuthorizeAsync(
-            Arg.Any<ClaimsPrincipal>(),
-            Arg.Any<object?>(),
-            Arg.Any<IEnumerable<IAuthorizationRequirement>>())
-            .Returns(AuthorizationResult.Failed());
-
-        var result = await _controller.AdminSetGoogle(targetUserId, emailId, Xunit.TestContext.Current.CancellationToken);
-
-        result.Should().BeOfType<ForbidResult>();
-        await _userEmailService.DidNotReceive().SetGoogleAsync(
-            Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>());
     }
 
     // -------------------------------------------------------------------------
@@ -798,7 +711,7 @@ public class ProfileEmailsControllerGridTests
     {
         var emailId = Guid.NewGuid();
 
-        var result = await _controller.SetPrimary(emailId, Xunit.TestContext.Current.CancellationToken);
+        var result = await _controller.SetPrimary(emailId, TestContext.Current.CancellationToken);
 
         await _auditLogService.Received(1).LogAsync(
             AuditAction.UserEmailPrimarySet,
@@ -827,7 +740,7 @@ public class ProfileEmailsControllerGridTests
             .Returns(new DeleteEmailResult(false, errorKey));
 
         var result = admin
-            ? await _controller.AdminDeleteEmail(_userId, emailId, Xunit.TestContext.Current.CancellationToken)
+            ? await _controller.AdminDeleteEmail(_userId, emailId, TestContext.Current.CancellationToken)
             : await _controller.DeleteEmail(emailId);
 
         result.Should().BeOfType<RedirectToActionResult>().Which.ActionName.Should().Be(admin ? "AdminEmails" : "Emails");
@@ -911,7 +824,6 @@ public class ProfileEmailsControllerGridTests
             IsVerified: isVerified,
             Provider: provider,
             ProviderKey: providerKey,
-            IsGoogle: false,
             IsPrimary: false,
             Visibility: null,
             VerificationSentAt: null,
@@ -944,7 +856,7 @@ public class ProfileEmailsControllerGridTests
         _userEmailService.UnlinkAsync(_userId, rowId, _userId, Arg.Any<CancellationToken>())
             .Returns(new UnlinkEmailResult(true));
 
-        var result = await _controller.UnlinkLinkedAccount(provider, providerKey, Xunit.TestContext.Current.CancellationToken);
+        var result = await _controller.UnlinkLinkedAccount(provider, providerKey, TestContext.Current.CancellationToken);
 
         await _userEmailService.Received(1).UnlinkAsync(
             _userId, rowId, _userId, Arg.Any<CancellationToken>());
@@ -978,7 +890,7 @@ public class ProfileEmailsControllerGridTests
                 ? Task.FromResult(new UnlinkEmailResult(false, "LinkedAccounts_UnlinkBlockedLastSignInMethod"))
                 : Task.FromException<UnlinkEmailResult>(new InvalidOperationException("Private unlink operation diagnostic")));
 
-        var result = await _controller.UnlinkLinkedAccount(provider, providerKey, Xunit.TestContext.Current.CancellationToken);
+        var result = await _controller.UnlinkLinkedAccount(provider, providerKey, TestContext.Current.CancellationToken);
 
         _controller.TempData["ErrorMessage"].Should().Be(lastSignInMethod
             ? "LinkedAccounts_UnlinkBlockedLastSignInMethod" : "Common_Error");
@@ -1011,7 +923,7 @@ public class ProfileEmailsControllerGridTests
                 Snapshot(_userId, Guid.NewGuid(), "unverified@example.com", isVerified: false, null, null),
             ]);
 
-        var result = await _controller.UnlinkLinkedAccount(provider, providerKey, Xunit.TestContext.Current.CancellationToken);
+        var result = await _controller.UnlinkLinkedAccount(provider, providerKey, TestContext.Current.CancellationToken);
 
         await _userManager.DidNotReceive().RemoveLoginAsync(
             Arg.Any<User>(), Arg.Any<string>(), Arg.Any<string>());
@@ -1043,7 +955,7 @@ public class ProfileEmailsControllerGridTests
         _userEmailService.UnlinkAsync(_userId, rowId, _userId, Arg.Any<CancellationToken>())
             .Returns(new UnlinkEmailResult(true));
 
-        var result = await _controller.UnlinkLinkedAccount(provider, providerKey, Xunit.TestContext.Current.CancellationToken);
+        var result = await _controller.UnlinkLinkedAccount(provider, providerKey, TestContext.Current.CancellationToken);
 
         await _userEmailService.Received(1).UnlinkAsync(
             _userId, rowId, _userId, Arg.Any<CancellationToken>());
@@ -1062,7 +974,7 @@ public class ProfileEmailsControllerGridTests
             Arg.Any<IEnumerable<IAuthorizationRequirement>>())
             .Returns(AuthorizationResult.Failed());
 
-        var result = await _controller.UnlinkLinkedAccount("Google", "k", Xunit.TestContext.Current.CancellationToken);
+        var result = await _controller.UnlinkLinkedAccount("Google", "k", TestContext.Current.CancellationToken);
 
         result.Should().BeOfType<ForbidResult>();
         await _userEmailService.DidNotReceive().UnlinkAsync(
@@ -1078,7 +990,7 @@ public class ProfileEmailsControllerGridTests
         _userManager.GetLoginsAsync(Arg.Any<User>())
             .Returns(new List<UserLoginInfo>());
 
-        var result = await _controller.UnlinkLinkedAccount("Google", "stale-key", Xunit.TestContext.Current.CancellationToken);
+        var result = await _controller.UnlinkLinkedAccount("Google", "stale-key", TestContext.Current.CancellationToken);
 
         await _userEmailService.DidNotReceive().UnlinkAsync(
             Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>());

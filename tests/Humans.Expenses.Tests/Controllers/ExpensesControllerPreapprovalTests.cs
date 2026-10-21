@@ -61,7 +61,7 @@ public sealed class ExpensesControllerPreapprovalTests
             User = new ClaimsPrincipal(new ClaimsIdentity(
                 [new Claim(ClaimTypes.NameIdentifier, _actorId.ToString())], "test"))
         };
-        return new ExpensesController(_users, _reports, _budget, _holdedFinance, _preapprovals,
+        return new ExpensesController(_users, _reports, _budget, _holdedFinance, Substitute.For<IFinanceService>(), _preapprovals,
             _authorization, TestClock, NullLogger<ExpensesController>.Instance, _localizer)
         {
             ControllerContext = new ControllerContext { HttpContext = http },
@@ -178,7 +178,7 @@ public sealed class ExpensesControllerPreapprovalTests
         var result = await controller.New(new ExpenseNewViewModel());
 
         result.Should().BeOfType<ViewResult>();
-        await _reports.DidNotReceiveWithAnyArgs().CreateDraftAsync(default, default, default, default, default, default);
+        await _reports.DidNotReceiveWithAnyArgs().CreateDraftAsync(default, default, default, default);
     }
 
     [HumansFact]

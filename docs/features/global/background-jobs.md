@@ -23,6 +23,7 @@ Several system operations need to run automatically without user interaction: sy
 | SuspendNonCompliantMembersJob | Daily 4:30 AM | Enforce compliance deadlines |
 | ProcessAccountDeletionsJob | Daily | Process account deletion requests |
 | TermRenewalReminderJob | Weekly (Mon 5:00 AM) | Notify humans with approaching Colaborador/Asociado term expiry |
+| MembershipTierExpiryJob | Daily 00:05 UTC | Downgrade Colaborador/Asociado tiers whose term lapsed (to another in-term tier, else Volunteer), one `TierDowngraded` audit each |
 | AssemblyVoteLapseJob | Hourly | Close assembly votes past their announced deadline and send the T-24h ballot reminder to unvoted roster members |
 | ProcessEmailOutboxJob | Frequent | Send emails queued in the outbox table |
 | CleanupEmailOutboxJob | Weekly (Sun 3:00 AM) | Delete old processed outbox entries |
@@ -35,8 +36,9 @@ Several system operations need to run automatically without user interaction: sy
 | SystemTeamSyncJob | Hourly | Sync system team membership + Google permissions |
 | GoogleResourceReconciliationJob | Daily 3:00 AM | Full Google resource reconciliation |
 | DriveActivityMonitorJob | Hourly | Check Drive Activity API for anomalous permission changes |
-| HoldedExpenseOutboxJob | Every minute | Drain the Holded expense outbox: push approved expense reports to Holded as purchase documents |
-| HoldedSyncJob | Daily 3:00 AM | Nightly pull of Holded purchase docs into budget-category actuals, plus a trailing 45-day sweep of the full daybook ledger — every account, not just creditors — followed by per-account reconciliation (full-history backfill only on a cold cache or via the on-demand `POST /Holded/FullSync`) |
+| HoldedExpenseOutboxJob | Every 5 minutes | Drain the Holded expense outbox: push approved expense reports to Holded as purchase documents |
+| HoldedDocSyncJob | Daily 2:45 AM | `holded-doc-sync` (Finance): nightly pull of Holded purchase docs into budget-category actuals; skips with an info log when no Holded API key is configured |
+| HoldedSyncJob | Daily 3:00 AM | `holded-sync` (Holded): a trailing 45-day sweep of the full daybook ledger — every account, not just creditors — followed by per-account reconciliation (full-history backfill only on a cold cache or via the on-demand `POST /Holded/FullSync`) |
 | GateRetentionJob | Daily 3:45 AM | Purge `gate_scan_events` older than `Gate:RetentionDays` (default 365; ≤ 0 disables the purge) |
 | GateVendorCheckInJob | On demand (enqueued) | Best-effort mirror of a gate admit to the ticket vendor (TicketTailor check-in); fire-and-forget from the gate controller, no retries (vendor check-ins aren't idempotent), gated by `Gate:VendorMirrorEnabled` (default off) |
 | AgentConversationRetentionJob | Daily 3:15 AM | Purge agent conversations past the retention window |
@@ -187,10 +189,10 @@ See [Profiles — Account Deletion](../../../src/Sections/Humans.Users/Docs/feat
 **Process**:
 ```
 1. SyncVolunteersTeamAsync()
-   - Eligible: HasRequiredNameFields (legal name entered), !IsSuspended, RejectedAt is null, with all required Volunteers-team consents — i.e. NAME + CONSENTS
+   - Eligible: HasRequiredNameFields (legal name entered), !IsSuspended, not rejected (Consent's review), with all required Volunteers-team consents — i.e. NAME + CONSENTS
    - Add: New eligible users
    - Remove: Users who lost eligibility (suspended, rejected, or consent lapsed)
-   - (Profile.ConsentCheckStatus and Profile.IsApproved are CC audit annotations; not consulted)
+   - (The Consent review's Status and IsApproved are CC audit annotations; not consulted)
 
 2. SyncCoordinatorsTeamAsync()
    - Eligible: Users who are Coordinator of any user-created team + Coordinators-team consents
@@ -210,7 +212,7 @@ See [Profiles — Account Deletion](../../../src/Sections/Humans.Users/Docs/feat
 **System Teams**:
 | Team | Eligibility Criteria |
 |------|---------------------|
-| Volunteers | HasRequiredNameFields AND !IsSuspended AND RejectedAt is null AND HasAllRequiredConsentsForTeam(Volunteers) — name + consents (ConsentCheckStatus/IsApproved not consulted) |
+| Volunteers | HasRequiredNameFields AND !IsSuspended AND !review.IsRejected AND HasAllRequiredConsentsForTeam(Volunteers) — name + consents (ConsentCheckStatus/IsApproved not consulted) |
 | Coordinators | TeamMember.Role = Coordinator (non-system teams) AND HasAllRequiredConsentsForTeam(Coordinators) |
 | Board | RoleAssignment.RoleName = "Board" AND active AND HasAllRequiredConsentsForTeam(Board) |
 

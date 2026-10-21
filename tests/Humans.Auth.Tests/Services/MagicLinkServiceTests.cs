@@ -67,7 +67,6 @@ public sealed class MagicLinkServiceTests : IDisposable
             _emailMessages,
             _urlBuilder,
             _rateLimiter,
-            Clock,
             NullLogger<MagicLinkService>.Instance);
     }
 
@@ -190,14 +189,14 @@ public sealed class MagicLinkServiceTests : IDisposable
             UserName = "alice@gmail.com",
             Email = "alice@gmail.com",
             DisplayName = "Alice",
-            CreatedAt = Clock.GetCurrentInstant(),
-            MagicLinkSentAt = Clock.GetCurrentInstant() - Duration.FromSeconds(30)
+            CreatedAt = Clock.GetCurrentInstant()
         };
 
         _userEmailService
             .FindByAddressAsync("alice@gmail.com", true, true, Arg.Any<CancellationToken>())
             .Returns([UserEmailFixtures.Row(userId, "alice@gmail.com")]);
         _userManager.FindByIdAsync(userId.ToString()).Returns(user);
+        _rateLimiter.TryReserveUserSendAsync(userId, Arg.Any<TimeSpan>()).Returns(false);
 
         await _service.SendMagicLinkAsync("alice@gmail.com", null, Xunit.TestContext.Current.CancellationToken);
 
@@ -245,7 +244,7 @@ public sealed class MagicLinkServiceTests : IDisposable
         var userId = Guid.NewGuid();
         using var cache = new MemoryCache(new MemoryCacheOptions());
         var service = new MagicLinkService(_userManager, _userEmailService, _userService, _emailService,
-            _emailMessages, _urlBuilder, new MagicLinkRateLimiter(cache), Clock, NullLogger<MagicLinkService>.Instance);
+            _emailMessages, _urlBuilder, new MagicLinkRateLimiter(cache), NullLogger<MagicLinkService>.Instance);
         _userEmailService.FindByAddressAsync("first@example.com", true, true, Arg.Any<CancellationToken>())
             .Returns([UserEmailFixtures.Row(userId, "first@example.com")]);
         _userEmailService.FindByAddressAsync("second@example.com", true, true, Arg.Any<CancellationToken>())
@@ -277,10 +276,10 @@ public sealed class MagicLinkServiceTests : IDisposable
     }
 
     [HumansFact]
-    public async Task SendLoginLink_SendThrows_DoesNotStampMagicLinkSentAt()
+    public async Task SendLoginLink_SendThrows_ReleasesCooldownReservation()
     {
-        // MagicLinkSentAt is the login cooldown. Stamping it before the send would
-        // cool the user down for 60s on an email that never left the building.
+        // The in-memory reservation is the login cooldown. Keeping it after a failed
+        // send would cool the user down for 60s on an email that never left the building.
         var userId = Guid.NewGuid();
         var user = new User
         {
@@ -303,15 +302,12 @@ public sealed class MagicLinkServiceTests : IDisposable
             "alice@gmail.com", null, Xunit.TestContext.Current.CancellationToken);
 
         await send.Should().ThrowAsync<InvalidOperationException>();
-        user.MagicLinkSentAt.Should().BeNull();
-        await _userManager.DidNotReceive().UpdateAsync(user);
+        await _userManager.DidNotReceiveWithAnyArgs().UpdateAsync(default!);
         _rateLimiter.Received(1).ReleaseUserSendReservation(userId);
     }
 
-    [HumansTheory]
-    [Xunit.InlineData(false)]
-    [Xunit.InlineData(true)]
-    public async Task SendLoginLink_Sends_ThenStampsAndKeepsReservationIfStampFails(bool stampFails)
+    [HumansFact]
+    public async Task SendLoginLink_Sends_KeepsReservationAndWritesNothingToUsers()
     {
         var userId = Guid.NewGuid();
         var user = new User
@@ -328,18 +324,12 @@ public sealed class MagicLinkServiceTests : IDisposable
             .Returns([UserEmailFixtures.Row(userId, "alice@gmail.com")]);
         _userManager.FindByIdAsync(userId.ToString()).Returns(user);
 
-        if (stampFails)
-            _userManager.UpdateAsync(user).ThrowsAsync(new InvalidOperationException("identity write failed"));
-        var send = () => _service.SendMagicLinkAsync("alice@gmail.com", null, Xunit.TestContext.Current.CancellationToken);
-        if (stampFails)
-            await send.Should().ThrowAsync<InvalidOperationException>();
-        else
-            await send();
+        await _service.SendMagicLinkAsync("alice@gmail.com", null, Xunit.TestContext.Current.CancellationToken);
 
         await _emailService.Received(1).SendAsync(Arg.Any<EmailMessage>(), Arg.Any<CancellationToken>());
         _rateLimiter.DidNotReceiveWithAnyArgs().ReleaseUserSendReservation(Guid.Empty);
-        user.MagicLinkSentAt.Should().Be(Clock.GetCurrentInstant());
-        await _userManager.Received(1).UpdateAsync(user);
+        // Auth owns no users column: the cooldown lives only in the rate limiter (AUTH-2).
+        await _userManager.DidNotReceiveWithAnyArgs().UpdateAsync(default!);
     }
 
     [HumansFact]
@@ -363,17 +353,17 @@ public sealed class MagicLinkServiceTests : IDisposable
     }
 
     [HumansFact]
-    public async Task VerifyLoginTokenAsync_NonexistentUser_ReturnsNull()
+    public async Task VerifyLoginTokenAsync_NonexistentUser_ReturnsFalse()
     {
         _userManager.FindByIdAsync(Arg.Any<string>()).Returns((User?)null);
 
         var result = await _service.VerifyLoginTokenAsync(Guid.NewGuid(), "some-token", Xunit.TestContext.Current.CancellationToken);
 
-        result.Should().BeNull();
+        result.Should().BeFalse();
     }
 
     [HumansFact]
-    public async Task VerifyLoginTokenAsync_InvalidToken_ReturnsNull()
+    public async Task VerifyLoginTokenAsync_InvalidToken_ReturnsFalse()
     {
         var userId = Guid.NewGuid();
         var user = new User { Id = userId, UserName = "test@test.com" };
@@ -382,11 +372,11 @@ public sealed class MagicLinkServiceTests : IDisposable
 
         var result = await _service.VerifyLoginTokenAsync(userId, "bad-token", Xunit.TestContext.Current.CancellationToken);
 
-        result.Should().BeNull();
+        result.Should().BeFalse();
     }
 
     [HumansFact]
-    public async Task VerifyLoginTokenAsync_TokenAlreadyConsumed_ReturnsNull()
+    public async Task VerifyLoginTokenAsync_TokenAlreadyConsumed_ReturnsFalse()
     {
         var userId = Guid.NewGuid();
         var user = new User { Id = userId, UserName = "test@test.com" };
@@ -396,11 +386,11 @@ public sealed class MagicLinkServiceTests : IDisposable
 
         var result = await _service.VerifyLoginTokenAsync(userId, "good-token", Xunit.TestContext.Current.CancellationToken);
 
-        result.Should().BeNull();
+        result.Should().BeFalse();
     }
 
     [HumansFact]
-    public async Task VerifyLoginTokenAsync_ValidToken_ReturnsUser()
+    public async Task VerifyLoginTokenAsync_ValidToken_ReturnsTrue()
     {
         var userId = Guid.NewGuid();
         var user = new User { Id = userId, UserName = "test@test.com" };
@@ -409,8 +399,7 @@ public sealed class MagicLinkServiceTests : IDisposable
 
         var result = await _service.VerifyLoginTokenAsync(userId, "good-token", Xunit.TestContext.Current.CancellationToken);
 
-        result.Should().NotBeNull();
-        result.Id.Should().Be(userId);
+        result.Should().BeTrue();
     }
 
     [HumansFact]
@@ -473,31 +462,5 @@ public sealed class MagicLinkServiceTests : IDisposable
         _service.ReleaseSignupToken("good-token");
 
         _rateLimiter.Received(1).ReleaseTokenReservation("good-token");
-    }
-
-    [HumansFact]
-    public async Task FindUserByVerifiedEmailAsync_FindsByUserEmail()
-    {
-        var userId = Guid.NewGuid();
-        var user = new User { Id = userId, UserName = "alice@gmail.com", DisplayName = "Alice" };
-
-        _userEmailService
-            .FindByAddressAsync("alice@work.com", true, true, Arg.Any<CancellationToken>())
-            .Returns([UserEmailFixtures.Row(userId, "alice@work.com")]);
-        _userManager.FindByIdAsync(userId.ToString()).Returns(user);
-
-        var result = await _service.FindUserByVerifiedEmailAsync("alice@work.com", Xunit.TestContext.Current.CancellationToken);
-
-        result.Should().NotBeNull();
-        result.Id.Should().Be(userId);
-    }
-
-    [HumansFact]
-    public async Task FindUserByVerifiedEmailAsync_NoVerifiedUserEmail_ReturnsNull()
-    {
-        // Only a verified UserEmail row resolves a user. Default substitute returns null.
-        var result = await _service.FindUserByVerifiedEmailAsync("nobody@nowhere.com", Xunit.TestContext.Current.CancellationToken);
-
-        result.Should().BeNull();
     }
 }

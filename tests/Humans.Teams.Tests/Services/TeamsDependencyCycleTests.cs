@@ -34,17 +34,11 @@ public sealed class TeamsDependencyCycleTests
 
         services.AddSingleton<IMemoryCache>(_ => new MemoryCache(new MemoryCacheOptions()));
 
-        services.AddScoped<IUserInfoInvalidator>(_ => Substitute.For<IUserInfoInvalidator>());
         services.AddScoped<IAuditLogService>(_ => Substitute.For<IAuditLogService>());
         services.AddScoped<IEmailService>(_ => Substitute.For<IEmailService>());
         services.AddScoped<INotificationEmitter>(_ => Substitute.For<INotificationEmitter>());
         services.AddScoped<ISystemTeamSync>(_ => Substitute.For<ISystemTeamSync>());
-        services.AddScoped<INavBadgeCacheInvalidator>(_ => Substitute.For<INavBadgeCacheInvalidator>());
-        services.AddScoped<IRoleAssignmentClaimsCacheInvalidator>(_ => Substitute.For<IRoleAssignmentClaimsCacheInvalidator>());
         services.AddScoped<ITeamRepository>(_ => Substitute.For<ITeamRepository>());
-        services.AddScoped<INotificationMeterCacheInvalidator>(_ => Substitute.For<INotificationMeterCacheInvalidator>());
-        services.AddScoped<IShiftAuthorizationInvalidator>(_ => Substitute.For<IShiftAuthorizationInvalidator>());
-        services.AddScoped<IEarlyEntryInvalidator>(_ => Substitute.For<IEarlyEntryInvalidator>());
         services.AddScoped<IAdminAuthorizationService>(_ => Substitute.For<IAdminAuthorizationService>());
         services.AddScoped<NodaTime.IClock>(_ => Substitute.For<NodaTime.IClock>());
 
@@ -62,7 +56,7 @@ public sealed class TeamsDependencyCycleTests
         // Shifts is another section; its concrete service and repository are internal to
         // Humans.Shifts and its own graph is pinned by that section's own tests.
         services.AddScoped<IShiftManagement>(_ => Substitute.For<IShiftManagement>());
-        services.AddScoped<IShiftManagementService>(_ => Substitute.For<IShiftManagementService>());
+        services.AddScoped<IShiftService>(_ => Substitute.For<IShiftService>());
 
         services.AddScoped<TeamService>();
         services.AddScoped<ITeamManagement>(sp => sp.GetRequiredService<TeamService>());

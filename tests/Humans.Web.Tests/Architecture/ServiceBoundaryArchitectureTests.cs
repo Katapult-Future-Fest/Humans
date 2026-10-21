@@ -40,13 +40,15 @@ public class ServiceBoundaryArchitectureTests
     /// </remarks>
     private static readonly HashSet<string> MarkersDroppedForBaseCycle =
     [
+        // Moved from Humans.Users' Contracts/ folder (where it carried IOrchestrator) so Gdpr can
+        // inject it (Users decomposition, commit 0); AccountDeletionService carries the marker.
+        "Humans.Users.Contracts.IAccountDeletionService",
         "Humans.Users.Contracts.IAccountProvisioningService",
         "Humans.Users.Contracts.ICommunicationPreferenceService",
         "Humans.Users.Contracts.IContactFieldService",
         "Humans.Users.Contracts.IHumanLifecycleService",
         "Humans.Users.Contracts.IProfileEditorService",
         "Humans.Users.Contracts.IUserEmailService",
-        "Humans.Users.Contracts.IUserParticipationBackfillService",
         "Humans.Users.Contracts.IUserService",
     ];
 
@@ -102,7 +104,7 @@ public class ServiceBoundaryArchitectureTests
     /// public on <c>Humans.Users.Contracts</c> (nobodies-collective/Humans#866, G5 lane 2) and
     /// drags <c>UserEmail</c> and <c>EventParticipation</c> with it through its navigations.
     /// Without this list the two <c>Humans.Domain.Entities.User</c> rows in the baseline read as
-    /// *fixed* on byte-identical code — the silent shrink design §10 warns about, arriving
+    /// *fixed* on byte-identical code — the silent shrink the baseline guards against, arriving
     /// through a third keying (not a path, not an assembly: the namespace convention that says
     /// "entities live in .Domain"). The six Profile-side entities left this list when they moved
     /// to <c>Humans.Users.Domain</c> as internal types (nobodies-collective/Humans#1051).

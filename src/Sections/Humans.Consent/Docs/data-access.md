@@ -20,7 +20,7 @@ the per-version lookup, invalidated wholesale after any persisted
 `DocumentVersions` — it implements both `ILegalDocumentSyncManagement` (the
 GitHub-sync write/read surface) and `IAdminLegalDocumentService` (the
 admin create/update/archive/version-summary surface). Being the single
-writer lets it call `ILegalDocumentCacheInvalidator.InvalidateAll()`
+writer lets it call its own decorator's `CachingLegalDocumentSyncService.InvalidateAll()`
 directly after each successful repository write instead of relying on a
 cross-cutting EF `SaveChangesInterceptor`.
 
@@ -52,7 +52,7 @@ Sole writer for both the GitHub-sync surface (`SyncDocumentAsync` /
 `SyncAllDocumentsAsync` — version add, sync-touch) and the admin surface
 (`CreateLegalDocumentAsync` / `UpdateLegalDocumentAsync` /
 `ArchiveLegalDocumentAsync` / `UpdateVersionSummaryAsync`). Calls
-`ILegalDocumentCacheInvalidator.InvalidateAll()` directly after each
+`CachingLegalDocumentSyncService.InvalidateAll()` directly after each
 successful write. Cross-section calls via `INotificationEmitter`,
 `ITeamService` (team-name stitching for the admin list and
 the active-required-by-team read), `IUserService` (active-user
@@ -83,9 +83,9 @@ builder (`ReConsentsRequired`), `ITeamService` (team membership) and
 
 | Cache | Type | Read | Write | Invalidate |
 |-------|------|------|-------|------------|
-| `TrackedCache<Guid, LegalDocumentInfo>` (`Legal.LegalDocumentInfo`, warmed on startup, + version-id index) | Per-Entity | yes | yes (warm/load) | yes (wholesale via `ILegalDocumentCacheInvalidator.InvalidateAll`, called directly by `LegalDocumentSyncService` after each successful write) |
+| `TrackedCache<Guid, LegalDocumentInfo>` (`Legal.LegalDocumentInfo`, warmed on startup, + version-id index) | Per-Entity | yes | yes (warm/load) | yes (wholesale via its own `InvalidateAll`, called directly by `LegalDocumentSyncService` after each successful write) |
 
-Implements `ILegalDocumentSyncManagement`, `ILegalDocumentCacheInvalidator`.
+Implements `ILegalDocumentSyncManagement`.
 Warm resolves team display names via `ITeamService` through a fresh DI
 scope per warm. Surfaced on `/Debug/CacheStats`.
 
@@ -129,12 +129,42 @@ lives in the decorator.
 
 | Cache | Type | Read | Write | Invalidate |
 |-------|------|------|-------|------------|
-| `TrackedCache<Guid, UserConsentInfo>` (`Consent.UserConsentInfo`, lazy, no warmup) | Per-User | yes (consented-version-set reads) | yes (lazy load) | yes (synchronous per-user evict on submit; via `IConsentCacheInvalidator`) |
+| `TrackedCache<Guid, UserConsentInfo>` (`Consent.UserConsentInfo`, lazy, no warmup) | Per-User | yes (consented-version-set reads) | yes (lazy load) | yes (synchronous per-user evict on submit, by the inner `ConsentService` and the decorator; an entry whose `UserInfo.AllUserIds` changed since it was built reloads on read, which covers account merge) |
 
-Implements `IConsentManagement`, `IConsentService`,
-`IConsentCacheInvalidator`. Richer record reads (dashboards, history,
+Implements `IConsentManagement`, `IConsentService`. Richer record reads (dashboards, history,
 record counts) pass through to the inner service. Surfaced on
 `/Debug/CacheStats`.
+
+### ConsentReviewService (Scoped, internal; implements `IConsentWrite` + `IUserDataContributor`)
+
+Repository: `IConsentReviewRepository` (Singleton, `IDbContextFactory<LegalDbContext>`).
+
+| Table | R/W |
+|-------|-----|
+| consent_reviews | R/W |
+
+The Consent Coordinator review (Users decomposition commit 12). Serves
+`IConsentService.GetConsentReviewAsync` / `GetConsentReviewsAsync` (forwarded
+by `ConsentService`, passed through `CachingConsentService` uncached), the
+`IConsentWrite` annotations, the `consent.profile-review` copy, and the
+`ConsentReview` export/erasure slice. Until the copy is done, a member with no
+row reads the legacy `profiles` review columns via `IUserService`; the copy
+also calls `IUserWrite.SetRejectedAsync` for a legacy rejection the stored
+state never recorded. No cache.
+
+### ConsentReminderService (Scoped, internal; implements `IUserDataContributor`)
+
+Repository: `IConsentReminderRepository` (Singleton, `IDbContextFactory<LegalDbContext>`).
+
+| Table | R/W |
+|-------|-----|
+| consent_reminders | R/W |
+
+The re-consent reminder cooldown stamp. Serves `SendReConsentReminderJob`'s
+read (`GetLastSentAsync`) and stamp (`RecordSentAsync`), the
+`consent.reminder-stamps` copy, and the `ConsentReminder` export/erasure
+slice. Until the copy is done, a member with no row reads the legacy
+`users.LastConsentReminderSentAt` via `IUserService`. No cache.
 
 ### ConsentEmails (Scoped, internal)
 

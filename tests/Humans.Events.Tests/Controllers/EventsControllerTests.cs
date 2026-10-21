@@ -262,12 +262,13 @@ public class EventsControllerTests
             .Returns(AuthorizationResult.Success());
         StubEditableGuideSettings();
         var existing = MakeEvent(isCamp ? campId : null, userId,
-            isModerator ? EventStatus.Approved : EventStatus.ResubmitRequested);
-        int? originalRank = isCamp ? 2 : null;
-        existing.PriorityRank = originalRank;
-        existing.DurationMinutes = 180;
-        existing.IsRecurring = true;
-        existing.RecurrenceDays = "0,1";
+            isModerator ? EventStatus.Approved : EventStatus.ResubmitRequested) with
+        {
+            PriorityRank = isCamp ? 2 : null,
+            DurationMinutes = 180,
+            IsRecurring = true,
+            RecurrenceDays = "0,1"
+        };
         _guide.GetEventForModerationAsync(existing.Id, Arg.Any<CancellationToken>()).Returns(existing);
         _guide.GetCampEventAsync(existing.Id, campId, Arg.Any<CancellationToken>()).Returns(existing);
         _localizer[Arg.Any<string>()].Returns(call => new LocalizedString(call.Arg<string>(), call.Arg<string>()));
@@ -331,18 +332,20 @@ public class EventsControllerTests
             result.Should().BeOfType<ViewResult>().Which.Model.Should().BeSameAs(model);
             controller.ModelState[scenario]!.Errors.Should().ContainSingle();
             writes.Should().BeEmpty();
-            existing.Title.Should().Be("Test Event");
-            existing.PriorityRank.Should().Be(originalRank);
-            existing.DurationMinutes.Should().Be(180);
-            existing.IsRecurring.Should().BeTrue();
-            existing.RecurrenceDays.Should().Be("0,1");
-            existing.StartAt.Should().Be(Instant.FromUtc(2026, 8, 1, 18, 0));
         }
         else
         {
             result.Should().BeOfType<RedirectToActionResult>();
             controller.ModelState.IsValid.Should().BeTrue();
-            var saved = (Event)writes.Should().ContainSingle().Which.GetArguments()[0]!;
+            // Create routes persist a new entity; edit routes send an EventEdit by id.
+            var args = writes.Should().ContainSingle().Which.GetArguments();
+            var saved = args[0] is Event created
+                ? new EventEdit(created.CategoryId, created.GuideSharedVenueId, created.Title, created.Description,
+                    created.StartAt, created.DurationMinutes, created.LocationNote, created.Host,
+                    created.IsRecurring, created.RecurrenceDays, created.PriorityRank)
+                : (EventEdit)args[1]!;
+            if (args[0] is Guid editedId)
+                editedId.Should().Be(existing.Id);
             saved.IsRecurring.Should().Be(checkedChoices);
             if (isCamp)
             {
@@ -407,7 +410,6 @@ public class EventsControllerTests
 
         result.Should().BeOfType<ViewResult>();
         controller.ModelState[nameof(individual.RecurrenceDays)]!.Errors.Should().ContainSingle();
-        guideEvent.Title.Should().Be("Test Event");
         _guide.ReceivedCalls().Should().NotContain(call =>
             call.GetMethodInfo().Name == nameof(IEventManagement.SubmitEventAsync)
             || call.GetMethodInfo().Name == nameof(IEventManagement.UpdateAndResubmitAsync));
@@ -468,7 +470,7 @@ public class EventsControllerTests
         controller.HttpContext.RequestAborted = request.Token;
         controller.TempData = new TempDataDictionary(controller.HttpContext, Substitute.For<ITempDataProvider>());
         var abandon = false;
-        async Task<T> Read<T>(T value, string current, CancellationToken ct)
+        async Task<T> ReadAsync<T>(T value, string current, CancellationToken ct)
         {
             if (abandon && string.Equals(current, boundary, StringComparison.Ordinal))
                 await request.CancelAsync();
@@ -494,46 +496,46 @@ public class EventsControllerTests
         _authz.AuthorizeAsync(Arg.Any<ClaimsPrincipal>(), Arg.Any<object?>(), Arg.Any<IEnumerable<IAuthorizationRequirement>>())
             .Returns(AuthorizationResult.Success());
         _camps.GetCampBySlugAsync(camp.Slug, Arg.Any<CancellationToken>()).Returns(call =>
-            Read<CampInfo?>(camp, "Camp", call.Arg<CancellationToken>()));
+            ReadAsync<CampInfo?>(camp, "Camp", call.Arg<CancellationToken>()));
         _guide.GetCampEventAsync(campEvent.Id, camp.Id, Arg.Any<CancellationToken>()).Returns(call =>
-            Read<Event?>(campEvent, "Event", call.Arg<CancellationToken>()));
+            ReadAsync<EventInfo?>(campEvent, "Event", call.Arg<CancellationToken>()));
         _guide.BuildBulkUploadTemplateAsync(camp.Id, Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns(call =>
-            Read<byte[]>([], "Template", call.Arg<CancellationToken>()));
+            ReadAsync<byte[]>([], "Template", call.Arg<CancellationToken>()));
         var submitterId = Guid.NewGuid();
         var approved = new ApprovedEventView(Guid.NewGuid(), null, null, submitterId, Guid.NewGuid(), "music", "Music", false,
             null, "Event", "Description", null, null, Instant.FromUtc(2026, 8, 1, 18, 0), 60, false, null, null,
             Instant.FromUtc(2026, 1, 1, 0, 0), Instant.FromUtc(2026, 1, 1, 0, 0));
         _users.GetUserInfoAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns(call =>
-            new ValueTask<UserInfo?>(Read<UserInfo?>(MakeUserInfo(call.Arg<Guid>(), "Human"),
+            new ValueTask<UserInfo?>(ReadAsync<UserInfo?>(MakeUserInfo(call.Arg<Guid>(), "Human"),
                 call.Arg<Guid>() == userId ? "Viewer" : "Submitter", call.Arg<CancellationToken>())));
         _users.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>()).Returns(call =>
-            new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(Read<IReadOnlyDictionary<Guid, UserInfo>>(
+            new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(ReadAsync<IReadOnlyDictionary<Guid, UserInfo>>(
                 call.Arg<IReadOnlyCollection<Guid>>().Distinct().ToDictionary(id => id, id => MakeUserInfo(id, "Human")),
                 "Submitter", call.Arg<CancellationToken>())));
         _guide.GetGuideSettingsAsync(Arg.Any<CancellationToken>()).Returns(call =>
-            Read<EventGuideSettingsView?>(settings, "Guide", call.Arg<CancellationToken>()));
+            ReadAsync<EventGuideSettingsView?>(settings, "Guide", call.Arg<CancellationToken>()));
         _guide.GetEventSettingsByIdAsync(settings.EventSettingsId, Arg.Any<CancellationToken>()).Returns(call =>
-            Read<EventSettingsInfo?>(burn, "Burn", call.Arg<CancellationToken>()));
+            ReadAsync<EventSettingsInfo?>(burn, "Burn", call.Arg<CancellationToken>()));
         _guide.GetEventForModerationAsync(guideEvent.Id, Arg.Any<CancellationToken>()).Returns(call =>
-            Read<Event?>(guideEvent, "Event", call.Arg<CancellationToken>()));
+            ReadAsync<EventInfo?>(guideEvent, "Event", call.Arg<CancellationToken>()));
         _guide.GetUserSubmissionsAsync(userId, Arg.Any<CancellationToken>()).Returns(call =>
-            Read<IReadOnlyList<EventInfo>>([], "Submissions", call.Arg<CancellationToken>()));
+            ReadAsync<IReadOnlyList<EventInfo>>([], "Submissions", call.Arg<CancellationToken>()));
         _camps.GetSettingsAsync(Arg.Any<CancellationToken>()).Returns(call =>
-            Read(new CampSettingsInfo(2026, [2026]), "CampSettings", call.Arg<CancellationToken>()));
+            ReadAsync(new CampSettingsInfo(2026, [2026]), "CampSettings", call.Arg<CancellationToken>()));
         _camps.GetCampsForYearAsync(2026, Arg.Any<CancellationToken>()).Returns(call =>
-            Read<IReadOnlyList<CampInfo>>([camp], "Camps", call.Arg<CancellationToken>()));
+            ReadAsync<IReadOnlyList<CampInfo>>([camp], "Camps", call.Arg<CancellationToken>()));
         _guide.GetCampSubmissionsSummaryAsync(campId, Arg.Any<CancellationToken>()).Returns(call =>
-            Read(new CampSubmissionsSummary(0, 0, 0, []), "CampSummary", call.Arg<CancellationToken>()));
+            ReadAsync(new CampSubmissionsSummary(0, 0, 0, []), "CampSummary", call.Arg<CancellationToken>()));
         _guide.GetActiveCategoriesAsync(Arg.Any<CancellationToken>()).Returns(call =>
-            Read<IReadOnlyList<EventCategoryView>>([], "Categories", call.Arg<CancellationToken>()));
+            ReadAsync<IReadOnlyList<EventCategoryView>>([], "Categories", call.Arg<CancellationToken>()));
         _guide.GetActiveVenuesAsync(Arg.Any<CancellationToken>()).Returns(call =>
-            Read<IReadOnlyList<EventVenueView>>([], "Venues", call.Arg<CancellationToken>()));
+            ReadAsync<IReadOnlyList<EventVenueView>>([], "Venues", call.Arg<CancellationToken>()));
         _guide.GetFavouritesWithEventsAsync(userId, Arg.Any<CancellationToken>()).Returns(call =>
-            Read<IReadOnlyList<EventFavouriteInfo>>([], "Favourites", call.Arg<CancellationToken>()));
+            ReadAsync<IReadOnlyList<EventFavouriteInfo>>([], "Favourites", call.Arg<CancellationToken>()));
         _guide.GetExcludedCategorySlugsAsync(userId, Arg.Any<CancellationToken>()).Returns(call =>
-            Read<List<string>>([], "Excluded", call.Arg<CancellationToken>()));
+            ReadAsync<List<string>>([], "Excluded", call.Arg<CancellationToken>()));
         _guide.GetApprovedEventsAsync(null, null, null, null, Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>()).Returns(call =>
-            Read<IReadOnlyList<ApprovedEventView>>([approved], "Approved", call.Arg<CancellationToken>()));
+            ReadAsync<IReadOnlyList<ApprovedEventView>>([approved], "Approved", call.Arg<CancellationToken>()));
         Func<Task<IActionResult>> load = route switch
         {
             nameof(EventsController.MySubmissions) => controller.MySubmissions,
@@ -642,7 +644,7 @@ public class EventsControllerTests
     {
         var eventId = Guid.NewGuid();
         _guide.GetEventForModerationAsync(eventId, Arg.Any<CancellationToken>())
-            .Returns((Event?)null);
+            .Returns((EventInfo?)null);
         var controller = BuildController(Guid.NewGuid(), RoleNames.Admin);
 
         var result = await controller.Edit(eventId);
@@ -760,7 +762,7 @@ public class EventsControllerTests
             failure = new IOException("Upload stream unavailable");
         else if (string.Equals(failureKind, "dependency-format", StringComparison.Ordinal))
             failure = new FormatException("Secret upload diagnostics");
-        if (failure is not null) file.OpenReadStream().Returns<Stream>(_ => throw failure);
+        if (failure is not null) file.OpenReadStream().Returns(_ => throw failure);
         else
         {
             const string header = "Id,Barrio,Status,Title,Description,Category,Date,StartTime,DurationMinutes,LocationNote,Host,IsRecurring,RecurrenceDays,PriorityRank";
@@ -845,20 +847,11 @@ public class EventsControllerTests
         BarriosEarlyEntryAllocation: null,
         EarlyEntryClose: null);
 
-    private static Event MakeEvent(Guid? campId, Guid submitterId, EventStatus status) => new()
-    {
-        Id = Guid.NewGuid(),
-        CampId = campId,
-        GuideSharedVenueId = campId == null ? Guid.NewGuid() : null,
-        SubmitterUserId = submitterId,
-        CategoryId = Guid.NewGuid(),
-        Title = "Test Event",
-        Description = "Description",
-        StartAt = Instant.FromUtc(2026, 8, 1, 18, 0),
-        DurationMinutes = 60,
-        Status = status,
-        Category = new EventCategory { Id = Guid.NewGuid(), Name = "Music", Slug = "music", IsSensitive = false },
-    };
+    private static EventInfo MakeEvent(Guid? campId, Guid submitterId, EventStatus status) => new(
+        Guid.NewGuid(), campId, campId == null ? Guid.NewGuid() : null, submitterId, Guid.NewGuid(),
+        "Music", "music", false, null, "Test Event", "Description", null, null,
+        Instant.FromUtc(2026, 8, 1, 18, 0), 60, false, null, null, status,
+        Instant.FromUtc(2026, 7, 1, 0, 0), Instant.FromUtc(2026, 7, 1, 0, 0), []);
 
     private static UserInfo MakeUserInfo(Guid userId, string burnerName)
     {

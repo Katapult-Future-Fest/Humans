@@ -80,14 +80,13 @@ public class ShiftsPageRenderTests(HumansTestDatabase database) : IntegrationTes
         ("/Shifts/Dashboard/PostEventStats", "Stats"),
         ("/Shifts/Admin/Workload", "Workload"),
         ("/Shifts/Dashboard/VolunteerTracking", "Volunteer"),
-        // Two actions carved off Shell's ProfileController; [Route("Profile")] stayed on
-        // both halves, so the URL is unchanged.
-        ("/Profile/Me/ShiftInfo", "Shift"),
+        // Carved off Shell's ProfileController; takes Shifts' own URL.
+        ("/Shifts/ShiftInfo", "Shift"),
     ];
 
     /// <summary>
     /// Every page in <see cref="Pages"/> except <c>/Shifts/Mine</c> and
-    /// <c>/Profile/Me/ShiftInfo</c> short-circuits to a redirect or a
+    /// <c>/Shifts/ShiftInfo</c> short-circuits to a redirect or a
     /// <c>NoActiveEvent</c> view when no burn is active, so the fixture would render four
     /// words of chrome and the assertions would prove nothing. Seed through the section's
     /// own leaf verb rather than through <c>ShiftsDbContext</c>: the section's view is a
@@ -190,7 +189,7 @@ public class ShiftsPageRenderTests(HumansTestDatabase database) : IntegrationTes
         token.Should().NotBeNullOrEmpty();
         await Client.PostAsync("/Language/SetLanguage", new FormUrlEncodedContent(
             [
-                new KeyValuePair<string, string>("__RequestVerificationToken", token!),
+                new KeyValuePair<string, string>("__RequestVerificationToken", token),
                 new KeyValuePair<string, string>("culture", "es"),
             ]), ct);
 
@@ -199,7 +198,7 @@ public class ShiftsPageRenderTests(HumansTestDatabase database) : IntegrationTes
         foreach (var (url, spanish) in new[]
                  {
                      ("/Shifts/Dashboard", "Panel de turnos"),                    // ShiftDash_Title
-                     ("/Profile/Me/ShiftInfo", "Preferencias de turnos"),         // ShiftInfo_Title
+                     ("/Shifts/ShiftInfo", "Preferencias de turnos"),         // ShiftInfo_Title
                      ("/Shifts/Dashboard/VolunteerTracking", "Seguimiento de Voluntarios"), // VolTrack_Title
                  })
         {
@@ -274,12 +273,15 @@ public class ShiftsPageRenderTests(HumansTestDatabase database) : IntegrationTes
                         && string.Equals(m, "ShiftInfo", StringComparison.Ordinal))
             .ToList();
 
+        // Host startup is the slow part this timeout covers; stop here if it used the budget.
+        Xunit.TestContext.Current.CancellationToken.ThrowIfCancellationRequested();
+
         actions.Should().NotBeEmpty(
             "Shifts' ThingsToDo entry addresses (\"ShiftInfo\", \"ShiftProfile\") and Url.Action returns null for an unresolvable pair");
 
         actions.Select(a => a.AttributeRouteInfo?.Template)
-            .Should().AllBe("Profile/Me/ShiftInfo",
-                "the [Route(\"Profile\")] prefix stayed on both halves of the split, so the URL is unchanged");
+            .Should().AllBe("Shifts/ShiftInfo",
+                "the page takes Shifts' own URL on both halves of the split");
     }
 
     [HumansFact(Timeout = 60000)]
@@ -296,7 +298,7 @@ public class ShiftsPageRenderTests(HumansTestDatabase database) : IntegrationTes
         root.Should().NotBeNull("the test must be able to find the repo root to scan sources");
 
         var stale = Directory
-            .EnumerateFiles(Path.Combine(root!.FullName, "src"), "*.*", SearchOption.AllDirectories)
+            .EnumerateFiles(Path.Combine(root.FullName, "src"), "*.*", SearchOption.AllDirectories)
             .Where(f => f.EndsWith(".cshtml", StringComparison.OrdinalIgnoreCase)
                         || f.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
             .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
@@ -307,6 +309,9 @@ public class ShiftsPageRenderTests(HumansTestDatabase database) : IntegrationTes
                 || line.Contains("Url.Action(\"ShiftInfo\", \"Profile\")", StringComparison.Ordinal)))
             .Select(f => Path.GetRelativePath(root.FullName, f))
             .ToList();
+
+        // The source scan is the slow part this timeout covers; stop here if it used the budget.
+        Xunit.TestContext.Current.CancellationToken.ThrowIfCancellationRequested();
 
         stale.Should().BeEmpty(
             "ShiftInfo lives on ShiftProfileController now; addressing it as (\"ShiftInfo\", \"Profile\") renders a link with no href instead of failing");

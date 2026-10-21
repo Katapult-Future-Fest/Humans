@@ -44,7 +44,12 @@ internal interface IShiftSignupService : IShiftSignupSeeding, IApplicationServic
 
     Task<BailRangeResult> BailRangeAsync(Guid signupBlockId, Guid actorUserId, string? reason = null);
 
-    Task<IReadOnlyList<ShiftSignup>> GetByUserAsync(Guid userId, Guid? eventSettingsId = null, CancellationToken ct = default);
+    /// <summary>
+    /// The user's signups across every event (or only <paramref name="eventSettingsId"/>'s),
+    /// each resolved against its own event's calendar. Signups whose shift, rota or
+    /// calendar is missing are dropped.
+    /// </summary>
+    Task<IReadOnlyList<ShiftSignupSummary>> GetByUserAsync(Guid userId, Guid? eventSettingsId = null, CancellationToken ct = default);
 
     /// <summary>
     /// Gets signup team ownership data for admin authorization checks.
@@ -62,9 +67,7 @@ internal interface IShiftSignupService : IShiftSignupSeeding, IApplicationServic
     /// Self-service day-row toggle for the current user: bails an existing active
     /// signup for <paramref name="shiftId"/>, or signs up if none exists (auto-confirm
     /// per <paramref name="privileged"/>, mirroring <see cref="IShiftSignups.SignUpAsync"/>'s
-    /// Privileged flag). Short-circuits with <see cref="ToggleDaySignupOutcome.NeedsDietaryFirst"/>
-    /// instead of signing up when the shift qualifies for a cantina meal and
-    /// <paramref name="hasDietaryPreference"/> is false — the caller owns the redirect.
+    /// Privileged flag). Dietary info never gates it (dietary info is opt-in).
     /// <see cref="ToggleDaySignupOutcome.CanViewRestricted"/> folds
     /// <paramref name="privileged"/> together with dept-coordinator status, matching the
     /// browse page's broader privilege check, for restricted-shift row rendering.
@@ -74,7 +77,6 @@ internal interface IShiftSignupService : IShiftSignupSeeding, IApplicationServic
         Guid shiftId,
         Guid eventSettingsId,
         bool privileged,
-        bool hasDietaryPreference,
         CancellationToken ct = default);
 }
 
@@ -82,13 +84,13 @@ internal interface IShiftSignupService : IShiftSignupSeeding, IApplicationServic
 /// Outcome of <see cref="IShiftSignupService.ToggleDayAsync"/>.
 /// </summary>
 internal sealed record ToggleDaySignupOutcome(
-    bool NeedsDietaryFirst,
-    SignupResult? Result,
+    SignupResult Result,
     bool SignedUp,
     bool CanViewRestricted,
     IReadOnlyList<ShiftSignup> SignupsAfter)
 {
-    internal static ToggleDaySignupOutcome DietaryRequired() => new(true, null, false, false, []);
+    /// <summary>The user's active (Pending or Confirmed) signups after the toggle.</summary>
+    public int ActiveSignupCount => SignupsAfter.Count(s => s.Status is SignupStatus.Pending or SignupStatus.Confirmed);
 }
 
 internal sealed record ShiftSignupTeamProbe(

@@ -1,4 +1,3 @@
-using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Humans.GoogleIntegration.Contracts;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -6,7 +5,6 @@ using Humans.Teams.Services;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Localization;
 using Humans.Tickets.Contracts;
-using Humans.Teams.Domain;
 using Humans.Base.Extensions;
 using Humans.Base.Models;
 using Humans.Teams.Models;
@@ -22,8 +20,6 @@ namespace Humans.Teams.Controllers;
 internal sealed class TeamAdminController(
     ITeamManagementService teamService,
     ITeamResourceService teamResourceService,
-    ITeamResourceWrite teamResourceWrite,
-    IGoogleSyncWrite googleSyncWrite,
     IUserService userService,
     IEmailProvisioningService emailProvisioningService,
     IAuthorizationService authorizationService,
@@ -380,308 +376,6 @@ internal sealed class TeamAdminController(
         return Json(filtered);
     }
 
-    [HttpGet("Resources")]
-    public async Task<IActionResult> Resources(string slug)
-    {
-        var (currentUserNotFound, user) = await RequireCurrentUserAsync(HttpContext.RequestAborted);
-        if (currentUserNotFound is not null)
-        {
-            return currentUserNotFound;
-        }
-
-        var team = await _teamService.GetTeamEntityBySlugAsync(slug, HttpContext.RequestAborted);
-        if (team is null)
-        {
-            return NotFound();
-        }
-
-        if (!await CanManageResourcesAsync(team, user.Id, HttpContext.RequestAborted))
-        {
-            return Forbid();
-        }
-
-        var resources = await teamResourceService.GetTeamResourcesAsync(team.Id, HttpContext.RequestAborted);
-        var serviceAccountEmail = await teamResourceService.GetServiceAccountEmailAsync(HttpContext.RequestAborted);
-
-        var viewModel = new TeamResourcesViewModel
-        {
-            TeamId = team.Id,
-            TeamName = team.Name,
-            TeamSlug = team.Slug,
-            ServiceAccountEmail = serviceAccountEmail,
-            Resources = resources.OrderBy(r => r.ProvisionedAt).Select(r => new GoogleResourceViewModel
-            {
-                Id = r.Id,
-                ResourceType = r.ResourceType switch
-                {
-                    GoogleResourceType.DriveFolder => "Drive Folder",
-                    GoogleResourceType.SharedDrive => "Shared Drive",
-                    GoogleResourceType.Group => "Google Group",
-                    GoogleResourceType.DriveFile => "Drive File",
-                    _ => r.ResourceType.ToString()
-                },
-                Name = r.Name,
-                Url = r.Url,
-                GoogleId = r.GoogleId,
-                ProvisionedAt = r.ProvisionedAt.ToDateTimeUtc(),
-                LastSyncedAt = r.LastSyncedAt?.ToDateTimeUtc(),
-                IsActive = r.IsActive,
-                ErrorMessage = r.ErrorMessage,
-                DrivePermissionLevel = r.DrivePermissionLevel,
-                IsDriveResource = r.ResourceType is GoogleResourceType.DriveFolder or GoogleResourceType.DriveFile or GoogleResourceType.SharedDrive,
-                RestrictInheritedAccess = r.RestrictInheritedAccess,
-                IsDriveFolder = r.ResourceType is GoogleResourceType.DriveFolder
-            }).ToList()
-        };
-
-        return View(viewModel);
-    }
-
-    [HttpPost("Resources/LinkDrive")]
-    [ValidateAntiForgeryToken]
-    public async Task<IActionResult> LinkDriveResource(string slug, LinkDriveResourceModel model)
-    {
-        var (currentUserNotFound, user) = await RequireCurrentUserAsync();
-        if (currentUserNotFound is not null)
-        {
-            return currentUserNotFound;
-        }
-
-        var team = await _teamService.GetTeamEntityBySlugAsync(slug);
-        if (team is null)
-        {
-            return NotFound();
-        }
-
-        if (!await CanManageResourcesAsync(team, user.Id))
-        {
-            return Forbid();
-        }
-
-        if (!ModelState.IsValid)
-        {
-            SetError(localizer["Teams_TeamAdmin_InvalidDriveUrl"].Value);
-            return RedirectToAction(nameof(Resources), new { slug });
-        }
-
-        var result = await teamResourceWrite.LinkDriveResourceAsync(team.Id, model.ResourceUrl, model.PermissionLevel, actorUserId: user.Id);
-        if (result.Success)
-            SetSuccess($"Drive resource '{result.Resource!.Name}' linked successfully.");
-        else
-            SetError(BuildResourceLinkError(result, "Failed to link Drive resource."));
-
-        return RedirectToAction(nameof(Resources), new { slug });
-    }
-
-    [HttpPost("Resources/LinkGroup")]
-    [ValidateAntiForgeryToken]
-    public async Task<IActionResult> LinkGroup(string slug, LinkGroupModel model)
-    {
-        var (currentUserNotFound, user) = await RequireCurrentUserAsync();
-        if (currentUserNotFound is not null)
-        {
-            return currentUserNotFound;
-        }
-
-        var team = await _teamService.GetTeamEntityBySlugAsync(slug);
-        if (team is null)
-        {
-            return NotFound();
-        }
-
-        if (!await CanManageResourcesAsync(team, user.Id))
-        {
-            return Forbid();
-        }
-
-        if (!ModelState.IsValid)
-        {
-            SetError(localizer["Teams_TeamAdmin_InvalidGroupEmail"].Value);
-            return RedirectToAction(nameof(Resources), new { slug });
-        }
-
-        var result = await teamResourceWrite.LinkGroupAsync(team.Id, model.GroupEmail, actorUserId: user.Id);
-        if (result.Success)
-            SetSuccess(string.Format(localizer["Teams_TeamAdmin_GroupLinked"].Value, result.Resource!.Name));
-        else
-            SetError(BuildResourceLinkError(result, localizer["Teams_TeamAdmin_GroupLinkFailed"].Value));
-
-        return RedirectToAction(nameof(Resources), new { slug });
-    }
-
-    [HttpPost("Resources/{resourceId}/PermissionLevel")]
-    [ValidateAntiForgeryToken]
-    public async Task<IActionResult> UpdatePermissionLevel(string slug, Guid resourceId, DrivePermissionLevel level)
-    {
-        var (currentUserNotFound, user) = await RequireCurrentUserAsync();
-        if (currentUserNotFound is not null)
-        {
-            return currentUserNotFound;
-        }
-
-        var team = await _teamService.GetTeamEntityBySlugAsync(slug);
-        if (team is null)
-        {
-            return NotFound();
-        }
-
-        if (!await CanManageResourcesAsync(team, user.Id))
-        {
-            return Forbid();
-        }
-
-        if (!await ResourceMatchesTeamAsync(resourceId, team.Id))
-            return NotFound();
-
-        if (level == DrivePermissionLevel.None)
-        {
-            SetError("Invalid permission level.");
-            return RedirectToAction(nameof(Resources), new { slug });
-        }
-
-        await teamResourceWrite.UpdatePermissionLevelAsync(resourceId, level, actorUserId: user.Id);
-        SetSuccess($"Permission level updated to {level}.");
-
-        return RedirectToAction(nameof(Resources), new { slug });
-    }
-
-    [HttpPost("Resources/{resourceId}/RestrictInheritedAccess")]
-    [ValidateAntiForgeryToken]
-    public async Task<IActionResult> ToggleRestrictInheritedAccess(string slug, Guid resourceId, [BindRequired] bool restrict)
-    {
-        var (currentUserNotFound, user) = await RequireCurrentUserAsync();
-        if (currentUserNotFound is not null)
-        {
-            return currentUserNotFound;
-        }
-
-        var team = await _teamService.GetTeamEntityBySlugAsync(slug);
-        if (team is null)
-        {
-            return NotFound();
-        }
-
-        if (!await CanManageResourcesAsync(team, user.Id))
-        {
-            return Forbid();
-        }
-
-        if (!ModelState.IsValid)
-        {
-            logger.LogWarning("Rejected malformed inherited-access form for resource {ResourceId}", resourceId);
-            return BadRequest(ModelState);
-        }
-
-        if (!await ResourceMatchesTeamAsync(resourceId, team.Id))
-            return NotFound();
-
-        var result = await teamResourceWrite.SetRestrictInheritedAccessWithResultAsync(
-            resourceId,
-            restrict,
-            user.Id,
-            CancellationToken.None);
-        if (result.Succeeded)
-        {
-            var label = restrict ? "enabled" : "disabled";
-            SetSuccess($"Inherited access restriction {label}.");
-        }
-        else
-        {
-            SetError(result.ErrorMessage ?? "Failed to update inherited access setting.");
-        }
-
-        return RedirectToAction(nameof(Resources), new { slug });
-    }
-
-    [HttpPost("Resources/{resourceId}/Unlink")]
-    [ValidateAntiForgeryToken]
-    public async Task<IActionResult> UnlinkResource(string slug, Guid resourceId)
-    {
-        var (currentUserNotFound, user) = await RequireCurrentUserAsync();
-        if (currentUserNotFound is not null)
-        {
-            return currentUserNotFound;
-        }
-
-        var team = await _teamService.GetTeamEntityBySlugAsync(slug);
-        if (team is null)
-        {
-            return NotFound();
-        }
-
-        if (!await CanManageResourcesAsync(team, user.Id))
-        {
-            return Forbid();
-        }
-
-        if (!await ResourceMatchesTeamAsync(resourceId, team.Id))
-            return NotFound();
-
-        await teamResourceWrite.UnlinkResourceAsync(resourceId, actorUserId: user.Id);
-        SetSuccess(localizer["Teams_TeamAdmin_ResourceUnlinked"].Value);
-
-        return RedirectToAction(nameof(Resources), new { slug });
-    }
-
-    [HttpPost("Resources/{resourceId}/Sync")]
-    [ValidateAntiForgeryToken]
-    public async Task<IActionResult> SyncResource(string slug, Guid resourceId)
-    {
-        var (currentUserNotFound, user) = await RequireCurrentUserAsync();
-        if (currentUserNotFound is not null)
-        {
-            return currentUserNotFound;
-        }
-
-        var team = await _teamService.GetTeamEntityBySlugAsync(slug);
-        if (team is null)
-        {
-            return NotFound();
-        }
-
-        if (!await CanManageResourcesAsync(team, user.Id))
-        {
-            return Forbid();
-        }
-
-        if (!await ResourceMatchesTeamAsync(resourceId, team.Id))
-            return NotFound();
-
-        try
-        {
-            // Deliberately not passing HttpContext.RequestAborted: a team admin
-            // navigating away mid-reconcile would abort partway through applying
-            // Drive permissions, leaving the resource half-synced
-            // (nobodies-collective/Humans#950).
-            var diff = await googleSyncWrite.SyncSingleResourceAsync(
-                resourceId,
-                SyncAction.Execute,
-                CancellationToken.None);
-            if (diff.ErrorMessage is not null)
-                SetError(string.Format(localizer["Teams_TeamAdmin_ResourceSyncFailed"].Value, diff.ErrorMessage));
-            else
-                SetSuccess(localizer["Teams_TeamAdmin_ResourceSynced"].Value);
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Error syncing resource {ResourceId}", resourceId);
-            SetError(string.Format(localizer["Teams_TeamAdmin_ResourceSyncFailed"].Value, ex.Message));
-        }
-
-        return RedirectToAction(nameof(Resources), new { slug });
-    }
-
-    private string BuildResourceLinkError(LinkResourceResult result, string defaultMessage)
-    {
-        var errorMessage = result.ErrorMessage ?? defaultMessage;
-        if (result.ServiceAccountEmail is not null)
-        {
-            errorMessage += $" {string.Format(localizer["Teams_TeamAdmin_ServiceAccount"].Value, result.ServiceAccountEmail)}";
-        }
-
-        return errorMessage;
-    }
-
     [HttpGet("Roles")]
     public async Task<IActionResult> Roles(string slug)
     {
@@ -933,13 +627,7 @@ internal sealed class TeamAdminController(
         if (teamError is not null)
             return teamError;
 
-        var teamEntity = await _teamService.GetTeamByIdAsync(team.Id);
-        if (teamEntity is null)
-            return NotFound();
-
-        var canBePublic = !teamEntity.IsSystemTeam && !teamEntity.ParentTeamId.HasValue;
-
-        var ctas = (teamEntity.CallsToAction ?? [])
+        var ctas = (team.CallsToAction ?? [])
             .Select(c => new CallToActionViewModel { Text = c.Text, Url = c.Url, Style = c.Style })
             .ToList();
         while (ctas.Count < 3)
@@ -947,13 +635,13 @@ internal sealed class TeamAdminController(
 
         var viewModel = new EditTeamPageViewModel
         {
-            TeamId = teamEntity.Id,
-            Slug = teamEntity.Slug,
-            TeamName = teamEntity.DisplayName,
-            IsPublicPage = teamEntity.IsPublicPage,
-            ShowCoordinatorsOnPublicPage = teamEntity.ShowCoordinatorsOnPublicPage,
-            CanBePublic = canBePublic,
-            PageContent = teamEntity.PageContent,
+            TeamId = team.Id,
+            Slug = team.Slug,
+            TeamName = await GetTeamDisplayNameAsync(team),
+            IsPublicPage = team.IsPublicPage,
+            ShowCoordinatorsOnPublicPage = team.ShowCoordinatorsOnPublicPage,
+            CanBePublic = team.CanBePublic,
+            PageContent = team.PageContent,
             CallsToAction = ctas
         };
 
@@ -970,10 +658,7 @@ internal sealed class TeamAdminController(
 
         if (!ModelState.IsValid)
         {
-            var teamEntity = await _teamService.GetTeamByIdAsync(team.Id);
-            if (teamEntity is null)
-                return NotFound();
-            PopulateEditTeamPageModel(model, teamEntity);
+            await PopulateEditTeamPageModelAsync(model, team);
             return View(model);
         }
 
@@ -994,10 +679,7 @@ internal sealed class TeamAdminController(
         }
 
         ModelState.AddModelError("", result.ErrorMessage ?? "Failed to update team page.");
-        var teamEntityAfterFailure = await _teamService.GetTeamByIdAsync(team.Id);
-        if (teamEntityAfterFailure is null)
-            return NotFound();
-        PopulateEditTeamPageModel(model, teamEntityAfterFailure);
+        await PopulateEditTeamPageModelAsync(model, team);
         return View(model);
     }
 
@@ -1245,28 +927,18 @@ internal sealed class TeamAdminController(
         return Json(combined);
     }
 
-    private async Task<bool> ResourceMatchesTeamAsync(Guid resourceId, Guid teamId)
-    {
-        var resource = await teamResourceService.GetResourceByIdAsync(resourceId, HttpContext.RequestAborted);
-        if (resource?.TeamId == teamId) return true;
-        logger.LogWarning("Rejected resource {ResourceId} outside requested team {TeamId}", resourceId, teamId);
-        return false;
-    }
-
-    private async Task<bool> CanManageResourcesAsync(Team team, Guid userId, CancellationToken ct = default)
-    {
-        if (RoleChecks.IsTeamsAdminBoardOrAdmin(User))
-            return true;
-
-        // Sub-team managers cannot manage Google resources — check at department level.
-        var checkTeamId = team.ParentTeamId ?? team.Id;
-        return await teamResourceService.CanManageTeamResourcesAsync(checkTeamId, userId, ct);
-    }
-
-    private static void PopulateEditTeamPageModel(EditTeamPageViewModel model, Team team)
+    private async Task PopulateEditTeamPageModelAsync(EditTeamPageViewModel model, TeamInfo team)
     {
         model.Slug = team.Slug;
-        model.TeamName = team.DisplayName;
-        model.CanBePublic = !team.IsSystemTeam && !team.ParentTeamId.HasValue;
+        model.TeamName = await GetTeamDisplayNameAsync(team);
+        model.CanBePublic = team.CanBePublic;
+    }
+
+    private async Task<string> GetTeamDisplayNameAsync(TeamInfo team)
+    {
+        var parent = team.ParentTeamId is { } parentId
+            ? await _teamService.GetTeamAsync(parentId, HttpContext.RequestAborted)
+            : null;
+        return parent is not null ? $"{parent.Name} - {team.Name}" : team.Name;
     }
 }

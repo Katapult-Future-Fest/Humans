@@ -23,7 +23,7 @@ internal sealed class GoogleWorkspaceSyncService(
     IGoogleSyncOutboxRepository googleSyncOutboxRepository,
     ITeamService teamService,
     IUserService userService,
-    IUserWrite userWrite,
+    IWorkspaceIdentityManagement workspaceIdentities,
     IGoogleGroupSync googleGroupSync,
     IGoogleDriveSync googleDriveSync,
     IEnumerable<IGoogleDriveAccessSource> driveAccessSources,
@@ -43,7 +43,7 @@ internal sealed class GoogleWorkspaceSyncService(
         GoogleResource resource,
         string userEmail,
         Guid userId,
-        Guid googleEmailId,
+        string identityEmail,
         DrivePermissionLevel? permissionLevelOverride,
         GoogleSyncSource syncSource,
         CancellationToken cancellationToken)
@@ -52,7 +52,7 @@ internal sealed class GoogleWorkspaceSyncService(
         if (mode == SyncMode.None)
         {
             logger.LogDebug("Skipping AddUserToDrive — GoogleDrive sync mode is None");
-            return new GoogleResourceGrantResult(GoogleResourceGrantOutcome.Deferred, userId, googleEmailId);
+            return new GoogleResourceGrantResult(GoogleResourceGrantOutcome.Deferred, userId, identityEmail);
         }
 
         var effectiveLevel = permissionLevelOverride ?? resource.DrivePermissionLevel;
@@ -63,25 +63,37 @@ internal sealed class GoogleWorkspaceSyncService(
         // opaque HTTP 400. Plus-addressing is only guaranteed equivalent on
         // Gmail (CanonicalizeGmail leaves non-Gmail domains untouched, since
         // granting the base address there could resolve to a different
-        // Google identity than the one recorded on the user).
-        var driveTargetEmail = EmailNormalization.CanonicalizeGmail(userEmail);
+        // Google identity than the one recorded on the user). Only when Drive
+        // refuses the plus address is the base address tried, and kept on the
+        // identity once Drive accepts it (peterdrier/Humans#2037).
+        var driveTargetEmail = DrivePlusAddressFallback.Apply(
+            await workspaceIdentities.GetDriveEmailsAsync(cancellationToken),
+            userId, identityEmail, EmailNormalization.CanonicalizeGmail(userEmail));
 
-        var result = await drivePermissions.CreatePermissionAsync(resource.GoogleId, driveTargetEmail, apiRole, cancellationToken);
+        var (result, grantedEmail) = await DrivePlusAddressFallback.CreateAsync(
+            email => drivePermissions.CreatePermissionAsync(resource.GoogleId, email, apiRole, cancellationToken),
+            driveTargetEmail, userId, identityEmail, workspaceIdentities, cancellationToken);
 
+        var insteadOf = string.Equals(grantedEmail, driveTargetEmail, StringComparison.Ordinal)
+            ? ""
+            : $" in place of {driveTargetEmail}, which Drive refused";
         switch (result.Outcome)
         {
+            // A fallback onto a base address that already had access still changes the
+            // member's Drive address, so it is logged like a grant.
             case DrivePermissionCreateOutcome.Created:
+            case DrivePermissionCreateOutcome.AlreadyExists when insteadOf.Length > 0:
                 await googleSyncLog.LogAsync(
                     GoogleSyncLogAction.AccessGranted, resource.Id,
-                    $"Granted Drive access ({effectiveLevel}) to {userEmail} ({resource.Name})",
+                    $"Granted Drive access ({effectiveLevel}) to {grantedEmail}{insteadOf} ({resource.Name})",
                     nameof(GoogleWorkspaceSyncService),
-                    userEmail, apiRole, syncSource, success: true,
+                    grantedEmail, apiRole, syncSource, success: true,
                     userId: userId, ct: cancellationToken);
-                return new GoogleResourceGrantResult(GoogleResourceGrantOutcome.Accepted, userId, googleEmailId);
+                return new GoogleResourceGrantResult(GoogleResourceGrantOutcome.Accepted, userId, identityEmail);
 
             case DrivePermissionCreateOutcome.AlreadyExists:
                 logger.LogDebug("Permission already exists for {Email} on {GoogleId}", userEmail, resource.GoogleId);
-                return new GoogleResourceGrantResult(GoogleResourceGrantOutcome.Accepted, userId, googleEmailId);
+                return new GoogleResourceGrantResult(GoogleResourceGrantOutcome.Accepted, userId, identityEmail);
 
             case DrivePermissionCreateOutcome.Failed:
                 logger.LogWarning(
@@ -100,8 +112,8 @@ internal sealed class GoogleWorkspaceSyncService(
                     userEmail, apiRole, syncSource, success: false,
                     errorMessage: result.Error?.RawMessage,
                     userId: userId, ct: cancellationToken);
-                await HandleDriveAddFailureAsync(resource, userEmail, userId, googleEmailId, result.Error, cancellationToken);
-                return new GoogleResourceGrantResult(GoogleResourceGrantOutcome.Failed, userId, googleEmailId,
+                await HandleDriveAddFailureAsync(resource, userEmail, userId, identityEmail, result.Error, cancellationToken);
+                return new GoogleResourceGrantResult(GoogleResourceGrantOutcome.Failed, userId, identityEmail,
                     Retryable: !DrivePermissionErrorPolicy.IsPermanentFailure(result.Error?.StatusCode),
                     ErrorMessage: $"{resource.Name}: HTTP {result.Error?.StatusCode} — {result.Error?.RawMessage}");
         }
@@ -112,8 +124,8 @@ internal sealed class GoogleWorkspaceSyncService(
     /// Issue nobodies-collective/Humans#677 — when Drive's
     /// <c>permissions.create</c> returns a target-rejection (HTTP 400/403
     /// referencing "no Google account" / "SendNotificationEmail"), mark the
-    /// owning user's <see cref="GoogleEmailStatus"/> as
-    /// <see cref="GoogleEmailStatus.Rejected"/> so the orchestrator stops
+    /// owning user's Google identity <see cref="GoogleEmailStatus.Rejected"/>
+    /// so the orchestrator stops
     /// re-attempting until an admin clears the state. Mirrors the existing
     /// <c>GoogleGroupSyncService.HandleGroupAddFailureAsync</c> pattern.
     /// </summary>
@@ -121,7 +133,7 @@ internal sealed class GoogleWorkspaceSyncService(
         GoogleResource resource,
         string userEmail,
         Guid userId,
-        Guid googleEmailId,
+        string identityEmail,
         GoogleClientError? error,
         CancellationToken ct)
     {
@@ -144,8 +156,8 @@ internal sealed class GoogleWorkspaceSyncService(
             return;
         }
 
-        await userWrite.TrySetGoogleEmailStatusFromSyncAsync(
-            userId, GoogleEmailStatus.Rejected, ct, googleEmailId);
+        await workspaceIdentities.SetStatusFromSyncAsync(
+            userId, identityEmail, GoogleEmailStatus.Rejected, ct);
 
         logger.LogWarning(
             "Google rejected target email {Email} while granting Drive permission on {GoogleId} - HTTP {StatusCode}. " +
@@ -169,7 +181,7 @@ internal sealed class GoogleWorkspaceSyncService(
         // snapshot supplies both the target and its state; a second email read could
         // observe a different selection during a user edit.
         var user = await userService.GetUserInfoAsync(userId, cancellationToken);
-        var target = user is null ? null : GoogleSyncMemberHydration.SelectTargetEmail(user);
+        var target = user is null ? null : await workspaceIdentities.GetWorkspaceIdentityAsync(user.Id, cancellationToken);
         if (target is null)
         {
             logger.LogWarning("Skipped Google provisioning for user {UserId} on team {TeamId}: no eligible Google email", userId, teamId);
@@ -177,10 +189,10 @@ internal sealed class GoogleWorkspaceSyncService(
                 ErrorMessage: "No eligible Google email for provisioning");
         }
         // An old outbox event must not restore access excluded by reconciliation.
-        if (!GoogleSyncMemberHydration.CanReceiveAccess(user!))
+        if (!GoogleSyncMemberHydration.CanReceiveAccess(user!, target))
         {
             logger.LogDebug("Skipping AddUserToTeamResources for user {UserId} — signup rejected, suspended, deletion pending, or Google email rejected", userId);
-            return new GoogleResourceGrantResult(GoogleResourceGrantOutcome.Failed, user!.Id, target.Id,
+            return new GoogleResourceGrantResult(GoogleResourceGrantOutcome.Failed, user!.Id, target.Email,
                 ErrorMessage: "Member is ineligible for Google access: signup rejected, suspended, deletion pending, or email rejected");
         }
         var googleEmail = target.Email;
@@ -203,13 +215,13 @@ internal sealed class GoogleWorkspaceSyncService(
         }
         var failures = outcomes.Where(r => r.Outcome == GoogleResourceGrantOutcome.Failed).ToList();
         if (failures.Count > 0)
-            return new GoogleResourceGrantResult(GoogleResourceGrantOutcome.Failed, userId, target.Id,
+            return new GoogleResourceGrantResult(GoogleResourceGrantOutcome.Failed, userId, target.Email,
                 Retryable: failures.Any(r => r.Retryable),
                 ErrorMessage: string.Join("; ", failures.Select(r => r.ErrorMessage)));
         return new GoogleResourceGrantResult(
             outcomes.Any(r => r.Outcome == GoogleResourceGrantOutcome.Accepted)
                 ? GoogleResourceGrantOutcome.Accepted : GoogleResourceGrantOutcome.Deferred,
-            userId, target.Id);
+            userId, target.Email);
 
         async Task GrantTeamResourcesAsync(Guid resourceTeamId, string? groupEmail)
         {
@@ -225,7 +237,7 @@ internal sealed class GoogleWorkspaceSyncService(
                 var level = await ResolvePermissionLevelForUserAsync(
                     resource.GoogleId, userId, cancellationToken);
                 if (level != DrivePermissionLevel.None)
-                    outcomes.Add(await AddUserToDriveAsync(resource, googleEmail, userId, target.Id, level, syncSource, cancellationToken));
+                    outcomes.Add(await AddUserToDriveAsync(resource, googleEmail, userId, target.Email, level, syncSource, cancellationToken));
             }
         }
     }
@@ -908,23 +920,64 @@ internal sealed class GoogleWorkspaceSyncService(
     }
 
     /// <inheritdoc />
-    public Task<bool> RequeueOutboxEventAsync(Guid id, CancellationToken cancellationToken = default)
-        => googleSyncOutboxRepository.RequeueAsync(id, cancellationToken);
-
-    /// <inheritdoc />
-    public Task<int> RequeueAllFailedOutboxEventsAsync(CancellationToken cancellationToken = default)
-        => googleSyncOutboxRepository.RequeueAllFailedAsync(cancellationToken);
-
-    /// <inheritdoc />
-    public async Task<int> EnqueueUserSyncAsync(Guid userId, CancellationToken cancellationToken = default)
+    public async Task<bool> RequeueOutboxEventAsync(Guid id, Guid actorUserId, CancellationToken cancellationToken = default)
     {
-        var user = await userService.GetUserInfoAsync(userId, cancellationToken);
+        var requeued = await googleSyncOutboxRepository.RequeueAsync(id, cancellationToken);
+        if (requeued)
+            await AuditOutboxRequeueAsync(auditLogService, id, actorUserId);
+        return requeued;
+    }
 
-        // If the user's GoogleEmailStatus is Rejected, AddUserToTeamResourcesAsync will
+    /// <inheritdoc />
+    public async Task<int> RequeueAllFailedOutboxEventsAsync(Guid actorUserId, CancellationToken cancellationToken = default)
+    {
+        var count = await googleSyncOutboxRepository.RequeueAllFailedAsync(cancellationToken);
+        await AuditRequeueAllAsync(auditLogService, count, actorUserId);
+        return count;
+    }
+
+    /// <inheritdoc />
+    public async Task<int> EnqueueUserSyncAsync(Guid userId, Guid actorUserId, CancellationToken cancellationToken = default)
+    {
+        var count = await EnqueueUserSyncEventsAsync(userId, cancellationToken);
+        await AuditUserSyncRerunAsync(auditLogService, userId, count, actorUserId);
+        return count;
+    }
+
+    // Admin retry audits, shared with StubGoogleSyncService so both modes leave the same trail.
+    internal static Task AuditOutboxRequeueAsync(IAuditLogService auditLog, Guid id, Guid actorUserId) =>
+        auditLog.LogAsync(
+            AuditAction.GoogleSyncRetryScheduled,
+            "GoogleSyncOutboxEvent",
+            id,
+            $"Admin manually requeued Google sync outbox event {id}",
+            actorUserId);
+
+    internal static Task AuditRequeueAllAsync(IAuditLogService auditLog, int count, Guid actorUserId) =>
+        auditLog.LogAsync(
+            AuditAction.GoogleSyncRetryScheduled,
+            "GoogleSyncOutbox",
+            Guid.Empty,
+            $"Admin requeued all {count} permanently-failed Google sync outbox event(s)",
+            actorUserId);
+
+    internal static Task AuditUserSyncRerunAsync(IAuditLogService auditLog, Guid userId, int count, Guid actorUserId) =>
+        auditLog.LogAsync(
+            AuditAction.GoogleSyncRetryScheduled,
+            "User",
+            userId,
+            $"Admin enqueued Google sync re-run for user {userId} ({count} team event(s))",
+            actorUserId);
+
+    private async Task<int> EnqueueUserSyncEventsAsync(Guid userId, CancellationToken cancellationToken)
+    {
+        var identity = await workspaceIdentities.GetWorkspaceIdentityAsync(userId, cancellationToken);
+
+        // If the user's Google identity is Rejected, AddUserToTeamResourcesAsync will
         // silently skip every enqueued event — don't enqueue at all (nobodies-collective/Humans#847).
-        if (user?.GoogleEmailStatus == GoogleEmailStatus.Rejected)
+        if (identity?.Status == GoogleEmailStatus.Rejected)
         {
-            logger.LogDebug("EnqueueUserSyncAsync skipped for user {UserId} — GoogleEmailStatus is Rejected", userId);
+            logger.LogDebug("EnqueueUserSyncAsync skipped for user {UserId} — Google identity is Rejected", userId);
             return 0;
         }
 

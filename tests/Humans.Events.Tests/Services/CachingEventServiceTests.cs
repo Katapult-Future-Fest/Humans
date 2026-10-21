@@ -168,6 +168,26 @@ public sealed class CachingEventServiceTests
             .Host.Should().BeNull();
     }
 
+    [HumansFact]
+    public async Task ReassignAsync_RefreshesTheCachedEvents()
+    {
+        // The merge fold re-points the submitter of an approved event the cache is serving.
+        var before = Approved("Sunset Yoga");
+        SeedApproved(before);
+        (await _service.GetApprovedEventByIdAsync(before.Id, TestContext.Current.CancellationToken))!
+            .SubmitterUserId.Should().Be(before.SubmitterUserId);
+
+        var survivor = Guid.NewGuid();
+        var actor = Guid.NewGuid();
+        var now = Instant.FromUtc(2026, 6, 1, 12, 0);
+        SeedApproved(before with { SubmitterUserId = survivor });
+        await _service.ReassignAsync(before.SubmitterUserId, survivor, actor, now, TestContext.Current.CancellationToken);
+
+        await _inner.Received(1).ReassignAsync(before.SubmitterUserId, survivor, actor, now, Arg.Any<CancellationToken>());
+        (await _service.GetApprovedEventByIdAsync(before.Id, TestContext.Current.CancellationToken))!
+            .SubmitterUserId.Should().Be(survivor);
+    }
+
     [HumansTheory]
     [InlineData("mutation", false)]
     [InlineData("mutation", true)]
@@ -180,14 +200,14 @@ public sealed class CachingEventServiceTests
         var ct = TestContext.Current.CancellationToken;
         var before = Approved("Sunset Yoga");
         var category = new EventCategoryManageInfo(before.CategoryId, "Music", "music", false, 1, true, 1);
-        _inner.GetAllCategoriesAsync(ct).Returns<IReadOnlyList<EventCategoryManageInfo>>([category]);
+        _inner.GetAllCategoriesAsync(ct).Returns([category]);
         SeedApproved(before);
         (await _service.GetApprovedEventByIdAsync(before.Id, ct))!.CategoryIsSensitive.Should().BeFalse();
         (await _service.GetCategoryAsync(category.Id, ct))!.IsSensitive.Should().BeFalse();
 
         var after = before with { CategoryIsSensitive = true };
         var updatedCategory = category with { IsSensitive = true };
-        _inner.GetAllCategoriesAsync(ct).Returns<IReadOnlyList<EventCategoryManageInfo>>([updatedCategory]);
+        _inner.GetAllCategoriesAsync(ct).Returns([updatedCategory]);
         SeedApproved(after);
         Exception failure = cancelled
             ? new OperationCanceledException(ct)
@@ -211,7 +231,7 @@ public sealed class CachingEventServiceTests
         (await update.Should().ThrowAsync<Exception>()).Which.Should().BeSameAs(failure);
 
         // Recover the dependency; both slices must reload rather than serving the old projection.
-        _inner.GetAllCategoriesAsync(ct).Returns<IReadOnlyList<EventCategoryManageInfo>>([updatedCategory]);
+        _inner.GetAllCategoriesAsync(ct).Returns([updatedCategory]);
         SeedApproved(after);
         (await _service.GetApprovedEventByIdAsync(before.Id, ct))!.CategoryIsSensitive.Should().BeTrue();
         (await _service.GetCategoryAsync(category.Id, ct))!.IsSensitive.Should().BeTrue();
@@ -222,11 +242,11 @@ public sealed class CachingEventServiceTests
     {
         var ct = TestContext.Current.CancellationToken;
         var category = new EventCategoryManageInfo(Guid.NewGuid(), "Music", "music", false, 1, true, 0);
-        _inner.GetAllCategoriesAsync(ct).Returns<IReadOnlyList<EventCategoryManageInfo>>([category]);
+        _inner.GetAllCategoriesAsync(ct).Returns([category]);
         SeedApproved();
         (await _service.GetCategoryAsync(category.Id, ct)).Should().NotBeNull();
 
-        _inner.GetAllCategoriesAsync(ct).Returns<IReadOnlyList<EventCategoryManageInfo>>([]);
+        _inner.GetAllCategoriesAsync(ct).Returns([]);
         var failure = new InvalidOperationException("Post-write dependency failed");
         _inner.DeleteCategoryAsync(category.Id, ct).Returns(Task.FromException<(bool deleted, int linkedCount)>(failure));
         Func<Task> delete = () => _service.DeleteCategoryAsync(category.Id, ct);
@@ -263,7 +283,7 @@ public sealed class CachingEventServiceTests
         var stale = await _service.GetGuideSettingsAsync(TestContext.Current.CancellationToken);
         stale!.TimeZoneId.Should().Be("Europe/Madrid");
 
-        ((IEventSettingsChangeListener)_service).EventSettingsChanged(Guid.NewGuid());
+        (_service).EventSettingsChanged(Guid.NewGuid());
 
         var fresh = await _service.GetGuideSettingsAsync(TestContext.Current.CancellationToken);
         fresh!.TimeZoneId.Should().Be("Atlantic/Canary");
@@ -310,7 +330,7 @@ public sealed class CachingEventServiceTests
         (await _service.GetGuideSettingsAsync(TestContext.Current.CancellationToken))!
             .TimeZoneId.Should().Be("Europe/Madrid");
 
-        ((IEventSettingsChangeListener)_service).EventSettingsChanged(Guid.NewGuid());
+        (_service).EventSettingsChanged(Guid.NewGuid());
         _inner.GetGuideSettingsAsync(Arg.Any<CancellationToken>())
             .Returns<EventGuideSettingsView?>(_ => throw new OperationCanceledException());
 

@@ -27,6 +27,14 @@ namespace Humans.Consent.Services;
 /// it on first render.
 /// </para>
 /// <para>
+/// Each entry remembers the ids of the human it was built over
+/// (<see cref="UserConsentInfo.UserIds"/>, from <c>UserInfo.AllUserIds</c>).
+/// A read whose current id list differs reloads the entry, so an account
+/// merge (which changes that list when the archived account is tombstoned)
+/// needs no signal from Users: the survivor and the archived id both
+/// rebuild against the merged chain on their next read.
+/// </para>
+/// <para>
 /// Reads that depend on the consented-version set
 /// (<see cref="GetConsentedVersionIdsAsync"/>,
 /// <see cref="GetConsentMapForUsersAsync"/>,
@@ -35,18 +43,20 @@ namespace Humans.Consent.Services;
 /// (<see cref="GetConsentDashboardAsync"/>,
 /// <see cref="GetConsentReviewDetailAsync"/>,
 /// <see cref="GetConsentRecordCountAsync"/>,
-/// <see cref="GetPendingDocumentNamesAsync"/>)
+/// <see cref="GetPendingDocumentNamesAsync"/>,
+/// <see cref="GetConsentReviewAsync"/>,
+/// <see cref="GetConsentReviewsAsync"/>)
 /// either need richer record data (history view) or are off the hot
 /// path; they pass through to the inner service.
 /// </para>
 /// </remarks>
 internal sealed class CachingConsentService(
     ILegalDocumentSyncManagement legalDocumentSync,
+    IUserService userService,
     IClock clock,
     IServiceScopeFactory scopeFactory,
     ILogger<CachingConsentService> logger)
-    : TrackedCache<Guid, UserConsentInfo>("Consent.UserConsentInfo", warmOnStartup: false, logger), IConsentManagement,
-        IConsentCacheInvalidator
+    : TrackedCache<Guid, UserConsentInfo>("Consent.UserConsentInfo", warmOnStartup: false, logger), IConsentManagement
 {
     /// <summary>
     /// DI service key under which the undecorated (inner)
@@ -54,10 +64,9 @@ internal sealed class CachingConsentService(
     /// </summary>
     public const string InnerServiceKey = "consent-inner";
 
-    // ILegalDocumentSyncManagement and IClock are Singletons — inject directly.
-    // scopeFactory is still needed to resolve the keyed Scoped inner
-    // IConsentManagement and Scoped IUserService for the SubmitConsent /
-    // pass-through paths.
+    // ILegalDocumentSyncManagement, IUserService and IClock are Singletons — inject
+    // directly. scopeFactory is still needed to resolve the keyed Scoped inner
+    // IConsentManagement for the SubmitConsent / pass-through paths.
 
     // ==========================================================================
     // Reads served from cache
@@ -69,7 +78,14 @@ internal sealed class CachingConsentService(
         // Base GetAsync handles TryGet → miss → LoadRowAsync → Set, including
         // hit/miss counter bookkeeping. LoadRowAsync returns a freshly-frozen
         // UserConsentInfo so the cached set is independent of the repo result.
+        var userIds = await GetUserIdsAsync(userId, ct).ConfigureAwait(false);
         var info = await GetAsync(userId, ct).ConfigureAwait(false);
+        if (info is not null && !info.UserIds.SequenceEqual(userIds))
+        {
+            // Built over a different id list (a merge since): rebuild over the current one.
+            Invalidate(userId);
+            info = await GetAsync(userId, ct).ConfigureAwait(false);
+        }
         return info?.ConsentedVersionIds ?? new HashSet<Guid>();
     }
 
@@ -84,6 +100,11 @@ internal sealed class CachingConsentService(
         // bulk inner call — not a per-id loop into LoadRowAsync, which
         // would open N DI scopes and do N rounds of repo + IUserService
         // calls.
+        // Each human's current id list, to tell a live entry from one built before a merge.
+        // Read before the inner load, so an entry is never tagged newer than its data.
+        var infos = await userService.GetUserInfosAsync(userIds, ct).ConfigureAwait(false);
+        IReadOnlyList<Guid> UserIdsOf(Guid id) => infos.TryGetValue(id, out var info) ? info.AllUserIds : [id];
+
         var result = new Dictionary<Guid, IReadOnlySet<Guid>>(userIds.Count);
         // Dedupe misses: duplicate ids in userIds must not redo merge/source
         // resolution work in the inner bulk call. Tracked via a HashSet
@@ -93,7 +114,7 @@ internal sealed class CachingConsentService(
         foreach (var userId in userIds)
         {
             if (result.ContainsKey(userId)) continue;
-            if (TryGet(userId, out var hit))
+            if (TryGet(userId, out var hit) && hit.UserIds.SequenceEqual(UserIdsOf(userId)))
             {
                 result[userId] = hit.ConsentedVersionIds;
             }
@@ -119,7 +140,7 @@ internal sealed class CachingConsentService(
                     ? v
                     : new HashSet<Guid>();
                 var frozen = new HashSet<Guid>(versions);
-                Set(userId, new UserConsentInfo(userId, frozen));
+                Set(userId, new UserConsentInfo(userId, frozen, UserIdsOf(userId)));
                 result[userId] = frozen;
             }
         }
@@ -151,18 +172,24 @@ internal sealed class CachingConsentService(
         // Dashboard view needs full ConsentRecord history with document name
         // + version-number stitching — that's record-level data, not version
         // ids; the per-version-id cache here can't answer it. Pass through.
-        WithInner(inner => inner.GetConsentDashboardAsync(userId, ct));
+        WithInnerAsync(inner => inner.GetConsentDashboardAsync(userId, ct));
 
     public Task<ConsentReviewDetail?> GetConsentReviewDetailAsync(
         Guid documentVersionId, Guid userId, CancellationToken ct = default) =>
-        WithInner(inner => inner.GetConsentReviewDetailAsync(documentVersionId, userId, ct));
+        WithInnerAsync(inner => inner.GetConsentReviewDetailAsync(documentVersionId, userId, ct));
 
     public Task<int> GetConsentRecordCountAsync(Guid userId, CancellationToken ct = default) =>
-        WithInner(inner => inner.GetConsentRecordCountAsync(userId, ct));
+        WithInnerAsync(inner => inner.GetConsentRecordCountAsync(userId, ct));
 
     public Task<IReadOnlyList<string>> GetPendingDocumentNamesAsync(
         Guid userId, CancellationToken ct = default) =>
-        WithInner(inner => inner.GetPendingDocumentNamesAsync(userId, ct));
+        WithInnerAsync(inner => inner.GetPendingDocumentNamesAsync(userId, ct));
+
+    public Task<ConsentReviewInfo> GetConsentReviewAsync(Guid userId, CancellationToken ct = default) =>
+        WithInnerAsync(inner => inner.GetConsentReviewAsync(userId, ct));
+
+    public Task<IReadOnlyDictionary<Guid, ConsentReviewInfo>> GetConsentReviewsAsync(CancellationToken ct = default) =>
+        WithInnerAsync(inner => inner.GetConsentReviewsAsync(ct));
 
     // ==========================================================================
     // Writes — synchronous invalidation before return
@@ -195,8 +222,7 @@ internal sealed class CachingConsentService(
         // and trusting the inner is consistent (both go through IUserService).
         await using (var scope = scopeFactory.CreateAsyncScope())
         {
-            var userService = scope.ServiceProvider.GetRequiredService<IUserService>();
-            chainIds = (await userService.GetUserInfoAsync(userId, ct))?.AllUserIds ?? [userId];
+            chainIds = await GetUserIdsAsync(userId, ct);
 
             var inner = scope.ServiceProvider.GetRequiredKeyedService<IConsentManagement>(InnerServiceKey);
             result = await inner.SubmitConsentAsync(
@@ -224,24 +250,6 @@ internal sealed class CachingConsentService(
     }
 
     // ==========================================================================
-    // IConsentCacheInvalidator
-    // ==========================================================================
-
-    public void InvalidateUser(Guid userId)
-    {
-        // warmOnStartup:false — dropping the key is safe; the next read
-        // lazy-loads via LoadRowAsync. No need to drive ReplaceAsync from
-        // the synchronous invalidator surface (callers like AccountMerge
-        // hold no CancellationToken contract for an awaited refresh).
-        Invalidate(userId);
-    }
-
-    public void InvalidateAll()
-    {
-        Clear();
-    }
-
-    // ==========================================================================
     // Per-user loader plugged into TrackedCache.GetAsync / ReplaceAsync
     // ==========================================================================
 
@@ -257,19 +265,25 @@ internal sealed class CachingConsentService(
         Guid userId, CancellationToken ct)
     {
         // The inner service chain-follows merge ids itself; this loader just
-        // reads through it.
-        var versions = await WithInner(inner => inner.GetConsentedVersionIdsAsync(userId, ct));
+        // reads through it. The id list is read first, so the entry is never
+        // tagged with a list newer than the one its set was built over.
+        var userIds = await GetUserIdsAsync(userId, ct);
+        var versions = await WithInnerAsync(inner => inner.GetConsentedVersionIdsAsync(userId, ct));
 
         // Copy so the cached snapshot never aliases the inner service's set.
         var frozen = new HashSet<Guid>(versions);
-        return new UserConsentInfo(userId, frozen);
+        return new UserConsentInfo(userId, frozen, userIds);
     }
+
+    /// <summary>Every id the human behind <paramref name="userId"/> has held, as the inner service resolves it.</summary>
+    private async Task<IReadOnlyList<Guid>> GetUserIdsAsync(Guid userId, CancellationToken ct) =>
+        (await userService.GetUserInfoAsync(userId, ct))?.AllUserIds ?? [userId];
 
     // ==========================================================================
     // Inner-service resolution
     // ==========================================================================
 
-    private async Task<TResult> WithInner<TResult>(Func<IConsentManagement, Task<TResult>> action)
+    private async Task<TResult> WithInnerAsync<TResult>(Func<IConsentManagement, Task<TResult>> action)
     {
         await using var scope = scopeFactory.CreateAsyncScope();
         var inner = scope.ServiceProvider.GetRequiredKeyedService<IConsentManagement>(InnerServiceKey);

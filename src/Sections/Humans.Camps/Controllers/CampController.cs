@@ -1,7 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Humans.Base.Enums;
-using Humans.Base.Helpers;
 
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Localization;
@@ -63,7 +62,7 @@ internal sealed class CampController(
         var directoryCards = ApplyDirectoryFilters(
             camps
                 .Select(camp => new { Camp = camp, Season = camp.GetSeasonForYear(year) })
-                .Where(row => row.Season is { Status: CampSeasonStatus.Active or CampSeasonStatus.Full })
+                .Where(row => row.Season is { IsPublic: true })
                 .Select(row => MapCampCard(row.Camp, row.Season!, roleSummaries)),
             filters);
 
@@ -78,9 +77,7 @@ internal sealed class CampController(
             myCamps = camps
                 .Where(camp => leadCampIds.Contains(camp.Id))
                 .Select(camp => new { Camp = camp, Season = camp.GetSeasonForYear(year) })
-                .Where(row => row.Season is not null &&
-                    row.Season.Status != CampSeasonStatus.Active &&
-                    row.Season.Status != CampSeasonStatus.Full)
+                .Where(row => row.Season is { IsPublic: false })
                 .Select(row => MapCampCard(row.Camp, row.Season!, roleSummaries))
                 .Where(card => cards.All(publicCard => publicCard.Id != card.Id))
                 .ToList();
@@ -490,7 +487,7 @@ internal sealed class CampController(
 
         // Full is informational only (Peter, 2026-08-20) — it must not disable camp
         // management, so role management stays available on a Full season too.
-        var openSeason = camp.Seasons.FirstOrDefault(s => s.Status is CampSeasonStatus.Active or CampSeasonStatus.Full);
+        var openSeason = camp.Seasons.FirstOrDefault(s => s.IsPublic);
         viewModel.RolesPanel = openSeason is null
             ? null
             : await BuildRolesPanelAsync(camp.Slug, openSeason, canManage: true, ct);
@@ -1041,7 +1038,7 @@ internal sealed class CampController(
         if (errorResult is not null) return errorResult;
 
         var openSeason = camp.Seasons.FirstOrDefault(s => s.Members.Any(member => member.Id == campMemberId)
-            && s.Status is CampSeasonStatus.Active or CampSeasonStatus.Full);
+            && s.IsPublic);
         var outcome = openSeason is null
             ? AssignCampRoleOutcome.SeasonNotFound
             : await campRoleService.AssignAsync(openSeason.Id, roleDefinitionId, campMemberId, user.Id, ct);
@@ -1158,10 +1155,10 @@ internal sealed class CampController(
         ViewBag.IsCityPlanningTeamMember =
             await cityPlanningService.IsCityPlanningTeamMemberAsync(currentUser.Id, cancellationToken);
 
+        // Null when no event is active: placement reads as closed, with no scheduled dates.
         var settings = await cityPlanningService.GetSettingsAsync(cancellationToken);
-        ViewBag.PlacementIsOpen = settings.IsPlacementOpen;
-        ViewBag.PlacementOpensAt = settings.PlacementOpensAt;
-        ViewBag.PlacementClosesAt = settings.PlacementClosesAt;
+        ViewBag.PlacementState = settings?.PlacementState ?? BarrioPlacementState.Closed;
+        ViewBag.PlacementSchedule = (settings?.PlacementOpensOn, settings?.PlacementClosesOn, settings?.PlacementChangeableUntilOn);
     }
 
     private static CampSeasonData MapToSeasonData(CampRegisterViewModel model)

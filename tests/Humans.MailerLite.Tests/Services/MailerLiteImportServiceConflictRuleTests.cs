@@ -1,3 +1,4 @@
+using Humans.Email.Contracts;
 using Humans.AuditLog.Contracts;
 using Humans.MailerLite.Services.Dtos;
 using Humans.Users.Contracts;
@@ -33,7 +34,7 @@ public class MailerLiteImportServiceConflictRuleTests
         var plan = MakePlan("user@x.com", "bounced", SubscriberOutcome.VerifiedFlipToOptOut, userId);
         await harness.Service.ApplyAsync(plan, Guid.NewGuid(), ct: Xunit.TestContext.Current.CancellationToken);
 
-        await harness.Prefs.AssertUpdated(userId, MessageCategory.Marketing, optedOut: true, source: "MailerLiteSync");
+        await harness.Prefs.AssertUpdatedAsync(userId, MessageCategory.Marketing, optedOut: true, source: "MailerLiteSync");
     }
 
     // (b) Keeps Humans state when user-action AND newer.
@@ -59,7 +60,7 @@ public class MailerLiteImportServiceConflictRuleTests
         var plan = MakePlan("user@x.com", "unsubscribed", SubscriberOutcome.VerifiedKeepHumansPref, userId);
         await harness.Service.ApplyAsync(plan, Guid.NewGuid(), ct: Xunit.TestContext.Current.CancellationToken);
 
-        await harness.Prefs.AssertNotUpdated(userId, MessageCategory.Marketing);
+        await harness.Prefs.AssertNotUpdatedAsync(userId, MessageCategory.Marketing);
     }
 
     // (c) Overwrites Humans state when sync-source OR older.
@@ -85,7 +86,7 @@ public class MailerLiteImportServiceConflictRuleTests
         var plan = MakePlan("user@x.com", "unsubscribed", SubscriberOutcome.VerifiedFlipToOptOut, userId);
         await harness.Service.ApplyAsync(plan, Guid.NewGuid(), ct: Xunit.TestContext.Current.CancellationToken);
 
-        await harness.Prefs.AssertUpdated(userId, MessageCategory.Marketing, optedOut: true, source: "MailerLiteSync");
+        await harness.Prefs.AssertUpdatedAsync(userId, MessageCategory.Marketing, optedOut: true, source: "MailerLiteSync");
     }
 
     private static ImportPlan MakePlan(string email, string status, SubscriberOutcome outcome, Guid? userId)
@@ -108,6 +109,7 @@ internal sealed class ApplyHarness
     private readonly IMailerLiteService _ml = Substitute.For<IMailerLiteService>();
     private readonly IUserEmailService _userEmails = Substitute.For<IUserEmailService>();
     private readonly ICommunicationPreferenceService _prefs = Substitute.For<ICommunicationPreferenceService>();
+    private readonly ICommunicationPreferenceWrite _prefWrite = Substitute.For<ICommunicationPreferenceWrite>();
     private readonly IAuditLogService _audit = Substitute.For<IAuditLogService>();
 
     public PrefsVerifier Prefs { get; }
@@ -126,7 +128,7 @@ internal sealed class ApplyHarness
             .Returns(Task.FromResult<IReadOnlyList<MailerLiteGroup>>(
                 [new MailerLiteGroup(WebsiteGroupId, "Website", 0, 0, 0, 0, 0)]));
 
-        Prefs = new PrefsVerifier(_prefs);
+        Prefs = new PrefsVerifier(_prefWrite);
 
         Service = new MailerLiteImportService(
             _ml,
@@ -134,6 +136,7 @@ internal sealed class ApplyHarness
             Substitute.For<IUserService>(),
             Substitute.For<IAccountProvisioningService>(),
             _prefs,
+            _prefWrite,
             _audit,
             InMemoryMailerLiteRepository.New(),
             new FakeClock(Instant.FromUtc(2026, 5, 12, 12, 0)),
@@ -174,7 +177,7 @@ internal sealed class ApplyHarness
                 Arg.Is<Guid>(id => id == userId), category, Arg.Any<CancellationToken>())
             .Returns(Task.FromResult<CommunicationPreferenceSnapshot?>(pref));
 
-        _prefs.UpdatePreferenceAsync(
+        _prefWrite.UpdatePreferenceAsync(
                 Arg.Any<Guid>(), Arg.Any<MessageCategory>(), Arg.Any<bool>(),
                 Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(Task.CompletedTask);
@@ -182,17 +185,17 @@ internal sealed class ApplyHarness
 }
 
 /// <summary>
-/// Assertion helpers for <see cref="ICommunicationPreferenceService"/> mock calls.
+/// Assertion helpers for <see cref="ICommunicationPreferenceWrite"/> mock calls.
 /// </summary>
-internal sealed class PrefsVerifier(ICommunicationPreferenceService mock)
+internal sealed class PrefsVerifier(ICommunicationPreferenceWrite mock)
 {
-    public async Task AssertUpdated(Guid userId, MessageCategory category, bool optedOut, string source)
+    public async Task AssertUpdatedAsync(Guid userId, MessageCategory category, bool optedOut, string source)
     {
         await mock.Received(1).UpdatePreferenceAsync(
             userId, category, optedOut, source, Arg.Any<CancellationToken>());
     }
 
-    public async Task AssertNotUpdated(Guid userId, MessageCategory category)
+    public async Task AssertNotUpdatedAsync(Guid userId, MessageCategory category)
     {
         await mock.DidNotReceive().UpdatePreferenceAsync(
             userId, category, Arg.Any<bool>(), Arg.Any<string>(), Arg.Any<CancellationToken>());

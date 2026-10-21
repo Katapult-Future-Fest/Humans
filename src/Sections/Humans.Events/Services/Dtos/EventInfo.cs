@@ -1,4 +1,3 @@
-using Humans.Events.Services;
 using Humans.Events.Domain;
 using NodaTime;
 using Humans.Events.Contracts;
@@ -113,6 +112,15 @@ internal sealed record EventInfo(
     /// </summary>
     public bool CanWithdraw => Event.IsWithdrawableBySubmitter(Status, CampId is not null);
 
+    /// <inheritdoc cref="Event.IsAllDay"/>
+    public bool IsAllDay => DurationMinutes == Event.AllDayDurationMinutes;
+
+    /// <summary>
+    /// Whether a submitter edit is a resubmission after moderation sent the event back
+    /// (rejected, or edits requested).
+    /// </summary>
+    public bool IsResubmission => Status is EventStatus.Rejected or EventStatus.ResubmitRequested;
+
     /// <summary>
     /// Expands this event into concrete occurrence instants. A non-null
     /// <paramref name="dayOffset"/> narrows a recurring event to the single
@@ -122,6 +130,25 @@ internal sealed record EventInfo(
         EventRecurrenceDays.GetOccurrenceInstants(
             StartAt, IsRecurring, RecurrenceDays, gateOpeningDate, timeZone, dayOffset);
 }
+
+/// <summary>
+/// The editable fields of an event, as posted by a submitter or moderator edit
+/// form. <see cref="VenueId"/> applies to individual events only and
+/// <see cref="PriorityRank"/> to camp events only; the event's own
+/// <c>CampId</c> decides which set the service applies.
+/// </summary>
+internal sealed record EventEdit(
+    Guid CategoryId,
+    Guid? VenueId,
+    string Title,
+    string Description,
+    Instant StartAt,
+    int DurationMinutes,
+    string? LocationNote,
+    string? Host,
+    bool IsRecurring,
+    string? RecurrenceDays,
+    int? PriorityRank);
 
 /// <summary>
 /// A favourited event projected for the personal schedule / favourites API —

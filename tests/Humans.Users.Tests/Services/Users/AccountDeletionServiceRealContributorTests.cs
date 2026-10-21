@@ -1,9 +1,9 @@
 using AwesomeAssertions;
+using Humans.Users.Data;
 using Humans.Application.Services.Users.AccountLifecycle;
 using Humans.AuditLog.Contracts;
 using Humans.Auth.Contracts;
 using Humans.Base.Interfaces;
-using Humans.Base.Interfaces.Caching;
 using Humans.Email.Contracts;
 using Humans.Gdpr.Contracts;
 using Humans.Shifts.Contracts;
@@ -15,6 +15,7 @@ using Humans.Users.Services;
 using Humans.Users.Tests.Infrastructure;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Hosting;
 using NSubstitute;
 using Xunit;
 
@@ -47,7 +48,6 @@ public sealed class AccountDeletionServiceRealContributorTests : ServiceTestHarn
             new UserRepository(DbFactory, Clock),
             communicationPreferenceRepo,
             AdminAuthorization,
-            Substitute.For<IRoleAssignmentClaimsCacheInvalidator>(),
             Substitute.For<IFileStorage>(),
             Clock,
             NullLogger<UserService>.Instance, AuditLog);
@@ -61,7 +61,7 @@ public sealed class AccountDeletionServiceRealContributorTests : ServiceTestHarn
         // that contributor leaves on the row, not the (trivial) loop that drives it.
         var gdprService = Substitute.For<IGdprService>();
         gdprService.EraseForUserAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>())
-            .Returns(ci => ((IUserDataContributor)_userService)
+            .Returns(ci => (_userService)
                 .EraseForUserAsync(ci.Arg<Guid>(), ci.Arg<CancellationToken>()));
 
         _service = new AccountDeletionService(
@@ -71,14 +71,12 @@ public sealed class AccountDeletionServiceRealContributorTests : ServiceTestHarn
             Substitute.For<IRoleAssignmentWrite>(),
             gdprService,
             _ticketQueryService,
-            Substitute.For<IUserInfoInvalidator>(),
-            Substitute.For<IRoleAssignmentClaimsCacheInvalidator>(),
-            Substitute.For<IShiftAuthorizationInvalidator>(),
-            Substitute.For<IShiftViewInvalidator>(),
+            Substitute.For<IUserInfoSliceRefresher>(),
             Substitute.For<IAuditLogService>(),
             Substitute.For<IEmailService>(),
             TestUsersEmails.Create(),
             Clock,
+            Substitute.For<IHostEnvironment>(),
             NullLogger<AccountDeletionService>.Instance);
     }
 
@@ -127,7 +125,7 @@ public sealed class AccountDeletionServiceRealContributorTests : ServiceTestHarn
             user.Id, TestContext.Current.CancellationToken);
 
         summary.Should().NotBeNull();
-        summary.OriginalDisplayName.Should().Be("Expired Human");
+        summary.OriginalBurnerName.Should().Be("Expired Human");
 
         ClearAllTrackers();
         var anonymized = await Db.Users.AsNoTracking()

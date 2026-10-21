@@ -12,7 +12,6 @@ using Humans.CityPlanning.Contracts;
 using Humans.Base.Constants;
 using Humans.Base.Enums;
 using Microsoft.AspNetCore.Identity;
-using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Options;
 using NodaTime;
 
@@ -35,13 +34,12 @@ internal sealed class DevPersonaSeeder(
     IUserEmailService userEmailService,
     IContactFieldService contactFieldService,
     IRoleAssignmentWrite roleAssignmentService,
-    IUserInfoInvalidator userInfoInvalidator,
     ITeamService teamService,
     ITeamWrite teamWrite,
     ITeamSeeding teamSeeding,
     ISystemTeamSync systemTeamSync,
     IUserService userService,
-    IUserWrite userWrite,
+    IConsentWrite consentWrite,
     IAuditLogService auditLogService,
     ICampService campService,
     ICampSeeding campSeeding,
@@ -50,7 +48,6 @@ internal sealed class DevPersonaSeeder(
     IMembershipCalculator membershipCalculator,
     IHumanLifecycleService humanLifecycleService,
     IClock clock,
-    IMemoryCache cache,
     IOptions<CityPlanningOptions> cityPlanningOptions,
     ILogger<DevPersonaSeeder> logger)
 {
@@ -100,7 +97,6 @@ internal sealed class DevPersonaSeeder(
         var user = new User
         {
             Id = id,
-            DisplayName = displayName,
             BurnerName = displayName,
             CreatedAt = now,
             LastLoginAt = now
@@ -126,22 +122,16 @@ internal sealed class DevPersonaSeeder(
             lastName: lastName,
             bio: $"Dev persona for testing the {displayNameSuffix} role.");
 
-        var save = await profileEditorService.SaveProfileAsync(id, displayName, saveRequest);
+        var save = await profileEditorService.SaveProfileAsync(id, saveRequest);
         if (!save.Succeeded)
             throw new InvalidOperationException("Dev persona profile validation failed.");
         var profileId = save.ProfileId!.Value;
 
         // Mark approved + cleared so the dev persona skips the consent gate
-        // and lands on the dashboard. The CachingUserService decorator handles
-        // the UserInfo profile-slice refresh after the storage write.
+        // and lands on the dashboard (Consent's review row).
         const string consentNotes = "Dev persona - auto-seeded";
-        var consentCheckResult = await userWrite.ApplyProfileOnboardingMutationAsync(
-            id,
-            new UserProfileOnboardingCommand(
-                UserProfileOnboardingMutation.RecordConsentCheck,
-                ActorUserId: id,
-                ConsentCheckStatus: ConsentCheckStatus.Cleared,
-                Notes: consentNotes));
+        var consentCheckResult = await consentWrite.RecordConsentCheckAsync(
+            id, ConsentCheckStatus.Cleared, id, consentNotes);
         if (!consentCheckResult.Success)
         {
             logger.LogWarning(
@@ -200,9 +190,6 @@ internal sealed class DevPersonaSeeder(
         // them are suspended by the nightly SuspendNonCompliantMembersJob once a
         // document's grace period lapses (#867).
         await EnsureActiveAsync(id);
-
-        cache.InvalidateUserAccess(id);
-        await userInfoInvalidator.InvalidateAsync(id);
 
         logger.LogInformation(
             "DEV: seeded persona {Email} with roles [{Roles}]",
@@ -320,7 +307,6 @@ internal sealed class DevPersonaSeeder(
         var user = new User
         {
             Id = id,
-            DisplayName = displayName,
             BurnerName = displayName,
             CreatedAt = now,
             LastLoginAt = now
@@ -365,7 +351,6 @@ internal sealed class DevPersonaSeeder(
 
         var save = await profileEditorService.SaveProfileAsync(
             userId,
-            burnerName,
             BuildPersonaProfileRequest(
                 burnerName: burnerName,
                 firstName: string.Empty,
@@ -583,10 +568,6 @@ internal sealed class DevPersonaSeeder(
 
         if (changed)
         {
-            teamWrite.InvalidateActiveTeamsCache();
-            cache.InvalidateUserAccess(coordinatorUserId);
-            // Team membership changes ripple into UserInfo (active-teams shape)
-            await userInfoInvalidator.InvalidateAsync(coordinatorUserId);
             logger.LogInformation(
                 "DEV: ensured coordinator teams — department {DeptId}, sub-team {SubTeamId}",
                 department.Id, subTeam.Id);
@@ -626,7 +607,6 @@ internal sealed class DevPersonaSeeder(
             return;
         }
 
-        var changed = false;
         var team = await teamService.GetTeamBySlugAsync(teamSlug);
         if (team is null)
         {
@@ -642,19 +622,10 @@ internal sealed class DevPersonaSeeder(
                 "City Planning",
                 "Dev-seeded city planning team",
                 requiresApproval: false);
-            changed = true;
             logger.LogInformation("DEV: seeded city planning team {Slug}", teamSlug);
         }
 
-        changed |= await EnsureSeededTeamMembershipAsync(team.Id, userId, TeamMemberRole.Coordinator, clock.GetCurrentInstant());
-
-        if (changed)
-        {
-            teamWrite.InvalidateActiveTeamsCache();
-            cache.InvalidateUserAccess(userId);
-            // Team membership changes ripple into UserInfo (active-teams shape)
-            await userInfoInvalidator.InvalidateAsync(userId);
-        }
+        await EnsureSeededTeamMembershipAsync(team.Id, userId, TeamMemberRole.Coordinator, clock.GetCurrentInstant());
     }
 
     /// <summary>

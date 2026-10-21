@@ -1,3 +1,4 @@
+using Humans.Consent.Contracts;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Localization;
 using System.Security.Claims;
@@ -50,7 +51,7 @@ public sealed class NotificationInboxReadTests : IDisposable
         _sut = new NotificationInboxRead(
             _inbox,
             new NotificationMeterProvider(
-                _users, _google, _teams, _tickets, _applications, _camps, _cache,
+                _users, Substitute.For<IConsentService>(), _google, _teams, _tickets, _applications, _camps, _cache,
                 NullLogger<NotificationMeterProvider>.Instance,
                 _localization.GetRequiredService<IStringLocalizer<NotificationsResource>>()));
     }
@@ -141,7 +142,7 @@ public sealed class NotificationInboxReadTests : IDisposable
         var snapshot = await _sut.GetUnreadInboxAsync(new ClaimsPrincipal(new ClaimsIdentity()), Xunit.TestContext.Current.CancellationToken);
 
         snapshot.Notifications.Should().BeEmpty();
-        await _inbox.DidNotReceiveWithAnyArgs().GetInboxAsync(default, default, default!, default!, default);
+        await _inbox.DidNotReceiveWithAnyArgs().GetInboxAsync(default, default, default!, default!);
     }
 
     private static ClaimsPrincipal Principal(Guid userId, params string[] roles)

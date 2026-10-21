@@ -66,7 +66,7 @@ public abstract class RideshareTestHarness : IDisposable
 
         RouteProvider = Substitute.For<IRouteProvider>();
         RouteProvider.GeocodeAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
-            .Returns((GeoPoint?)DefaultPoint);
+            .Returns(DefaultPoint);
         RouteProvider.GetRouteGeoJsonAsync(Arg.Any<IReadOnlyList<GeoPoint>>(), Arg.Any<CancellationToken>())
             .Returns(DefaultRouteJson);
 
@@ -254,7 +254,7 @@ public abstract class RideshareTestHarness : IDisposable
 
     private static UserInfo UserInfoFor(Guid id, string burnerName) => new(
         id, burnerName, false, "en", null, Instant.FromUtc(2026, 1, 1, 0, 0),
-        null, null, null, null, null, false, false, null, null, null,
+        null, null, null, null, null, null, null,
         null, null, null, [], [], [], null, []);
 
     public void Dispose()

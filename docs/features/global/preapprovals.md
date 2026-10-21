@@ -154,7 +154,7 @@ Applied ──approve──▶ Open ──report submitted──▶ Claimed ─�
 | Coordinator / Finance reject | Draft | Stays `Claimed` by the same report; the member fixes and resubmits (idempotent claim, fresh stamp) |
 | Withdraw from Submitted / CoordinatorEndorsed | Withdrawn (terminal) | `Claimed → Open` (`ReleaseAsync`). `ExpenseReportId` kept for the trail. The member files a **new** report against the reopened grant; the withdrawn one is dead, as in Expenses today |
 | Approve | Approved | `Claimed → Consumed` (`ConsumeAsync`), same transaction as the Holded push enqueue |
-| Withdraw from Approved | Withdrawn | Grant stays `Consumed`. The Holded documents were booked and Expenses retains them; as far as the books know the money was authorized and spent. Nothing reopens |
+| Withdraw from Approved | Refused | Not allowed: approval has already queued the Holded push. The grant stays `Consumed` |
 
 ## Program ceiling
 
@@ -233,8 +233,8 @@ Builds on Phase 2's `ExpenseReport.HoldedAccountNumber` / nullable category.
   in the same transaction as the Holded push enqueue.
 - **Reject (either decider):** nothing on the grant; the report is back in `Draft` and still
   holds it. **Withdraw before approval:** `ReleaseAsync`; the grant reopens and the member files
-  a new report (a withdrawn report is terminal in Expenses). **Withdraw after approval:** nothing
-  on the grant; it stays `Consumed`. The table under the state machine is the full matrix.
+  a new report (a withdrawn report is terminal in Expenses). **Withdraw after approval:** refused
+  (approval has queued the Holded push); the grant stays `Consumed`. The table under the state machine is the full matrix.
 - **Detail view:** a "Pre-approved: {ProgramName} · {Label} · up to {MaxAmount} · claim by
   {ClaimBy}" banner for everyone who can see the report.
 - **Deadline on screen:** the New form, the Draft edit page and the detail view show `ClaimBy`
@@ -249,8 +249,8 @@ Builds on Phase 2's `ExpenseReport.HoldedAccountNumber` / nullable category.
 
 | Route | Who | What |
 |-------|-----|------|
-| `/Preapprovals` | Authenticated | My grants, all statuses: program, label, amount, status, **claim by** (prominent, danger style inside 7 days, "deadline passed" after). A row links to `/Expenses/New?grant={id}` only while it is **claimable** (`Open` and `ClaimBy` not passed); a "deadline passed" row has no link. The open ones also appear at the top of `/Expenses`, which is where most people will file from. Programs accepting applications are listed below with an Apply button. |
-| `/Preapprovals/{programId}` | Authenticated | Program page: description, per-person amount or "amount on request", claim deadline, "Apply for a pre-approval" form when `Status == Open` **and** `AcceptsApplications` **and** `ClaimBy` not passed (note; requested amount on `PerGrantAmount` programs). The GET hides the form and the POST returns 400 when any of the three is false. One application per person per program; a second submit edits the pending one. |
+| `/Preapprovals` | Board, FinanceAdmin, Admin, a program manager, a grant holder, or anyone while a program accepts applications (`PreapprovalsAccess`) | My grants, all statuses: program, label, amount, status, **claim by** (prominent, danger style inside 7 days, "deadline passed" after). A row links to `/Expenses/New?grant={id}` only while it is **claimable** (`Open` and `ClaimBy` not passed); a "deadline passed" row has no link. The open ones also appear at the top of `/Expenses`, which is where most people will file from. Programs accepting applications are listed below with an Apply button. |
+| `/Preapprovals/{programId}` | Same (`PreapprovalsAccess`) | Program page: description, per-person amount or "amount on request", claim deadline, "Apply for a pre-approval" form when `Status == Open` **and** `AcceptsApplications` **and** `ClaimBy` not passed (note; requested amount on `PerGrantAmount` programs). The GET hides the form and the POST returns 400 when any of the three is false. One application per person per program; a second submit edits the pending one. |
 
 ### Manager side (`/Preapprovals/Admin/*`, its own `PreapprovalsAdminController`, localization-exempt, per `no-admin-url-section`)
 
@@ -405,7 +405,7 @@ Steps 2 and 3 can be built in parallel once Phase 2 is on QA; 3 merges after 2.
   the program's current account, overwriting it; resubmit after reject restamps; submit after `ClaimBy` refused;
   submit on a non-claimable grant refused; endorsement skipped; approve cannot raise the cap above the grant's current amount or
   change the account, and a blank cap keeps the grant's current amount; reject leaves the grant `Claimed`; withdraw before approval releases;
-  withdraw after approval leaves it `Consumed`; approve consumes in the same transaction as the
+  withdraw after approval is refused; approve consumes in the same transaction as the
   push enqueue; on-behalf filing restricted to the member's own grants.
 
 ## Related

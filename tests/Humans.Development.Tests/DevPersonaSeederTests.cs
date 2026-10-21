@@ -11,7 +11,6 @@ using Humans.Teams.Contracts;
 using Humans.Base.Enums;
 using Humans.Development.Services;
 using Microsoft.AspNetCore.Identity;
-using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NodaTime;
@@ -34,13 +33,12 @@ public class DevPersonaSeederTests
     private readonly IUserEmailService _userEmails = Substitute.For<IUserEmailService>();
     private readonly IContactFieldService _contactFields = Substitute.For<IContactFieldService>();
     private readonly IRoleAssignmentWrite _roleAssignments = Substitute.For<IRoleAssignmentWrite>();
-    private readonly IUserInfoInvalidator _userInfoInvalidator = Substitute.For<IUserInfoInvalidator>();
     private readonly ITeamService _teams = Substitute.For<ITeamService>();
     private readonly ITeamWrite _teamsWrite = Substitute.For<ITeamWrite>();
     private readonly ITeamSeeding _teamSeeding = Substitute.For<ITeamSeeding>();
     private readonly ISystemTeamSync _systemTeamSync = Substitute.For<ISystemTeamSync>();
     private readonly IUserService _users = Substitute.For<IUserService>();
-    private readonly IUserWrite _usersWrite = Substitute.For<IUserWrite>();
+    private readonly IConsentWrite _consentWrite = Substitute.For<IConsentWrite>();
     private readonly IAuditLogService _audit = Substitute.For<IAuditLogService>();
     private readonly ICampService _camps = Substitute.For<ICampService>();
     private readonly ICampSeeding _campSeeding = Substitute.For<ICampSeeding>();
@@ -49,11 +47,10 @@ public class DevPersonaSeederTests
     private readonly IMembershipCalculator _membershipCalculator = Substitute.For<IMembershipCalculator>();
     private readonly IHumanLifecycleService _humanLifecycle = Substitute.For<IHumanLifecycleService>();
     private readonly FakeClock _clock = new(Instant.FromUtc(2026, 7, 13, 12, 0));
-    private readonly IMemoryCache _cache = new MemoryCache(new MemoryCacheOptions());
 
     public DevPersonaSeederTests()
     {
-        _profileEditor.SaveProfileAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<ProfileSaveRequest>(), Arg.Any<CancellationToken>())
+        _profileEditor.SaveProfileAsync(Arg.Any<Guid>(), Arg.Any<ProfileSaveRequest>(), Arg.Any<CancellationToken>())
             .Returns(new ProfileEditResult(true, Guid.NewGuid()));
     }
 
@@ -63,13 +60,12 @@ public class DevPersonaSeederTests
         _userEmails,
         _contactFields,
         _roleAssignments,
-        _userInfoInvalidator,
         _teams,
         _teamsWrite,
         _teamSeeding,
         _systemTeamSync,
         _users,
-        _usersWrite,
+        _consentWrite,
         _audit,
         _camps,
         _campSeeding,
@@ -78,7 +74,6 @@ public class DevPersonaSeederTests
         _membershipCalculator,
         _humanLifecycle,
         _clock,
-        _cache,
         Options.Create(new CityPlanningOptions()),
         NullLogger<DevPersonaSeeder>.Instance);
 
@@ -248,7 +243,7 @@ public class DevPersonaSeederTests
         first.Should().NotBe(second);
         created.Select(u => u.Id).Should().Equal(first, second);
         await _profileEditor.DidNotReceive().SaveProfileAsync(
-            Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<ProfileSaveRequest>(), Arg.Any<CancellationToken>());
+            Arg.Any<Guid>(), Arg.Any<ProfileSaveRequest>(), Arg.Any<CancellationToken>());
     }
 
     [HumansFact]
@@ -263,7 +258,6 @@ public class DevPersonaSeederTests
 
         await _profileEditor.Received(1).SaveProfileAsync(
             userId,
-            "Dev Board",
             Arg.Is<ProfileSaveRequest>(r =>
                 r.BurnerName == "Dev Board" && r.FirstName.Length == 0 && r.LastName.Length == 0),
             Arg.Any<CancellationToken>());

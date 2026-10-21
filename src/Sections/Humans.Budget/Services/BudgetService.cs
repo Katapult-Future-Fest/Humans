@@ -611,6 +611,7 @@ internal sealed class BudgetService(
             TotalIncome = totalIncome,
             TotalExpenses = totalExpenses,
             NetBalance = netBalance,
+            TotalLineItems = budgetLineItems.Sum(li => li.Amount),
             IncomeSlices = incomeSlices,
             ExpenseSlices = expenseSlices
         };
@@ -649,6 +650,7 @@ internal sealed class BudgetService(
             TotalIncome = summary.TotalIncome,
             TotalExpenses = summary.TotalExpenses,
             NetBalance = summary.NetBalance,
+            TotalLineItems = summary.TotalLineItems,
             IncomeSlices = allIncomeEntries
                 .Select(s => new BudgetSliceResult
                 {
@@ -666,28 +668,6 @@ internal sealed class BudgetService(
                 })
                 .ToList()
         };
-    }
-
-    public IReadOnlyList<VatCashFlowEntry> ComputeVatCashFlowEntries(IReadOnlyList<BudgetGroupDetail> groups)
-    {
-        return groups
-            .SelectMany(g => g.Categories)
-            .SelectMany(c => c.LineItems)
-            .Where(li => li.VatRate > 0 && li.ExpectedDate.HasValue)
-            .Select(li =>
-            {
-                var vatAmount = ComputeVatPortion(li.Amount, li.VatRate);
-                // Income → VAT liability (expense); expense → VAT credit (income).
-                var cashFlowAmount = li.Amount > 0 ? -vatAmount : vatAmount;
-                var categoryName = li.Amount > 0 ? "VAT Liability" : "VAT Credits";
-                return new VatCashFlowEntry
-                {
-                    CategoryName = categoryName,
-                    Amount = cashFlowAmount,
-                    SettlementDate = ComputeVatSettlementDate(li.ExpectedDate!.Value)
-                };
-            })
-            .ToList();
     }
 
     /// <summary>
@@ -729,7 +709,10 @@ internal sealed class BudgetService(
                 TicketCount: w.TicketCount,
                 Revenue: w.Revenue,
                 StripeFees: w.StripeFees,
-                TicketTailorFees: w.TicketTailorFees))
+                TicketTailorFees: w.TicketTailorFees,
+                StripeFeeTax: w.StripeFeeTax,
+                StripeFeesTaxUnknown: w.StripeFeesTaxUnknown,
+                StripeFeesUntaxed: w.StripeFeesUntaxed))
             .ToList();
 
         var changed = await repository.SyncTicketingActualsAsync(

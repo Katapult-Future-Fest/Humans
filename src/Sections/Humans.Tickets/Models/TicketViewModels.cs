@@ -1,8 +1,6 @@
-using Humans.Users.Contracts;
 using NodaTime;
 
 using Humans.Base.Models;
-using Humans.Tickets.Contracts;
 using Humans.Tickets.Domain;
 using Humans.Tickets.Services.Dtos;
 
@@ -21,6 +19,8 @@ internal sealed class TicketDashboardViewModel
 
     public decimal TotalStripeFees { get; set; }
     public decimal TotalApplicationFees { get; set; }
+    public decimal TotalFeeTax { get; set; }
+    public decimal TotalWithheldTax { get; set; }
     public decimal NetRevenue { get; set; }
 
     public List<FeeBreakdownByMethod> FeesByPaymentMethod { get; set; } = [];

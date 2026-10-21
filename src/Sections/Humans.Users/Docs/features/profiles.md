@@ -107,7 +107,7 @@ Members can optionally provide emergency contact information for safety at event
 - **Other members**: Cannot see emergency contact information (not shown on public profile views)
 
 ### GDPR
-Emergency contact fields are marked `[PersonalData]` and included in the data export (`ExportData`).
+Emergency contact fields are marked `[PersonalData]` and included in the data export (the `Profile` slice).
 
 ## Membership Status
 
@@ -179,15 +179,15 @@ Profile picture, burner name, pronouns, location (Google Places), birthday, cont
 ### Section 2: Contributor Information (always visible)
 Burner CV entries with "No prior burn experience" checkbox, contribution interests. Includes a note that this info may be considered for tier applications.
 
-### Section 3: Application (initial setup only)
-Membership tier selection, motivation, additional info, Asociado-specific questions. Only shown when `IsInitialSetup` is true. After onboarding, users apply via `/Governance/Applications/Create`.
+### Section 3: Membership tier (initial setup only)
+Describes the Volunteer, Colaborador and Asociado tiers and links to `/Governance/Applications/Create` (new tab); the form carries no tier or application fields. Only shown when `IsInitialSetup` is true. After onboarding, users apply via `/Governance/Applications/Create`.
 
 ### Section 4: Private Information (always visible)
 Legal first name(s), last name, emergency contact, board notes. Prefixed with lock icon and "only visible to you and the board" note.
 
 ### Section Ordering
-- **Normal order:** General → Contributor → Application (if initial) → Private
-- **ShowPrivateFirst:** Private → General → Contributor → Application (if initial)
+- **Normal order:** General → Contributor → Membership tier (if initial) → Private
+- **ShowPrivateFirst:** Private → General → Contributor → Membership tier (if initial)
 - `ShowPrivateFirst` is true when FirstName, LastName, and EmergencyContactName are all empty (new user hasn't filled them in yet)
 
 ### Burner CV Validation
@@ -215,18 +215,18 @@ Users must provide at least one Burner CV entry **or** check the "No prior burn 
 
 ### Data Export (Right of Access)
 
-Members can download all their personal data as JSON from `/Profile/Me/DownloadData`. The export includes profile fields, contact fields, volunteer history, consent records, team memberships, applications, and role assignments. Response headers disable caching (`no-store`).
+Members can download all their personal data as JSON from `/Gdpr/DownloadData`. The export includes profile fields, contact fields, volunteer history, consent records, team memberships, applications, and role assignments. Response headers disable caching (`no-store`).
 
-**Route:** `GET /Profile/Me/DownloadData`
+**Route:** `GET /Gdpr/DownloadData` (served by Gdpr's `MemberDataController`)
 
 ### Account Deletion (Right to Erasure)
 
-Members can request account deletion from the Privacy page (`/Profile/Me/Privacy`). The process uses a 30-day grace period with anonymization rather than hard delete (per decision R-02).
+Members can request account deletion from the Privacy page (`/Consent/MyData`). The process uses a 30-day grace period with anonymization rather than hard delete (per decision R-02).
 
 #### Deletion Workflow
 
 ```
-User requests deletion (/Profile/Me/Privacy/RequestDeletion)
+User requests deletion (/Gdpr/RequestDeletion)
     │
     ├── DeletionRequestedAt = now
     ├── DeletionScheduledFor = now + 30 days
@@ -240,7 +240,7 @@ User requests deletion (/Profile/Me/Privacy/RequestDeletion)
     │   │  30-day grace period                │
     │   │  • User can still log in            │
     │   │  • User can cancel at any time      │
-    │   │    via /User/Deletion/Cancel        │
+    │   │    via /Gdpr/Deletion/Cancel        │
     │   │  • Memberships already revoked      │
     │   │  • Cancellation does NOT restore    │
     │   │    memberships (must rejoin teams)   │
@@ -285,10 +285,10 @@ This two-step approach ensures Google deprovisioning uses the same tested code p
 
 | Route | Method | Purpose |
 |-------|--------|---------|
-| `/Profile/Me/Privacy` | GET | View deletion status, data export link |
-| `/Profile/Me/Privacy/RequestDeletion` | POST | Start 30-day deletion countdown |
-| `/User/Deletion/Cancel` | POST | Cancel pending deletion (`UserController`) |
-| `/Profile/Me/DownloadData` | GET | Download personal data as JSON |
+| `/Consent/MyData` | GET | View deletion status, data export link (Consent's `MyDataController`) |
+| `/Gdpr/RequestDeletion` | POST | Start 30-day deletion countdown (Gdpr's `MemberDataController`) |
+| `/Gdpr/Deletion/Cancel` | POST | Cancel pending deletion (Gdpr's `UserController`) |
+| `/Gdpr/DownloadData` | GET | Download personal data as JSON (Gdpr's `MemberDataController`) |
 
 ## Related Features
 

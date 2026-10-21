@@ -1,17 +1,25 @@
 using Humans.Base.Interfaces;
 using Humans.Governance.Contracts;
-using Humans.Users.Contracts;
 using NodaTime;
 
 namespace Humans.Governance.Services;
 
 /// <summary>
 /// Full Governance tier-application service surface. Other sections depend on
-/// <see cref="IGovernanceService"/> for reads and <see cref="IGovernanceWrite"/> for the submit
-/// path; this adds the renewal-reminder members and admin reads used inside the section.
+/// <see cref="IGovernanceService"/> for reads; this adds the tier term expiry, the
+/// renewal-reminder members and admin reads used inside the section.
 /// </summary>
-internal interface IGovernanceManagement : IGovernanceService, IGovernanceWrite, IApplicationService
+internal interface IGovernanceManagement : IGovernanceService, IApplicationService
 {
+    /// <summary>
+    /// Term expiry for <paramref name="tier"/>: every member holding it without an Approved
+    /// application for it still in term on <paramref name="today"/> drops to their other in-term
+    /// tier, or to Volunteer. Returns each member with the tier written, for the caller's
+    /// <c>TierDowngraded</c> audit entries. Run by <c>MembershipTierExpiryJob</c>.
+    /// </summary>
+    Task<IReadOnlyList<(Guid UserId, MembershipTier NewTier)>> ExpireMembershipTiersAsync(
+        MembershipTier tier, LocalDate today, CancellationToken ct = default);
+
     /// <summary>
     /// Returns the latest <see cref="ApplicationStatus.Approved"/> application per user and tier
     /// when its <c>TermExpiresAt</c> falls between <paramref name="today"/>

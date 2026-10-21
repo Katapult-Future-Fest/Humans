@@ -29,15 +29,15 @@ Repository: `IGateRepository`.
 | gate_scan_events | R/W (append-only verdict log; admit dedupe via unique index on `AdmitDedupeKey`; retention purge; merge reassignment) |
 | gate_settings | R/W (singleton row — general-entry cutoff, minor-age threshold) |
 | gate_staff_pins | R/W (per-staffer PIN hash via `IPasswordHasher<GateStaffPin>`; `AdminEnrolled` flag gates override authority) |
-| EventParticipations | W via `IUserWrite.SetParticipationFromTicketSyncAsync` (**not** a foreign table access — an admit projects an `Attended` participation row through the owning Users service, so consumed camp EE can't be revoked) |
+| tickets_event_participations | W via `ITicketWrite.RecordParticipationAsync` (**not** a foreign table access — an admit projects an `Attended` participation row through the owning Tickets service, so consumed camp EE can't be revoked) |
 
 Cross-section calls via `ITicketService` (barcode → attendee resolved by
 filtering the cached orders projection in memory — no new interface method),
 `IEarlyEntryService` (cached per-user EE for the too-early rule),
-`ISettingsService` (event timezone / active event), `IShiftManagementService`
+`ISettingsService` (event timezone / active event), `IShiftService`
 (gate-crew shift roster for the claim screen, via
 `GetBrowseShiftsAsync`), `IRoleAssignmentService` (server-verified supervisor
-roles for overrides), `IUserWrite` (participation projection),
+roles for overrides), `ITicketWrite` (participation projection),
 `IAuditLogService` (PIN set/reset audit — never the PIN value), plus
 `IPasswordHasher<GateStaffPin>` and `IClock` (cutoff is always evaluated
 against the server clock, never a device clock). Implements `IGateService`,
@@ -68,8 +68,7 @@ gate terminal *sign-in*, not gate *admission*: `GateLoginThrottle`
 (`src/Humans.Web/Services/`, `GateLoginFailures:{sourceIp}` — per-IP
 terminal sign-in throttle) and `GateTerminalAccountSeeder`
 (`src/Sections/Humans.Tickets/Services/`), which provisions the shared
-kiosk account and fires `InvalidateUserAccess` (claims / shift-auth /
-active-teams eviction).
+kiosk account.
 
 ### Background jobs (`Humans.Gate/Jobs/`)
 

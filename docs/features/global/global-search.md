@@ -12,7 +12,7 @@
   src/Sections/Humans.Shifts/Controllers/ShiftsController.cs
   src/Sections/Humans.Shifts/Models/ShiftBrowsePageBuilder.cs
   src/Sections/Humans.Camps.Contracts/CampSearchHit.cs
-  src/Sections/Humans.Shifts.Contracts/IShiftManagementService.cs
+  src/Sections/Humans.Shifts.Contracts/IShiftService.cs
   src/Sections/Humans.Teams.Contracts/TeamSearchHit.cs
 -->
 <!-- freshness:flag-on-change
@@ -103,7 +103,7 @@ The feature matches **each entity's own public fields only** — no cross-modal 
 
 **Acceptance Criteria:**
 - The Teams, Camps and Rotas buckets treat a parseable GUID as an id lookup and skip the visibility filters in US-GS.4 — the hit comes back for a hidden team, a non-public camp season, or a rota hidden from volunteers.
-- Humans are the exception: the id path skips only the `PersonSearchFields` mask, not the eligibility gate. `CachingUserService.SearchUsersAsync` requires `Profile is not null && Profile.RejectedAt is null` on the GUID branch exactly as it does per-row on the text branch, so a profile-less or rejected user resolves to nothing either way.
+- Humans are the exception: the id path skips only the `PersonSearchFields` mask, not the eligibility gate. `CachingUserService.SearchUsersAsync` requires `Profile is not null && !IsRejected` on the GUID branch exactly as it does per-row on the text branch, so a profile-less or rejected user resolves to nothing either way.
 - The hit is scored as an exact match and its URL is the entity's normal page. Opening it re-runs that page's own access checks — a detail page refuses (`/Teams/{slug}` 404s a hidden team, `/Camps/{slug}` 404s a non-public-status season unless the viewer is that camp's lead or a CampAdmin), and a rota's `/Shifts?departmentId={teamId}` listing opens but omits the hidden rota. The refusal is the destination's design, not Search's (see Authorization Model).
 - Rotas carry one further case, about reach rather than visibility. The GUID branch of `ShiftManagementService.SearchAsync` has no event filter, but `/Shifts` always builds from the active event — so a rota belonging to a **past** event resolves to a link that cannot show it, even when it is volunteer-visible. Ruled as designed (nobodies-collective/Humans#998): the id did its routing job and the destination's narrower scope wins. The text branch is already scoped to the active event.
 
@@ -132,7 +132,7 @@ SearchController
          ├── IUserService.SearchUsersAsync(query, PersonSearchFields.PublicAll, limit)   → IReadOnlyList<HumanSearchResult>
          ├── ITeamService.SearchAsync(query, max)                                         → IReadOnlyList<TeamSearchHit>
          ├── ICampService.SearchAsync(query, max)                                         → IReadOnlyList<CampSearchHit>
-         ├── IShiftManagementService.SearchAsync(query, max)                              → IReadOnlyList<RotaSearchHit>
+         ├── IShiftService.SearchAsync(query, max)                              → IReadOnlyList<RotaSearchHit>
          └── IEventService.SearchAsync(query, max)  (skipped when Features:Events is off)  → IReadOnlyList<EventSearchHit>
 ```
 
@@ -161,7 +161,7 @@ Counts reflect every match — there is no cap, so the chip count is the true nu
 | `HumanSearchResult` | `IUserService.SearchUsersAsync` | View passes each hit's id + match context to `<vc:user-search-result>` |
 | `TeamSearchHit (TeamId, Name, Score)` | `ITeamService.SearchAsync` | Key + ordering → `GlobalSearchResult` |
 | `CampSearchHit (CampId, Name, Score)` | `ICampService.SearchAsync` | Key + ordering → `GlobalSearchResult` |
-| `RotaSearchHit (RotaId, Name, Score)` | `IShiftManagementService.SearchAsync` | Key + ordering → `GlobalSearchResult` |
+| `RotaSearchHit (RotaId, Name, Score)` | `IShiftService.SearchAsync` | Key + ordering → `GlobalSearchResult` |
 | `EventSearchHit (EventId, Title, Score)` | `IEventService.SearchAsync` | Key + ordering → `GlobalSearchResult` |
 | `GlobalSearchResult (Type, Key, SortKey, Score)` | Orchestrator | `Key` is a `Guid` for every bucket; view passes it to the owning section's `<vc:…-search-result>` |
 | `GlobalSearchResults (Query, Humans, Teams, Camps, Shifts, Events)` | `ISearchService` | View-model / view |

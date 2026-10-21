@@ -1,4 +1,3 @@
-using System.Text;
 using System.Globalization;
 using System.Resources;
 using Humans.GoogleIntegration.Contracts;
@@ -28,14 +27,11 @@ internal sealed class TeamService(
     ITeamRepository repo,
     IAuditLogService auditLogService,
     INotificationEmitter notificationService,
-    IShiftManagementService shiftManagementService,
-    INotificationMeterCacheInvalidator notificationMeterInvalidator,
-    IShiftAuthorizationInvalidator shiftAuthInvalidator,
+    IShiftService shiftManagementService,
     IAdminAuthorizationService adminAuthorization,
-    IEarlyEntryInvalidator earlyEntryInvalidator,
     IServiceProvider serviceProvider,
     IClock clock,
-    ILogger<TeamService> logger) : ITeamManagementService, ITeamSeeding, IGoogleGroupMembershipSource, IUserDataContributor, IUserMerge, IEarlyEntryProvider
+    ILogger<TeamService> logger) : ITeamManagementService, ITeamSeeding, IGoogleGroupMembershipSource, IUserMerge, IEarlyEntryProvider
 {
     private static readonly ResourceManager NoticeResources = new(typeof(TeamsResource));
     private static readonly TrackedLock JoinRequestLock = new("Teams.JoinRequest");
@@ -67,6 +63,10 @@ internal sealed class TeamService(
 
     private IUserService UserService
         => serviceProvider.GetRequiredService<IUserService>();
+
+    // GoogleIntegration's identity read resolves IUserService too, so it is lazy for the same reason.
+    private IGoogleIntegrationService GoogleIdentities
+        => serviceProvider.GetRequiredService<IGoogleIntegrationService>();
 
     private IGoogleSyncOutboxService GoogleSyncOutboxService
         => serviceProvider.GetRequiredService<IGoogleSyncOutboxService>();
@@ -149,20 +149,11 @@ internal sealed class TeamService(
         throw new InvalidOperationException($"Could not generate unique slug for team '{name}' after 10 attempts");
     }
 
-    public async Task<Team?> GetTeamEntityBySlugAsync(string slug, CancellationToken cancellationToken = default)
-    {
-        var normalizedSlug = slug.ToLowerInvariant();
-        return await repo.GetBySlugWithRelationsAsync(normalizedSlug, cancellationToken);
-    }
-
     public async Task<TeamInfo?> GetTeamBySlugAsync(string slug, CancellationToken cancellationToken = default)
     {
         var teamsById = await LoadTeamsByIdAsync(cancellationToken);
         return TeamSlugResolver.Find(teamsById, slug);
     }
-
-    public async Task<Team?> GetTeamByIdAsync(Guid teamId, CancellationToken cancellationToken = default) =>
-        await repo.GetByIdWithRelationsAsync(teamId, cancellationToken);
 
     public async Task<TeamInfo?> GetTeamAsync(
         Guid teamId,
@@ -288,8 +279,7 @@ internal sealed class TeamService(
         }
 
         var becomingChild = parentTeamId.HasValue && !team.ParentTeamId.HasValue;
-        var parentChanging = parentTeamId != team.ParentTeamId;
-        var usersNeedingShiftAuthorizationInvalidation = parentChanging
+        var managementUserIds = becomingChild
             ? await repo.GetUserIdsWithManagementOnTeamAsync(teamId, cancellationToken)
             : (IReadOnlyList<Guid>)[];
 
@@ -305,7 +295,6 @@ internal sealed class TeamService(
         team.Name = name;
         team.Description = description;
         team.RequiresApproval = requiresApproval;
-        var activeChanged = team.IsActive != isActive;
         team.IsActive = isActive;
         team.ParentTeamId = parentTeamId;
         team.GoogleGroupPrefix = googleGroupPrefix;
@@ -325,12 +314,8 @@ internal sealed class TeamService(
         }
         if (isPromotedToDirectory.HasValue)
             team.IsPromotedToDirectory = isPromotedToDirectory.Value;
-        var earlyEntryChanged = activeChanged || nameChanged;
-        if (earlyEntryEnabled is { } eeFlag && eeFlag != team.EarlyEntryEnabled)
-        {
+        if (earlyEntryEnabled is { } eeFlag)
             team.EarlyEntryEnabled = eeFlag;
-            earlyEntryChanged = true;
-        }
         if (team.IsSystemTeam || parentTeamId.HasValue)
         {
             team.IsPublicPage = false;
@@ -338,23 +323,12 @@ internal sealed class TeamService(
         }
         team.UpdatedAt = clock.GetCurrentInstant();
 
-        try
-        {
-            var conflict = await repo.UpdateTeamAsync(team, cancellationToken);
-            if (conflict != TeamUpdateConflict.None) return new(Conflict: conflict);
-        }
-        finally
-        {
-            // Evict after the save attempt: a read during it still sees the old grant data.
-            // A failed completion can also follow a committed write.
-            if (earlyEntryChanged) earlyEntryInvalidator.InvalidateAll();
-        }
+        var updateConflict = await repo.UpdateTeamAsync(team, cancellationToken);
+        if (updateConflict != TeamUpdateConflict.None) return new(Conflict: updateConflict);
 
-        InvalidateShiftAuthorization(usersNeedingShiftAuthorizationInvalidation);
-
-        if (becomingChild && usersNeedingShiftAuthorizationInvalidation.Count > 0)
+        if (managementUserIds.Count > 0)
         {
-            foreach (var userId in usersNeedingShiftAuthorizationInvalidation)
+            foreach (var userId in managementUserIds)
                 await SystemTeamSync.SyncMembershipForUserAsync(userId, SystemTeamType.Coordinators, cancellationToken);
         }
 
@@ -387,6 +361,9 @@ internal sealed class TeamService(
 
             if (normalizedCallsToAction.Count(c => c.Style == CallToActionStyle.Primary) > 1)
                 throw new TeamPageRuleException("Only one primary call to action is allowed.");
+
+            if (normalizedCallsToAction.Any(c => !IsSafeCallToActionUrl(c.Url)))
+                throw new TeamPageRuleException("Calls to action require a relative URL or an HTTP, HTTPS or mailto URL.");
 
             var canBePublic = !team.IsSystemTeam && !team.ParentTeamId.HasValue;
 
@@ -427,6 +404,13 @@ internal sealed class TeamService(
             return new TeamPageUpdateResult(false, null);
         }
     }
+
+    // Shared by writes and the page projection so unsafe legacy values never become links.
+    internal static bool IsSafeCallToActionUrl(string? url) =>
+        !string.IsNullOrWhiteSpace(url)
+        && !url.Any(char.IsControl)
+        && Uri.TryCreate(url, UriKind.RelativeOrAbsolute, out var uri)
+        && (!uri.IsAbsoluteUri || uri.Scheme is "http" or "https" or "mailto");
 
     private sealed class TeamPageRuleException : InvalidOperationException
     {
@@ -526,16 +510,7 @@ internal sealed class TeamService(
 
         var now = clock.GetCurrentInstant();
 
-        IReadOnlyList<Guid> closedUsers;
-        try
-        {
-            closedUsers = await repo.DeactivateTeamAsync(teamId, now, cancellationToken);
-        }
-        finally
-        {
-            // Inactive teams grant no Early Entry; evict even on uncertain completion.
-            earlyEntryInvalidator.InvalidateAll();
-        }
+        var closedUsers = await repo.DeactivateTeamAsync(teamId, now, cancellationToken);
         foreach (var userId in closedUsers)
         {
             await auditLogService.LogAsync(
@@ -824,16 +799,17 @@ internal sealed class TeamService(
 
     private async Task<IReadOnlyList<TeamRoleAssignment>> MarkMemberLeftWithOutboxAsync(
         TeamMember member,
+        Guid? mergeIntoMemberId,
         CancellationToken ct)
     {
         var outboxEvent = await BuildOutboxEventAsync(
             member.Id, member.TeamId, member.UserId, GoogleSyncOutboxEventTypes.RemoveUserFromTeamResources, ct);
         var leftAt = clock.GetCurrentInstant();
         if (outboxEvent is null)
-            return await repo.MarkMemberLeftAsync(member.Id, leftAt, ct);
+            return await repo.MarkMemberLeftAsync(member.Id, leftAt, mergeIntoMemberId, ct);
 
         using var scope = CreateTransactionScope();
-        var removedAssignments = await repo.MarkMemberLeftAsync(member.Id, leftAt, ct);
+        var removedAssignments = await repo.MarkMemberLeftAsync(member.Id, leftAt, mergeIntoMemberId, ct);
         await GoogleSyncOutboxService.AddAsync(outboxEvent, ct);
         scope.Complete();
         return removedAssignments;
@@ -902,15 +878,13 @@ internal sealed class TeamService(
 
         var wasCoordinator = member.Role == TeamMemberRole.Coordinator;
 
-        var removedAssignments = await MarkMemberLeftWithOutboxAsync(member, cancellationToken);
+        await MarkMemberLeftWithOutboxAsync(member, null, cancellationToken);
 
         await auditLogService.LogAsync(
             AuditAction.TeamLeft, nameof(Team), teamId,
             $"Left {team.Name}",
             userId,
             relatedEntityId: userId, relatedEntityType: nameof(User));
-
-        InvalidateShiftAuthorizationIfNeeded(userId, removedAssignments);
 
         if (wasCoordinator)
         {
@@ -931,7 +905,6 @@ internal sealed class TeamService(
         if (!withdrew)
             return new TeamMembershipMutationResult(false, "Teams_RequestUnavailable");
 
-        notificationMeterInvalidator.Invalidate();
 
         logger.LogInformation("User {UserId} withdrew join request {RequestId}", userId, requestId);
         return new TeamMembershipMutationResult(true);
@@ -993,7 +966,6 @@ internal sealed class TeamService(
             approverUserId,
             relatedEntityId: request.UserId, relatedEntityType: nameof(User));
 
-        notificationMeterInvalidator.Invalidate();
 
         await SendAddedToTeamEmailAsync(request.UserId, request.Team, cancellationToken);
         await SendJoinRequestApprovedNotificationAsync(request.Team, member.UserId, cancellationToken);
@@ -1051,7 +1023,6 @@ internal sealed class TeamService(
             approverUserId,
             relatedEntityId: request.UserId, relatedEntityType: nameof(User));
 
-        notificationMeterInvalidator.Invalidate();
         await SendJoinRequestRejectedNotificationAsync(request.Team, request.UserId, cancellationToken);
     }
 
@@ -1141,11 +1112,15 @@ internal sealed class TeamService(
         return TeamCoordinatorAccess.IsCoordinatorOfActiveTeam(teamsById, teamId, userId);
     }
 
-    public async Task<TeamMemberRemovalResult> RemoveMemberAsync(
+    public Task<TeamMemberRemovalResult> RemoveMemberAsync(
         Guid teamId,
         Guid userId,
         Guid actorUserId,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        RemoveMemberCoreAsync(teamId, userId, actorUserId, null, cancellationToken);
+
+    private async Task<TeamMemberRemovalResult> RemoveMemberCoreAsync(
+        Guid teamId, Guid userId, Guid actorUserId, Guid? mergeTargetUserId, CancellationToken cancellationToken)
     {
         var team = await repo.GetByIdAsync(teamId, cancellationToken);
         if (team is null)
@@ -1162,9 +1137,17 @@ internal sealed class TeamService(
         if (member is null)
             return RefuseMemberRemoval(teamId, userId, actorUserId, "Teams_RemoveMember_NotMember", "User is not a member of this team");
 
+        TeamMember? mergeTarget = null;
+        if (mergeTargetUserId is { } targetUserId)
+        {
+            if (targetUserId == userId)
+                throw new InvalidOperationException("Cannot merge a membership into itself");
+            mergeTarget = await repo.FindActiveMemberForMutationAsync(teamId, targetUserId, cancellationToken)
+                ?? await AddMemberToTeamAsync(teamId, targetUserId, actorUserId, cancellationToken);
+        }
         var wasCoordinator = member.Role == TeamMemberRole.Coordinator;
 
-        var removedAssignments = await MarkMemberLeftWithOutboxAsync(member, cancellationToken);
+        var removedAssignments = await MarkMemberLeftWithOutboxAsync(member, mergeTarget?.Id, cancellationToken);
 
         await auditLogService.LogAsync(
             AuditAction.TeamMemberRemoved, nameof(Team), teamId,
@@ -1172,7 +1155,13 @@ internal sealed class TeamService(
             actorUserId,
             relatedEntityId: userId, relatedEntityType: nameof(User));
 
-        InvalidateShiftAuthorizationIfNeeded(userId, removedAssignments);
+        if (mergeTarget is not null && (wasCoordinator || removedAssignments.Count > 0))
+        {
+            await auditLogService.LogAsync(
+                AuditAction.TeamMemberRoleChanged, nameof(Team), teamId,
+                $"Folded {removedAssignments.Count} role assignment(s) from merged account {userId}; source coordinator: {wasCoordinator}",
+                actorUserId, mergeTarget.UserId, nameof(User));
+        }
 
         try
         {
@@ -1195,7 +1184,7 @@ internal sealed class TeamService(
 
         // Removing a coordinator changes their Coordinators system-team eligibility —
         // reconcile as part of the mutation, not as a caller-remembered follow-up.
-        if (wasCoordinator)
+        if (wasCoordinator && mergeTarget is null)
             await SystemTeamSync.SyncMembershipForUserAsync(userId, SystemTeamType.Coordinators, cancellationToken);
         return new TeamMemberRemovalResult();
     }
@@ -1394,18 +1383,6 @@ internal sealed class TeamService(
         definition.Priorities = priorities;
         definition.SortOrder = sortOrder;
 
-        var usersNeedingShiftAuthorizationInvalidation =
-            team.SystemTeamType == SystemTeamType.None &&
-            definition.IsManagement != isManagement &&
-            definition.Assignments.Count > 0
-                ? definition.Assignments
-                    .Select(a => a.TeamMember?.UserId)
-                    .Where(uid => uid.HasValue)
-                    .Select(uid => uid!.Value)
-                    .Distinct()
-                    .ToList()
-                : [];
-
         if (isManagement && !definition.IsManagement)
         {
             var existingManagement = await repo.OtherRoleHasIsManagementAsync(
@@ -1429,8 +1406,6 @@ internal sealed class TeamService(
             $"Role definition '{name}' updated for team {team.Name}",
             actorUserId,
             relatedEntityId: definition.TeamId, relatedEntityType: nameof(Team));
-
-        InvalidateShiftAuthorization(usersNeedingShiftAuthorizationInvalidation);
 
         return definition;
     }
@@ -1472,18 +1447,6 @@ internal sealed class TeamService(
             throw new InvalidOperationException("User does not have permission to manage role definitions for this team");
 
         var isManagement = !definition.IsManagement;
-        var usersNeedingShiftAuthorizationInvalidation =
-            IsShiftAuthorizationDefinition(definition) &&
-            definition.IsManagement != isManagement &&
-            definition.Assignments.Count > 0
-                ? definition.Assignments
-                    .Select(a => a.TeamMember?.UserId)
-                    .Where(uid => uid.HasValue)
-                    .Select(uid => uid!.Value)
-                    .Distinct()
-                    .ToList()
-                : [];
-
         if (isManagement)
         {
             if (definition.Assignments.Count > 0)
@@ -1508,8 +1471,6 @@ internal sealed class TeamService(
             $"IsManagement set to {isManagement} on role '{definition.Name}' in {team.Name}",
             actorUserId,
             relatedEntityId: definition.TeamId, relatedEntityType: nameof(Team));
-
-        InvalidateShiftAuthorization(usersNeedingShiftAuthorizationInvalidation);
 
         return new TeamRoleManagementToggleResult(definition.Name, definition.IsManagement);
     }
@@ -1608,8 +1569,6 @@ internal sealed class TeamService(
             actorUserId,
             relatedEntityId: targetUserId, relatedEntityType: nameof(User));
 
-        InvalidateShiftAuthorizationIfNeeded(definition, targetUserId);
-
         // Role assignment can change Coordinators system-team eligibility (management
         // roles promote) — reconcile as part of the mutation.
         await SystemTeamSync.SyncMembershipForUserAsync(targetUserId, SystemTeamType.Coordinators, cancellationToken);
@@ -1637,8 +1596,6 @@ internal sealed class TeamService(
             $"Unassigned from role '{definition.Name}' in {team.Name}",
             actorUserId,
             relatedEntityId: targetUserId, relatedEntityType: nameof(User));
-
-        InvalidateShiftAuthorizationIfNeeded(definition, targetUserId);
 
         // Losing a (possibly management) role can change Coordinators system-team
         // eligibility — reconcile as part of the mutation.
@@ -1680,7 +1637,7 @@ internal sealed class TeamService(
     // ==========================================================================
     // ITeamSeeding — the dev/demo fixture surface. Explicit implementations: the members of
     // the same names on this class return the section's entities, which cannot leave the
-    // assembly, so these overloads differ only in their projection (design §15 step 5b).
+    // assembly, so these overloads differ only in their projection.
     // ==========================================================================
 
     async Task<TeamInfo> ITeamSeeding.CreateTeamAsync(
@@ -1805,14 +1762,7 @@ internal sealed class TeamService(
         if (resources.Count > 0)
             throw new InvalidOperationException("Cannot permanently delete a team that has Google resources linked. Unlink resources first.");
 
-        try
-        {
-            return await repo.PermanentlyDeleteTeamAsync(teamId, cancellationToken);
-        }
-        finally
-        {
-            earlyEntryInvalidator.InvalidateAll();
-        }
+        return await repo.PermanentlyDeleteTeamAsync(teamId, cancellationToken);
     }
 
     public Task<IReadOnlyDictionary<Guid, string>> GetManagementRoleNamesByTeamIdsAsync(
@@ -1840,18 +1790,10 @@ internal sealed class TeamService(
     }
 
     // Cache mutation/invalidation are owned by CachingTeamService.
-    public void RemoveMemberFromAllTeamsCache(Guid userId) { }
-
     public void InvalidateActiveTeamsCache() { }
 
-    public async Task<int> RevokeAllMembershipsAsync(Guid userId, CancellationToken cancellationToken = default)
-    {
-        var now = clock.GetCurrentInstant();
-        var count = await repo.RevokeAllMembershipsAsync(userId, now, cancellationToken);
-        if (count > 0)
-            RemoveMemberFromAllTeamsCache(userId);
-        return count;
-    }
+    public Task<int> RevokeAllMembershipsAsync(Guid userId, CancellationToken cancellationToken = default) =>
+        repo.RevokeAllMembershipsAsync(userId, clock.GetCurrentInstant(), cancellationToken);
 
     public async Task ReassignAsync(
         Guid sourceUserId,
@@ -1860,10 +1802,9 @@ internal sealed class TeamService(
         Instant updatedAt,
         CancellationToken cancellationToken)
     {
-        // TeamMember fold via AddMemberToTeamAsync/RemoveMemberAsync (system teams skipped — reconciled by SystemTeamSyncJob).
+        // End source memberships through the ordinary authorized removal/outbox path,
+        // folding roles into the survivor in the same save. System teams reconcile separately.
         var sourceMemberships = await GetUserTeamMembershipsAsync(sourceUserId, cancellationToken);
-        var targetMemberships = await GetUserTeamMembershipsAsync(targetUserId, cancellationToken);
-        var targetTeamIds = targetMemberships.Select(m => m.TeamId).ToHashSet();
         var sourceTeamsById = await repo.GetByIdsWithParentsAsync(
             sourceMemberships.Select(m => m.TeamId).Distinct().ToList(), cancellationToken);
 
@@ -1872,24 +1813,21 @@ internal sealed class TeamService(
             if (sourceTeamsById.TryGetValue(membership.TeamId, out var team) && team.IsSystemTeam)
                 continue;
 
-            if (!targetTeamIds.Contains(membership.TeamId))
-            {
-                await AddMemberToTeamAsync(membership.TeamId, targetUserId, actorUserId, cancellationToken);
-            }
-
-            var removal = await RemoveMemberAsync(membership.TeamId, sourceUserId, actorUserId, cancellationToken);
+            var removal = await RemoveMemberCoreAsync(
+                membership.TeamId, sourceUserId, actorUserId, targetUserId, cancellationToken);
             if (removal.ErrorKey is not null)
                 throw new InvalidOperationException(removal.ErrorMessage);
         }
 
         // TeamJoinRequest fold.
         await repo.ReassignActiveJoinRequestsAsync(sourceUserId, targetUserId, cancellationToken);
-        notificationMeterInvalidator.Invalidate();
 
         // Early-entry grants fold.
         await repo.ReassignEarlyEntryGrantsAsync(sourceUserId, targetUserId, cancellationToken);
-        earlyEntryInvalidator.InvalidateUser(sourceUserId);
-        earlyEntryInvalidator.InvalidateUser(targetUserId);
+        // Always retry both reconciles, even when a previous pass already ended every
+        // source membership before failing here.
+        await SystemTeamSync.SyncMembershipForUserAsync(sourceUserId, SystemTeamType.Coordinators, cancellationToken);
+        await SystemTeamSync.SyncMembershipForUserAsync(targetUserId, SystemTeamType.Coordinators, cancellationToken);
     }
 
     public async Task<IReadOnlyList<UserDataSlice>> ContributeForUserAsync(Guid userId, CancellationToken ct)
@@ -1954,20 +1892,6 @@ internal sealed class TeamService(
         return [membershipSlice, joinRequestSlice, earlyEntrySlice];
     }
 
-    private static readonly IReadOnlyDictionary<string, string?> Erasure =
-        new Dictionary<string, string?>(StringComparer.Ordinal)
-        {
-            [TeamMemberships] =
-                "Partially retained: the membership row (team, role, joined/left dates, keyed to " +
-                "the user id the Users section tombstones) is the association's record of who " +
-                "worked on what — Ley Orgánica 1/2002 Art. 14, GDPR Art. 17(3)(b). Every still-" +
-                "active membership is ended immediately.",
-            [TeamJoinRequests] = null,
-            [TeamEarlyEntry] = null
-        };
-
-    public IReadOnlyDictionary<string, string?> ErasureDeclaration => Erasure;
-
     /// <summary>
     /// Ends live memberships, then hard-deletes the join requests (they carry the
     /// applicant's free-text message) and the early-entry grants.
@@ -1976,12 +1900,9 @@ internal sealed class TeamService(
     {
         await RevokeAllMembershipsAsync(userId, ct);
         await repo.DeleteJoinRequestsForUserAsync(userId, ct);
-        notificationMeterInvalidator.Invalidate();
         await DeleteEarlyEntryGrantsForUserAsync(userId, ct);
 
-        // No cache call here: this type is the inner service, where the invalidation
-        // methods are empty bodies — the real ones live on CachingTeamService. The
-        // deletion orchestrator drops both team caches through the decorator instead.
+        // No cache call here: Gdpr reaches this through CachingTeamService, which evicts.
     }
 
     // ==========================================================================
@@ -2021,7 +1942,6 @@ internal sealed class TeamService(
             CreatedByUserId = actorUserId,
         };
         await repo.AddEarlyEntryGrantAsync(grant, ct);
-        earlyEntryInvalidator.InvalidateUser(userId);
         await auditLogService.LogAsync(AuditAction.EarlyEntryGranted, nameof(TeamEarlyEntryGrant), grant.Id,
             $"EE granted to {userId} on {entryDate} for \"{grant.ProjectName}\" (team {teamId})", actorUserId);
     }
@@ -2035,7 +1955,6 @@ internal sealed class TeamService(
         grant.ProjectName = projectName.Trim();
         grant.UpdatedAt = clock.GetCurrentInstant();
         await repo.UpdateEarlyEntryGrantAsync(grant, ct);
-        earlyEntryInvalidator.InvalidateUser(grant.UserId);
         await auditLogService.LogAsync(AuditAction.EarlyEntryUpdated, nameof(TeamEarlyEntryGrant), grant.Id,
             $"EE updated for {grant.UserId}: {entryDate}, \"{grant.ProjectName}\"", actorUserId);
     }
@@ -2045,7 +1964,6 @@ internal sealed class TeamService(
         var grant = await repo.FindEarlyEntryGrantForMutationAsync(grantId, ct);
         if (grant is null || grant.TeamId != teamId) return; // idempotent / not found on this team
         await repo.RemoveEarlyEntryGrantAsync(grantId, ct);
-        earlyEntryInvalidator.InvalidateUser(grant.UserId);
         await auditLogService.LogAsync(AuditAction.EarlyEntryRevoked, nameof(TeamEarlyEntryGrant), grantId,
             $"EE revoked for {grant.UserId} (team {grant.TeamId})", actorUserId);
     }
@@ -2055,7 +1973,6 @@ internal sealed class TeamService(
         var grants = await repo.GetEarlyEntryGrantsForUserAsync(userId, ct);
         if (grants.Count == 0) return;
         await repo.RemoveEarlyEntryGrantsForUserAsync(userId, ct);
-        earlyEntryInvalidator.InvalidateUser(userId);
     }
 
     private async Task<IReadOnlyDictionary<Guid, TeamInfo>> LoadTeamsByIdAsync(CancellationToken ct = default)
@@ -2112,8 +2029,7 @@ internal sealed class TeamService(
                     Email: u?.Email,
                     ProfilePictureUrl: u?.ProfilePictureUrl,
                     Role: m.Role,
-                    JoinedAt: m.JoinedAt,
-                    GoogleEmailStatus: u?.GoogleEmailStatus ?? GoogleEmailStatus.Unknown);
+                    JoinedAt: m.JoinedAt);
             })
             .ToList(),
         ParentTeamId: team.ParentTeamId,
@@ -2135,24 +2051,6 @@ internal sealed class TeamService(
         PendingRequestCount: pendingCounts.TryGetValue(team.Id, out var pending) ? pending : 0,
         EarlyEntryEnabled: team.EarlyEntryEnabled);
 
-    private void InvalidateShiftAuthorizationIfNeeded(Guid userId, IEnumerable<TeamRoleAssignment> roleAssignments)
-    {
-        if (roleAssignments.Any(assignment => IsShiftAuthorizationDefinition(assignment.TeamRoleDefinition)))
-            shiftAuthInvalidator.Invalidate(userId);
-    }
-
-    private void InvalidateShiftAuthorizationIfNeeded(TeamRoleDefinition definition, Guid userId)
-    {
-        if (IsShiftAuthorizationDefinition(definition))
-            shiftAuthInvalidator.Invalidate(userId);
-    }
-
-    private void InvalidateShiftAuthorization(IEnumerable<Guid> userIds)
-    {
-        foreach (var userId in userIds.Distinct())
-            shiftAuthInvalidator.Invalidate(userId);
-    }
-
     private async Task<Team> GetRoleDefinitionTeamAsync(TeamRoleDefinition definition, CancellationToken ct)
     {
         var teamsById = await repo.GetByIdsWithParentsAsync([definition.TeamId], ct);
@@ -2160,12 +2058,6 @@ internal sealed class TeamService(
             ? team
             : throw new InvalidOperationException($"Team {definition.TeamId} not found");
     }
-
-#pragma warning disable CS0618 // TeamRoleDefinition.Team — in-section nav read.
-    private static bool IsShiftAuthorizationDefinition(TeamRoleDefinition definition) =>
-        definition.IsManagement &&
-        definition.Team.SystemTeamType == SystemTeamType.None;
-#pragma warning restore CS0618
 
     private async Task<Guid> ResolveMembershipTargetAsync(Guid userId, CancellationToken ct)
     {
@@ -2182,11 +2074,11 @@ internal sealed class TeamService(
         string eventType,
         CancellationToken ct)
     {
-        var user = await UserService.GetUserInfoAsync(userId, ct);
-        if (user?.GoogleEmailStatus == GoogleEmailStatus.Rejected)
+        var identity = await GoogleIdentities.GetWorkspaceIdentityAsync(userId, ct);
+        if (identity?.Status == GoogleEmailStatus.Rejected)
         {
             logger.LogDebug(
-                "Skipping Google sync outbox event {EventType} for user {UserId} — GoogleEmailStatus is Rejected",
+                "Skipping Google sync outbox event {EventType} for user {UserId} — Google identity is Rejected",
                 eventType, userId);
             return null;
         }
@@ -2315,7 +2207,6 @@ internal sealed class TeamService(
             team.IsHidden);
     }
 
-#pragma warning disable CS0618 // TeamJoinRequest.Team — in-section nav read for snapshot projections.
     private static TeamJoinRequestSnapshot ToJoinRequestSnapshot(TeamJoinRequest request) => new(
         request.Id,
         request.TeamId,
@@ -2350,7 +2241,6 @@ internal sealed class TeamService(
             request.ResolvedAt,
             request.ReviewNotes);
     }
-#pragma warning restore CS0618
 
     private static void ValidateRoleName(string name)
     {
@@ -2377,7 +2267,6 @@ internal sealed class TeamService(
         CancellationToken cancellationToken = default)
     {
         var memberships = await repo.GetActiveMembershipsForRoleReconciliationAsync(cancellationToken);
-#pragma warning disable CS0618 // TeamMember.Team — in-section nav read for reconciliation snapshot.
         return memberships
             .Select(member => new TeamRoleReconciliationMembership(
                 member.Id,
@@ -2388,7 +2277,6 @@ internal sealed class TeamService(
                 member.Team.SystemTeamType,
                 member.RoleAssignments.Any(assignment => assignment.TeamRoleDefinition.IsManagement)))
             .ToList();
-#pragma warning restore CS0618
     }
 
     public async Task<int> ApplyMemberRoleChangesAsync(

@@ -39,9 +39,7 @@ public class GateControllerClaimTests
     {
         _throttle = new GatePinThrottle(new MemoryCache(new MemoryCacheOptions()), _clock);
         _controller = new GateController(
-            _gate, _users, new ConfigurationBuilder().Build(), _throttle,
-            new GateVendorMirrorLedger(new MemoryCache(new MemoryCacheOptions())),
-            Substitute.For<IBackgroundJobClient>(), _clock, NullLogger<GateController>.Instance);
+            _gate, _users, new ConfigurationBuilder().Build(), _throttle, _clock, NullLogger<GateController>.Instance);
 
         var http = new DefaultHttpContext { Session = _session };
         _controller.ControllerContext = new ControllerContext { HttpContext = http };
@@ -129,7 +127,7 @@ public class GateControllerClaimTests
     /// A minimal active UserInfo for the claimant-validation path. Inlined rather than
     /// shared from Humans.Application.Tests' UserInfoStubHelpers: this suite needs one
     /// member of it, and linking the helper into the shared test set would pull
-    /// UsersDbContext into a section test project (design §15 step 8).
+    /// UsersDbContext into a section test project.
     /// </summary>
     private static UserInfo MakeUserInfo(Guid userId, string displayName = "User") =>
         UserInfo.Create(

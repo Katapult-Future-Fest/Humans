@@ -1,7 +1,6 @@
 using System.Security.Claims;
 using AwesomeAssertions;
 using Humans.Base.Constants;
-using Humans.Camps.Authorization;
 using Humans.Shifts.Contracts;
 using Microsoft.AspNetCore.Authorization;
 using NSubstitute;
@@ -14,7 +13,7 @@ namespace Humans.Camps.Tests.Authorization;
 /// </summary>
 public sealed class CampComplianceAccessHandlerTests
 {
-    private readonly IShiftManagementService _shiftManagement = Substitute.For<IShiftManagementService>();
+    private readonly IShiftService _shiftManagement = Substitute.For<IShiftService>();
     private readonly CampComplianceAccessHandler _handler;
 
     public CampComplianceAccessHandlerTests()

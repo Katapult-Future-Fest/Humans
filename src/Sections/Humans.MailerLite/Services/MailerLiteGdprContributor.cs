@@ -9,13 +9,13 @@ namespace Humans.MailerLite.Services;
 /// §8a) but does hold per-person state in a third-party system: MailerLite subscriber
 /// membership. Article 15 export contributes nothing — the subscriber list mirrors state
 /// already exported by the sections that generate it (marketing opt-in lives on
-/// <c>UserInfo.MarketingOptedOut</c>), not new personal data — so
+/// Email's communication preferences), not new personal data — so
 /// <see cref="ContributeForUserAsync"/> always returns an empty list. Article 17 erasure
 /// deletes the person's MailerLite subscriber outright (nobodies-collective/Humans#853).
 ///
 /// <para>
 /// Separate class rather than adding this role to <see cref="MailerLite.MailerLiteClient"/>: that
-/// class is a Singleton (design §15 — it holds its own subscriber/group cache), so its
+/// class is a Singleton (it holds its own subscriber/group cache), so its
 /// dependencies must all be Singleton-safe, and resolving a user's email needs the Scoped
 /// <see cref="IUserEmailService"/>.
 /// </para>

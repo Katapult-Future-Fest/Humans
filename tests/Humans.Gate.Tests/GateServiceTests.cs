@@ -10,6 +10,13 @@ using Humans.Base.Constants;
 using Humans.Gate.Data;
 using Humans.Gate.Domain;
 using Humans.Gate.Services;
+using Humans.Gate.Services.Stores;
+using Humans.Gate.Jobs;
+using Hangfire;
+using Hangfire.Common;
+using Hangfire.States;
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Configuration;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using NodaTime.Testing;
@@ -18,7 +25,6 @@ using Microsoft.Extensions.Logging.Abstractions;
 using NodaTime;
 using NSubstitute;
 using NSubstitute.ExceptionExtensions;
-using Humans.Users.Contracts;
 
 namespace Humans.Gate.Tests;
 
@@ -61,7 +67,7 @@ public class GateServiceTests
     // The three ServiceTestHarness members this suite used — an in-memory GateDbContext,
     // a factory over the same store, and a fixed clock. Owned here rather than shared:
     // the harness is built around UsersDbContext and sharing it would grant a section
-    // test project InternalsVisibleTo on it (design §15 step 8).
+    // test project InternalsVisibleTo on it.
     // Field initialisers run in declaration order, and each test gets a fresh instance,
     // so every test case gets its own store.
     private readonly DbContextOptions<GateDbContext> _dbOptions =
@@ -81,11 +87,14 @@ public class GateServiceTests
     private readonly ITicketService _tickets = Substitute.For<ITicketService>();
     private readonly IEarlyEntryService _earlyEntry = Substitute.For<IEarlyEntryService>();
     private readonly ISettingsService _burn = Substitute.For<ISettingsService>();
-    private readonly IShiftManagementService _shifts = Substitute.For<IShiftManagementService>();
+    private readonly IShiftService _shifts = Substitute.For<IShiftService>();
     private readonly IRoleAssignmentService _roles = Substitute.For<IRoleAssignmentService>();
     private readonly IPasswordHasher<GateStaffPin> _pinHasher = new PasswordHasher<GateStaffPin>();
     private readonly IAuditLogService _auditLog = Substitute.For<IAuditLogService>();
-    private readonly IUserWrite _users = Substitute.For<IUserWrite>();
+    private readonly ITicketWrite _users = Substitute.For<ITicketWrite>();
+    private readonly IBackgroundJobClient _jobs = Substitute.For<IBackgroundJobClient>();
+    private readonly GateVendorMirrorLedger _ledger = new(new MemoryCache(new MemoryCacheOptions()));
+    private readonly IConfiguration _config = new ConfigurationBuilder().AddInMemoryCollection().Build();
     private readonly GateService _svc;
 
     public GateServiceTests()
@@ -96,7 +105,7 @@ public class GateServiceTests
         _burn.GetActiveEventSettingsAsync(Arg.Any<CancellationToken>()).Returns((EventSettingsInfo?)null);
         _earlyEntry.GetForUserAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>())
             .Returns((EarlyEntryRosterRow?)null);
-        _svc = new GateService(new GateRepository(GateDbFactory), _tickets, _earlyEntry, _burn, _shifts, _roles, _users, _pinHasher, _auditLog, NullLogger<GateService>.Instance, Clock);
+        _svc = new GateService(new GateRepository(GateDbFactory), _tickets, _earlyEntry, _burn, _shifts, _roles, _users, _pinHasher, _auditLog, _jobs, _ledger, _config, NullLogger<GateService>.Instance, Clock);
 
         // Baseline: an admin has set the cutoff in the past, so general entry is open.
         // Seeded directly (sync) since the ctor can't await; GateDb shares the in-memory
@@ -150,7 +159,7 @@ public class GateServiceTests
             .Returns(new List<TicketOrderInfo> { order });
     }
 
-    private Task<GateDecisionResult> Record(bool idConfirmed, bool child = false, Guid? overrideBy = null) =>
+    private Task<GateDecisionResult> RecordAsync(bool idConfirmed, bool child = false, Guid? overrideBy = null) =>
         _svc.RecordDecisionAsync(
             new GateDecisionInput(Barcode, idConfirmed, child, LaneId: "L1", ClientScanAt: null, Note: null,
                 OverrideByUserId: overrideBy),
@@ -199,12 +208,42 @@ public class GateServiceTests
     {
         StubTicket();
 
-        var first = await Record(idConfirmed: true);
+        var first = await RecordAsync(idConfirmed: true);
         first.Verdict.Should().Be(GateVerdict.Admitted);
 
-        var second = await Record(idConfirmed: true);
+        var second = await RecordAsync(idConfirmed: true);
         second.Verdict.Should().Be(GateVerdict.RejectedDuplicate);
         second.PreviousAdmitByUserId.Should().Be(AgentId);
+    }
+
+    [HumansTheory]
+    [Xunit.InlineData(false)]
+    [Xunit.InlineData(true)]
+    public async Task RecordDecision_Admit_AlwaysEnqueuesTheVendorMirror_ButMarksTheLedgerOnlyWhenTheFlagIsOn(bool mirrorEnabled)
+    {
+        StubTicket();
+        _config["Gate:VendorMirrorEnabled"] = mirrorEnabled ? "true" : "false";
+
+        (await RecordAsync(idConfirmed: true)).Verdict.Should().Be(GateVerdict.Admitted);
+
+        // Flag off: the job still no-ops itself, but a ledger mark would hide exactly the row
+        // the backfill page exists to recover.
+        _jobs.Received(1).Create(
+            Arg.Is<Job>(j => j.Type.Equals(typeof(GateVendorCheckInJob)) && string.Equals((string)j.Args[0], "v1", StringComparison.Ordinal)),
+            Arg.Any<IState>());
+        _ledger.WasSent("v1").Should().Be(mirrorEnabled);
+    }
+
+    [HumansFact]
+    public async Task RecordDecision_Rejected_DoesNotMirrorToTheVendor()
+    {
+        StubTicket();
+        _config["Gate:VendorMirrorEnabled"] = "true";
+
+        (await RecordAsync(idConfirmed: false)).Verdict.Should().Be(GateVerdict.RejectedNameMismatch);
+
+        _jobs.ReceivedCalls().Should().BeEmpty();
+        _ledger.WasSent("v1").Should().BeFalse();
     }
 
     [HumansFact]
@@ -212,7 +251,7 @@ public class GateServiceTests
     {
         StubTicket();
 
-        var r = await Record(idConfirmed: false);
+        var r = await RecordAsync(idConfirmed: false);
         r.Verdict.Should().Be(GateVerdict.RejectedNameMismatch);
 
         // Ticket not burned: a corrected re-scan can still be admitted.
@@ -226,7 +265,7 @@ public class GateServiceTests
 
         // The child-without-ID waiver is now a supervisor override — it admits only when an
         // authorizing supervisor was recorded (the controller sets this after AuthorizeOverrideAsync).
-        (await Record(idConfirmed: false, child: true, overrideBy: Guid.NewGuid()))
+        (await RecordAsync(idConfirmed: false, child: true, overrideBy: Guid.NewGuid()))
             .Verdict.Should().Be(GateVerdict.AdmittedChildWithAdult);
     }
 
@@ -236,7 +275,7 @@ public class GateServiceTests
         StubTicket();
 
         // No authorizing supervisor → the waiver is not granted (a forged child flag can't admit).
-        (await Record(idConfirmed: false, child: true))
+        (await RecordAsync(idConfirmed: false, child: true))
             .Verdict.Should().Be(GateVerdict.RejectedNameMismatch);
     }
 
@@ -254,12 +293,12 @@ public class GateServiceTests
         StubTicket(matchedUserId: GuestId);
         StubActiveEvent(year: 2026);
 
-        var r = await Record(idConfirmed: true);
+        var r = await RecordAsync(idConfirmed: true);
 
         r.Verdict.Should().Be(GateVerdict.Admitted);
         // CancellationToken.None pinned: the admit is durable, so a kiosk disconnect
         // (aborted request token) must not skip the projection.
-        await _users.Received(1).SetParticipationFromTicketSyncAsync(
+        await _users.Received(1).RecordParticipationAsync(
             GuestId, 2026, ParticipationStatus.Attended,
             Clock.GetCurrentInstant(), CancellationToken.None);
     }
@@ -271,11 +310,11 @@ public class GateServiceTests
         // failure must never turn an already-recorded admit into an error response.
         StubTicket(matchedUserId: GuestId);
         StubActiveEvent();
-        _users.SetParticipationFromTicketSyncAsync(
-                default, default, default, default, default)
+        _users.RecordParticipationAsync(
+                default, default, default, default)
             .ThrowsAsyncForAnyArgs(new InvalidOperationException("unique index collision"));
 
-        (await Record(idConfirmed: true)).Verdict.Should().Be(GateVerdict.Admitted);
+        (await RecordAsync(idConfirmed: true)).Verdict.Should().Be(GateVerdict.Admitted);
     }
 
     [HumansFact]
@@ -284,10 +323,10 @@ public class GateServiceTests
         StubTicket(matchedUserId: GuestId);
         StubActiveEvent();
 
-        (await Record(idConfirmed: false)).Verdict.Should().Be(GateVerdict.RejectedNameMismatch);
+        (await RecordAsync(idConfirmed: false)).Verdict.Should().Be(GateVerdict.RejectedNameMismatch);
 
         await _users.DidNotReceiveWithAnyArgs()
-            .SetParticipationFromTicketSyncAsync(default, default, default, default);
+            .RecordParticipationAsync(default, default, default, default);
     }
 
     [HumansFact]
@@ -297,10 +336,10 @@ public class GateServiceTests
         StubTicket(matchedUserId: null);
         StubActiveEvent();
 
-        (await Record(idConfirmed: true)).Verdict.Should().Be(GateVerdict.Admitted);
+        (await RecordAsync(idConfirmed: true)).Verdict.Should().Be(GateVerdict.Admitted);
 
         await _users.DidNotReceiveWithAnyArgs()
-            .SetParticipationFromTicketSyncAsync(default, default, default, default);
+            .RecordParticipationAsync(default, default, default, default);
     }
 
     [HumansFact]
@@ -309,10 +348,10 @@ public class GateServiceTests
         // No active event → no year to record against; the admit itself must not fail.
         StubTicket(matchedUserId: GuestId);
 
-        (await Record(idConfirmed: true)).Verdict.Should().Be(GateVerdict.Admitted);
+        (await RecordAsync(idConfirmed: true)).Verdict.Should().Be(GateVerdict.Admitted);
 
         await _users.DidNotReceiveWithAnyArgs()
-            .SetParticipationFromTicketSyncAsync(default, default, default, default);
+            .RecordParticipationAsync(default, default, default, default);
     }
 
     [HumansFact]
@@ -325,7 +364,7 @@ public class GateServiceTests
         (await _svc.EvaluateAsync(Barcode)).Outcome.Should().Be(GatePreCheckOutcome.CutoffNotConfigured);
 
         // Even with the agent confirming the ID, an unset cutoff escalates — no admit.
-        (await Record(idConfirmed: true)).Verdict.Should().Be(GateVerdict.Unresolved);
+        (await RecordAsync(idConfirmed: true)).Verdict.Should().Be(GateVerdict.Unresolved);
     }
 
     [HumansFact]
@@ -346,7 +385,7 @@ public class GateServiceTests
 
         (await _svc.EvaluateAsync(Barcode)).Outcome.Should().Be(GatePreCheckOutcome.TooEarly);
 
-        (await Record(idConfirmed: true))
+        (await RecordAsync(idConfirmed: true))
             .Verdict.Should().Be(GateVerdict.RejectedTooEarly);
     }
 
@@ -360,7 +399,7 @@ public class GateServiceTests
         (await _svc.EvaluateAsync(Barcode)).Outcome.Should().Be(GatePreCheckOutcome.TooEarly);
 
         // A recorded supervisor override turns the too-early STOP into an attributable early admit.
-        (await Record(idConfirmed: false, overrideBy: Guid.NewGuid()))
+        (await RecordAsync(idConfirmed: false, overrideBy: Guid.NewGuid()))
             .Verdict.Should().Be(GateVerdict.AdmittedEarlyOverride);
     }
 
@@ -401,7 +440,7 @@ public class GateServiceTests
             Clock.GetCurrentInstant().Plus(Duration.FromHours(6)), 16));
 
         // Even a client-asserted "ID confirmed" never turns the unconfirmed-EE amber into an admit.
-        (await Record(idConfirmed: true))
+        (await RecordAsync(idConfirmed: true))
             .Verdict.Should().Be(GateVerdict.Unresolved);
     }
 
@@ -413,7 +452,7 @@ public class GateServiceTests
             Clock.GetCurrentInstant().Plus(Duration.FromHours(6)), 16));
 
         // A recorded supervisor override admits an unconfirmed-EE scan, mirroring the too-early case.
-        (await Record(idConfirmed: false, overrideBy: Guid.NewGuid()))
+        (await RecordAsync(idConfirmed: false, overrideBy: Guid.NewGuid()))
             .Verdict.Should().Be(GateVerdict.AdmittedEarlyOverride);
     }
 
@@ -426,7 +465,7 @@ public class GateServiceTests
         _earlyEntry.GetForUserAsync(GuestId, Arg.Any<CancellationToken>())
             .Returns(new EarlyEntryRosterRow(GuestId, Clock.GetCurrentInstant().InUtc().Date, new[] { "Build crew" }, false));
 
-        (await Record(idConfirmed: true))
+        (await RecordAsync(idConfirmed: true))
             .Verdict.Should().Be(GateVerdict.AdmittedEarly);
     }
 
@@ -434,8 +473,8 @@ public class GateServiceTests
     public async Task Leaderboard_TalliesAdmitsAndRejects()
     {
         StubTicket();
-        await Record(idConfirmed: true);   // admit
-        await Record(idConfirmed: true);   // duplicate reject
+        await RecordAsync(idConfirmed: true);   // admit
+        await RecordAsync(idConfirmed: true);   // duplicate reject
 
         var board = await _svc.GetLeaderboardAsync(Instant.MinValue);
 
@@ -451,7 +490,7 @@ public class GateServiceTests
     public async Task Gdpr_ContributesScansForGuestAndScanner()
     {
         StubTicket(matchedUserId: GuestId);
-        await Record(idConfirmed: true);   // GuestUserId = GuestId, ScannedByUserId = AgentId
+        await RecordAsync(idConfirmed: true);   // GuestUserId = GuestId, ScannedByUserId = AgentId
 
         var guestExport = await _svc.ContributeForUserAsync(GuestId, default);
         var scannerExport = await _svc.ContributeForUserAsync(AgentId, default);
@@ -466,7 +505,7 @@ public class GateServiceTests
     public async Task Merge_ReassignsScansToSurvivor()
     {
         StubTicket(matchedUserId: GuestId);
-        await Record(idConfirmed: true);
+        await RecordAsync(idConfirmed: true);
         var survivor = Guid.NewGuid();
 
         await _svc.ReassignAsync(GuestId, survivor, actorUserId: Guid.NewGuid(), Clock.GetCurrentInstant(), default);
@@ -480,38 +519,38 @@ public class GateServiceTests
     {
         var supervisor = Guid.NewGuid();
         StubTicket(matchedUserId: GuestId);
-        await Record(idConfirmed: true, overrideBy: supervisor);
+        await RecordAsync(idConfirmed: true, overrideBy: supervisor);
         await _svc.SetOwnPinAsync(GuestId, "2580");
 
         // Erase the guest: admission links and their PIN row go.
         await _svc.EraseForUserAsync(GuestId, default);
-        var row = GateDb.GateScanEvents.AsNoTracking().Single();
+        var row = await GateDb.GateScanEvents.AsNoTracking().SingleAsync(Xunit.TestContext.Current.CancellationToken);
         row.GuestUserId.Should().BeNull();
         GateDb.GateStaffPins.AsNoTracking().Should().BeEmpty();
 
         // Erase the override authorizer: that link goes too.
         await _svc.EraseForUserAsync(supervisor, default);
-        GateDb.GateScanEvents.AsNoTracking().Single().OverrideByUserId.Should().BeNull();
+        (await GateDb.GateScanEvents.AsNoTracking().SingleAsync(Xunit.TestContext.Current.CancellationToken)).OverrideByUserId.Should().BeNull();
 
         // Erase the scanner: ScannedByUserId stays — the Art. 17(3) operational record.
         await _svc.EraseForUserAsync(AgentId, default);
-        GateDb.GateScanEvents.AsNoTracking().Single().ScannedByUserId.Should().Be(AgentId);
+        (await GateDb.GateScanEvents.AsNoTracking().SingleAsync(Xunit.TestContext.Current.CancellationToken)).ScannedByUserId.Should().Be(AgentId);
     }
 
     [HumansFact]
     public async Task Merge_RepointsScannerAndOverride_AndCarriesThePinToAPinlessSurvivor()
     {
         StubTicket(matchedUserId: GuestId);
-        await Record(idConfirmed: true, overrideBy: AgentId);
+        await RecordAsync(idConfirmed: true, overrideBy: AgentId);
         await _svc.AdminSetPinAsync(AgentId, "2580", Guid.NewGuid()); // AdminEnrolled = true
         var survivor = Guid.NewGuid();
 
         await _svc.ReassignAsync(AgentId, survivor, actorUserId: Guid.NewGuid(), Clock.GetCurrentInstant(), default);
 
-        var row = GateDb.GateScanEvents.AsNoTracking().Single();
+        var row = await GateDb.GateScanEvents.AsNoTracking().SingleAsync(Xunit.TestContext.Current.CancellationToken);
         row.ScannedByUserId.Should().Be(survivor);
         row.OverrideByUserId.Should().Be(survivor);
-        var pin = GateDb.GateStaffPins.AsNoTracking().Single();
+        var pin = await GateDb.GateStaffPins.AsNoTracking().SingleAsync(Xunit.TestContext.Current.CancellationToken);
         pin.UserId.Should().Be(survivor);
         pin.AdminEnrolled.Should().BeTrue(); // enrolment provenance travels with the PIN
     }
@@ -526,7 +565,7 @@ public class GateServiceTests
 
         await _svc.ReassignAsync(mergedAway, survivor, actorUserId: Guid.NewGuid(), Clock.GetCurrentInstant(), default);
 
-        GateDb.GateStaffPins.AsNoTracking().Single().UserId.Should().Be(survivor);
+        (await GateDb.GateStaffPins.AsNoTracking().SingleAsync(Xunit.TestContext.Current.CancellationToken)).UserId.Should().Be(survivor);
         (await _svc.VerifyPinAsync(survivor, "1357")).Should().BeTrue();
         (await _svc.VerifyPinAsync(survivor, "2580")).Should().BeFalse();
     }
@@ -535,7 +574,7 @@ public class GateServiceTests
     public async Task Retention_PurgesScansBeforeCutoff()
     {
         StubTicket(matchedUserId: GuestId);
-        await Record(idConfirmed: true);
+        await RecordAsync(idConfirmed: true);
 
         var removed = await _svc.PurgeScansBeforeAsync(Clock.GetCurrentInstant().Plus(Duration.FromMinutes(1)));
 
@@ -694,7 +733,7 @@ public class GateServiceTests
     public async Task VendorBackfill_AdmitNotCheckedInAtVendor_IsPending()
     {
         StubTicket();
-        await Record(idConfirmed: true);
+        await RecordAsync(idConfirmed: true);
 
         var snapshot = await _svc.GetVendorCheckInBackfillAsync();
 
@@ -711,7 +750,7 @@ public class GateServiceTests
     {
         var attendeeId = Guid.NewGuid();
         StubTicket(attendeeId: attendeeId);
-        await Record(idConfirmed: true);
+        await RecordAsync(idConfirmed: true);
         // The next /check_ins sync stamps CheckedInAt — the issued ticket's Status stays
         // Valid (vendor semantics), so CheckedInAt alone must drop the row out of pending.
         StubTicket(attendeeId: attendeeId, checkedInAt: Clock.GetCurrentInstant());
@@ -729,7 +768,7 @@ public class GateServiceTests
     {
         var attendeeId = Guid.NewGuid();
         StubTicket(attendeeId: attendeeId);
-        await Record(idConfirmed: true);
+        await RecordAsync(idConfirmed: true);
         StubTicket(status: TicketAttendeeStatus.CheckedIn, attendeeId: attendeeId);
 
         var snapshot = await _svc.GetVendorCheckInBackfillAsync();
@@ -742,7 +781,7 @@ public class GateServiceTests
     public async Task VendorBackfill_AttendeeNoLongerInOrders_IsUnmirrorable()
     {
         StubTicket();
-        await Record(idConfirmed: true);
+        await RecordAsync(idConfirmed: true);
         _tickets.GetTicketOrdersAsync(Arg.Any<CancellationToken>())
             .Returns(new List<TicketOrderInfo>());
 
@@ -757,7 +796,7 @@ public class GateServiceTests
     public async Task VendorBackfill_IgnoresAdmitsOlderThanTheWindow()
     {
         StubTicket();
-        await Record(idConfirmed: true);
+        await RecordAsync(idConfirmed: true);
         // Prior-edition admits (retention is 365 days) must not pollute the diff.
         Clock.Advance(Duration.FromDays(31));
 
@@ -772,7 +811,7 @@ public class GateServiceTests
     public async Task VendorBackfill_RejectedScansAreNotCounted()
     {
         StubTicket();
-        await Record(idConfirmed: false); // ID says no → rejected, nothing to mirror
+        await RecordAsync(idConfirmed: false); // ID says no → rejected, nothing to mirror
 
         var snapshot = await _svc.GetVendorCheckInBackfillAsync();
 

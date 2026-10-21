@@ -2,15 +2,15 @@ using Humans.Base.Extensions;
 using Humans.Users.Services;
 using Humans.Auth.Contracts;
 using Humans.AuditLog.Contracts;
-using Humans.Base.Interfaces.Caching;
 using Humans.Email.Contracts;
 using Humans.Gdpr.Contracts;
 using Humans.Onboarding.Contracts;
 using Humans.Users.Contracts;
-using Humans.Shifts.Contracts;
+using Humans.Users.Data;
 using Humans.Teams.Contracts;
 using Humans.Tickets.Contracts;
 using Humans.Base.Interfaces;
+using Microsoft.Extensions.Hosting;
 using NodaTime;
 
 namespace Humans.Application.Services.Users.AccountLifecycle;
@@ -23,16 +23,20 @@ internal sealed class AccountDeletionService(
     IRoleAssignmentWrite roleAssignmentService,
     IGdprService gdprService,
     ITicketService ticketQueryService,
-    IUserInfoInvalidator userInfoInvalidator,
-    IRoleAssignmentClaimsCacheInvalidator roleAssignmentClaimsInvalidator,
-    IShiftAuthorizationInvalidator shiftAuthorizationInvalidator,
-    IShiftViewInvalidator shiftViewInvalidator,
+    IUserInfoSliceRefresher userInfoRefresher,
     IAuditLogService auditLogService,
     IEmailService emailService,
     UsersEmails emailMessages,
     IClock clock,
-    ILogger<AccountDeletionService> logger) : IAccountDeletionService
+    IHostEnvironment environment,
+    ILogger<AccountDeletionService> logger) : IAccountDeletionService, IOrchestrator
 {
+    /// <summary><see cref="PurgeAsync"/> refusal: purge is a dev/QA tool, never run in production.</summary>
+    internal const string PurgeRefusedInProduction = "Production";
+
+    /// <summary><see cref="PurgeAsync"/> refusal: an admin may not purge their own account.</summary>
+    internal const string PurgeRefusedSelf = "Self";
+
     // --- User-initiated deletion request (30-day scheduled) ---
 
     public async Task<DeletionRequestResult> RequestDeletionAsync(Guid userId, CancellationToken ct = default)
@@ -58,49 +62,40 @@ internal sealed class AccountDeletionService(
         var effectiveDeletionDate = eligibleAfter is { } holdDate && holdDate > deletionDate
             ? holdDate : deletionDate;
 
-        try
+        await userService.SetDeletionPendingAsync(userId, now, deletionDate, eligibleAfter, ct);
+
+        // User loses access during grace period.
+        var endedMemberships = await teamService.RevokeAllMembershipsAsync(userId, ct);
+
+        var endedRoles = await roleAssignmentService.RevokeAllActiveAsync(userId, ct);
+
+        await auditLogService.LogAsync(
+            AuditAction.MembershipsRevokedOnDeletionRequest, nameof(User), userId,
+            $"Revoked {endedMemberships} team membership(s) and {endedRoles} role assignment(s) on deletion request",
+            userId);
+
+        logger.LogWarning(
+            "User {UserId} requested account deletion. Scheduled for {DeletionDate} (eligibleAfter {EligibleAfter}). " +
+            "Revoked {MembershipCount} memberships and {RoleCount} roles immediately",
+            userId, deletionDate, eligibleAfter, endedMemberships, endedRoles);
+
+        var notificationEmails = await userEmailService.GetNotificationTargetEmailsAsync([userId], ct);
+        var notificationEmail = notificationEmails.GetValueOrDefault(userId) ?? user.Email;
+        if (notificationEmail is not null)
         {
-            await userService.SetDeletionPendingAsync(userId, now, deletionDate, eligibleAfter, ct);
-
-            // User loses access during grace period.
-            var endedMemberships = await teamService.RevokeAllMembershipsAsync(userId, ct);
-
-            var endedRoles = await roleAssignmentService.RevokeAllActiveAsync(userId, ct);
-
-            await auditLogService.LogAsync(
-                AuditAction.MembershipsRevokedOnDeletionRequest, nameof(User), userId,
-                $"Revoked {endedMemberships} team membership(s) and {endedRoles} role assignment(s) on deletion request",
-                userId);
-
-            logger.LogWarning(
-                "User {UserId} requested account deletion. Scheduled for {DeletionDate} (eligibleAfter {EligibleAfter}). " +
-                "Revoked {MembershipCount} memberships and {RoleCount} roles immediately",
-                userId, deletionDate, eligibleAfter, endedMemberships, endedRoles);
-
-            var notificationEmails = await userEmailService.GetNotificationTargetEmailsAsync([userId], ct);
-            var notificationEmail = notificationEmails.GetValueOrDefault(userId) ?? user.Email;
-            if (notificationEmail is not null)
-            {
-                await emailService.SendAsync(emailMessages.AccountDeletionRequested(
-                    notificationEmail,
-                    user.BurnerName,
-                    effectiveDeletionDate,
-                    user.PreferredLanguage.IsSupportedCultureCode()
-                        ? user.PreferredLanguage : CultureCatalog.DefaultCultureCode),
-                    ct);
-            }
-
-            return new DeletionRequestResult(
-                Success: true,
-                EffectiveDeletionDate: effectiveDeletionDate,
-                IsHeldForTicket: eligibleAfter is not null);
+            await emailService.SendAsync(emailMessages.AccountDeletionRequested(
+                notificationEmail,
+                user.BurnerName,
+                effectiveDeletionDate,
+                user.PreferredLanguage.IsSupportedCultureCode()
+                    ? user.PreferredLanguage : CultureCatalog.DefaultCultureCode),
+                ct);
         }
-        finally
-        {
-            // Deletion/revocation may commit before a later step fails; stale shift access must still clear.
-            shiftAuthorizationInvalidator.Invalidate(userId);
-            shiftViewInvalidator.InvalidateUser(userId);
-        }
+
+        return new DeletionRequestResult(
+            Success: true,
+            EffectiveDeletionDate: effectiveDeletionDate,
+            IsHeldForTicket: eligibleAfter is not null);
     }
 
     public async Task<OnboardingResult> CancelDeletionAsync(Guid userId, CancellationToken ct = default)
@@ -123,8 +118,20 @@ internal sealed class AccountDeletionService(
 
     public async Task<OnboardingResult> PurgeAsync(Guid userId, Guid? actorId = null, CancellationToken ct = default)
     {
+        if (environment.IsProduction())
+        {
+            logger.LogWarning("Purge of {UserId} refused: purge never runs in production", userId);
+            return new OnboardingResult(false, PurgeRefusedInProduction);
+        }
+
         if (await userService.GetRawUserInfoAsync(userId, ct) is null)
             return new OnboardingResult(false, "NotFound");
+
+        if (actorId == userId)
+        {
+            logger.LogWarning("Purge of {UserId} refused: an admin may not purge their own account", userId);
+            return new OnboardingResult(false, PurgeRefusedSelf);
+        }
 
         // Same Article 17 fan-out as the expiry path — an admin purge must not
         // erase less than the scheduled job does. The Account contributor inside
@@ -133,16 +140,10 @@ internal sealed class AccountDeletionService(
         // tombstone instead of the real name and break IsGdprAnonymized.
         await EraseEverySectionAsync(userId, ct);
 
-        // Drop ActiveTeams cache so consumers don't expose pre-purge identity until TTL.
-        teamService.InvalidateActiveTeamsCache();
-
         // Match AnonymizeExpiredAccountAsync's invalidation surface — contributors
         // run against the inner UserService, so nothing behind the caching
         // decorator has seen the collapse yet.
-        await userInfoInvalidator.InvalidateAsync(userId, ct);
-        roleAssignmentClaimsInvalidator.Invalidate(userId);
-        shiftAuthorizationInvalidator.Invalidate(userId);
-        shiftViewInvalidator.InvalidateUser(userId);
+        await userInfoRefresher.RefreshAsync(userId, ct);
 
         // GDPR audit — right-of-access reads from the audit log. Like the scheduled
         // path, the description must not name the human: the audit log survives
@@ -184,12 +185,7 @@ internal sealed class AccountDeletionService(
         // The UserInfo entry first: contributors are registered against the inner
         // UserService, so nothing behind the caching decorator has seen these writes
         // and admin search would keep matching the erased human by their real name.
-        await userInfoInvalidator.InvalidateAsync(userId, ct);
-        teamService.RemoveMemberFromAllTeamsCache(userId);
-        teamService.InvalidateActiveTeamsCache();
-        roleAssignmentClaimsInvalidator.Invalidate(userId);
-        shiftAuthorizationInvalidator.Invalidate(userId);
-        shiftViewInvalidator.InvalidateUser(userId);
+        await userInfoRefresher.RefreshAsync(userId, ct);
 
         return summary;
     }
@@ -224,7 +220,7 @@ internal sealed class AccountDeletionService(
             // inner UserService, and the callers only invalidate the survivor. A stale entry
             // would keep the merge tombstone's name searchable after it was erased.
             if (subjectId != userId)
-                await userInfoInvalidator.InvalidateAsync(subjectId, ct);
+                await userInfoRefresher.RefreshAsync(subjectId, ct);
         }
     }
 

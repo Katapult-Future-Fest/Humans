@@ -1,3 +1,4 @@
+using Humans.Users.Tests.Infrastructure;
 using Humans.Users.Services;
 using System.Security.Claims;
 using AwesomeAssertions;
@@ -206,7 +207,7 @@ public class ProfileApiControllerTests
         // (401) instead of returning rows with empty details.
         var sut = BuildSut(currentUser: null);
 
-        var result = await sut.Search(q: "David", ct: Xunit.TestContext.Current.CancellationToken);
+        var result = await sut.Search(q: "David", ct: TestContext.Current.CancellationToken);
 
         result.Should().BeOfType<UnauthorizedResult>();
 
@@ -235,16 +236,16 @@ public class ProfileApiControllerTests
                 ContactFieldVisibility.AllActiveProfiles, Arg.Any<CancellationToken>())
             .Returns([
                 new UserEmailDto(Guid.NewGuid(), "alt@example.com",
-                    IsVerified: true, IsGoogle: false, Provider: null, ProviderKey: null,
+                    IsVerified: true, Provider: null, ProviderKey: null,
                     IsPrimary: false, Visibility: ContactFieldVisibility.AllActiveProfiles),
                 new UserEmailDto(Guid.NewGuid(), "primary@example.com",
-                    IsVerified: true, IsGoogle: false, Provider: null, ProviderKey: null,
+                    IsVerified: true, Provider: null, ProviderKey: null,
                     IsPrimary: true, Visibility: ContactFieldVisibility.AllActiveProfiles)
             ]);
 
         var sut = BuildSut(viewer);
 
-        var result = await sut.Search(q: "David", ct: Xunit.TestContext.Current.CancellationToken);
+        var result = await sut.Search(q: "David", ct: TestContext.Current.CancellationToken);
 
         var row = result.Should().BeOfType<OkObjectResult>().Subject.Value
             .Should().BeAssignableTo<IEnumerable<HumanLookupSearchResult>>().Subject.Single();
@@ -279,7 +280,7 @@ public class ProfileApiControllerTests
 
         var sut = BuildSut(viewer);
 
-        var result = await sut.Search(q: "David", ct: Xunit.TestContext.Current.CancellationToken);
+        var result = await sut.Search(q: "David", ct: TestContext.Current.CancellationToken);
 
         var row = result.Should().BeOfType<OkObjectResult>().Subject.Value
             .Should().BeAssignableTo<IEnumerable<HumanLookupSearchResult>>().Subject.Single();
@@ -306,7 +307,7 @@ public class ProfileApiControllerTests
 
         var sut = BuildSut(viewer);
 
-        var result = await sut.Search(q: "David", ct: Xunit.TestContext.Current.CancellationToken);
+        var result = await sut.Search(q: "David", ct: TestContext.Current.CancellationToken);
 
         result.Should().BeOfType<OkObjectResult>().Subject.Value
             .Should().BeAssignableTo<IEnumerable<HumanLookupSearchResult>>().Subject
@@ -341,7 +342,7 @@ public class ProfileApiControllerTests
 
         var sut = BuildSut(viewer);
 
-        var result = await sut.Search(q: "David", ct: Xunit.TestContext.Current.CancellationToken);
+        var result = await sut.Search(q: "David", ct: TestContext.Current.CancellationToken);
 
         var row = result.Should().BeOfType<OkObjectResult>().Subject.Value
             .Should().BeAssignableTo<IEnumerable<HumanLookupSearchResult>>().Subject.Single();
@@ -377,7 +378,7 @@ public class ProfileApiControllerTests
 
         var sut = BuildSut(viewer);
 
-        var result = await sut.Search(q: "Ian", ct: Xunit.TestContext.Current.CancellationToken);
+        var result = await sut.Search(q: "Ian", ct: TestContext.Current.CancellationToken);
 
         var rows = result.Should().BeOfType<OkObjectResult>().Subject.Value
             .Should().BeAssignableTo<IEnumerable<HumanLookupSearchResult>>().Subject.ToList();
@@ -409,7 +410,7 @@ public class ProfileApiControllerTests
 
         var sut = BuildSut(viewer);
 
-        var result = await sut.Search(q: "Friend@Example.com", scope: null, allowEmail: true, ct: Xunit.TestContext.Current.CancellationToken);
+        var result = await sut.Search(q: "Friend@Example.com", scope: null, allowEmail: true, ct: TestContext.Current.CancellationToken);
 
         var row = result.Should().BeOfType<OkObjectResult>().Subject.Value
             .Should().BeAssignableTo<IEnumerable<HumanLookupSearchResult>>().Subject.Single();
@@ -428,7 +429,7 @@ public class ProfileApiControllerTests
 
         var sut = BuildSut(viewer);
 
-        var result = await sut.Search(q: "nobody@example.com", scope: null, allowEmail: true, ct: Xunit.TestContext.Current.CancellationToken);
+        var result = await sut.Search(q: "nobody@example.com", scope: null, allowEmail: true, ct: TestContext.Current.CancellationToken);
 
         result.Should().BeOfType<OkObjectResult>().Subject.Value
             .Should().BeAssignableTo<IEnumerable<HumanLookupSearchResult>>().Subject.Should().BeEmpty();
@@ -444,7 +445,7 @@ public class ProfileApiControllerTests
 
         var sut = BuildSut(viewer);
 
-        await sut.Search(q: "friend@example.com", scope: null, allowEmail: false, ct: Xunit.TestContext.Current.CancellationToken);
+        await sut.Search(q: "friend@example.com", scope: null, allowEmail: false, ct: TestContext.Current.CancellationToken);
 
         await _userEmailService.DidNotReceive().FindByAddressAsync(
             Arg.Any<string>(), Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<CancellationToken>());
@@ -463,7 +464,7 @@ public class ProfileApiControllerTests
 
         var sut = BuildSut(viewer);
 
-        var result = await sut.GetByUserId(Guid.NewGuid(), Xunit.TestContext.Current.CancellationToken);
+        var result = await sut.GetByUserId(Guid.NewGuid(), TestContext.Current.CancellationToken);
 
         result.Should().BeOfType<NotFoundResult>();
     }
@@ -480,7 +481,7 @@ public class ProfileApiControllerTests
 
         var sut = BuildSut(viewer);
 
-        var result = await sut.GetByUserId(targetUserId, Xunit.TestContext.Current.CancellationToken);
+        var result = await sut.GetByUserId(targetUserId, TestContext.Current.CancellationToken);
 
         result.Should().BeOfType<NotFoundResult>();
     }
@@ -499,13 +500,13 @@ public class ProfileApiControllerTests
         _userEmailService.GetVisibleEmailsAsync(targetUserId, Arg.Any<ContactFieldVisibility>(), Arg.Any<CancellationToken>())
             .Returns([
                 new UserEmailDto(Guid.NewGuid(), "shared@example.com",
-                    IsVerified: true, IsGoogle: false, Provider: null, ProviderKey: null,
+                    IsVerified: true, Provider: null, ProviderKey: null,
                     IsPrimary: true, Visibility: ContactFieldVisibility.AllActiveProfiles)
             ]);
 
         var sut = BuildSut(viewer);
 
-        var result = await sut.GetByUserId(targetUserId, Xunit.TestContext.Current.CancellationToken);
+        var result = await sut.GetByUserId(targetUserId, TestContext.Current.CancellationToken);
 
         var row = result.Should().BeOfType<OkObjectResult>().Subject.Value
             .Should().BeOfType<HumanLookupSearchResult>().Subject;

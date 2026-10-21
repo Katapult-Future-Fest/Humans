@@ -288,6 +288,32 @@ public sealed class EventRepositoryTests : IDisposable
     }
 
     [HumansFact]
+    public async Task PointReads_LoadCategoryVenueAndModerationHistory()
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var category = SeedCategory("Workshop", "workshop", 1);
+        var venue = SeedVenue("Main stage", 1);
+        var submitterId = Guid.NewGuid();
+        var campId = Guid.NewGuid();
+        var individual = SeedEvent(category.Id, submitterId, EventStatus.Pending, _clock.GetCurrentInstant(), venueId: venue.Id);
+        var camp = SeedEvent(category.Id, submitterId, EventStatus.Pending, _clock.GetCurrentInstant(), campId: campId);
+        _db.EventModerationActions.Add(BuildModerationAction(individual.Id, Guid.NewGuid(), EventModerationActionType.ResubmitRequested));
+        await _db.SaveChangesAsync(ct);
+
+        var user = await _repo.GetUserEventAsync(individual.Id, submitterId, ct);
+        var details = await _repo.GetEventWithDetailsAsync(individual.Id, ct);
+        var campEvent = await _repo.GetCampEventAsync(camp.Id, campId, ct);
+
+        foreach (var e in new[] { user!, details! })
+        {
+            e.Category.Slug.Should().Be("workshop");
+            e.EventVenue!.Name.Should().Be("Main stage");
+            e.EventModerationActions.Should().ContainSingle();
+        }
+        campEvent!.Category.Slug.Should().Be("workshop");
+    }
+
+    [HumansFact]
     public async Task SaveEventAndModerationActionAsync_KeepsEarlierActions()
     {
         var category = SeedCategory("Workshop", "workshop", 1);
@@ -310,6 +336,107 @@ public sealed class EventRepositoryTests : IDisposable
             .ToListAsync(Xunit.TestContext.Current.CancellationToken);
         actions.Should().BeEquivalentTo(
             [EventModerationActionType.ResubmitRequested, EventModerationActionType.Approved]);
+    }
+
+    [HumansFact]
+    public async Task ReassignToUserAsync_MovesSubmissionsFavouritesAndPreferenceToTarget()
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var category = SeedCategory("Workshop", "workshop", 1);
+        var source = Guid.NewGuid();
+        var target = Guid.NewGuid();
+        var other = Guid.NewGuid();
+        var personal = SeedEvent(category.Id, source, EventStatus.Approved, _clock.GetCurrentInstant());
+        var barrio = SeedEvent(category.Id, source, EventStatus.Pending, _clock.GetCurrentInstant(), campId: Guid.NewGuid());
+        var unrelated = SeedEvent(category.Id, other, EventStatus.Approved, _clock.GetCurrentInstant());
+        var favouriteEvent = Guid.NewGuid();
+        await _db.EventFavourites.AddRangeAsync(
+            BuildFavourite(source, favouriteEvent, dayOffset: 2),
+            BuildFavourite(other, favouriteEvent, dayOffset: 2));
+        await _db.EventPreferences.AddAsync(BuildPreference(source, "[\"adult\"]"), ct);
+        await _db.SaveChangesAsync(ct);
+        var mergedAt = _clock.GetCurrentInstant().Plus(Duration.FromHours(1));
+
+        await _repo.ReassignToUserAsync(source, target, mergedAt, ct);
+
+        var events = await _db.Events.AsNoTracking().ToDictionaryAsync(e => e.Id, ct);
+        events[personal.Id].SubmitterUserId.Should().Be(target);
+        events[barrio.Id].SubmitterUserId.Should().Be(target);
+        events[personal.Id].LastUpdatedAt.Should().Be(mergedAt);
+        events[unrelated.Id].SubmitterUserId.Should().Be(other);
+        events[unrelated.Id].LastUpdatedAt.Should().Be(_clock.GetCurrentInstant());
+        (await _repo.GetFavouritesForContributorAsync(target, ct)).Select(f => (f.GuideEventId, f.DayOffset))
+            .Should().BeEquivalentTo([(favouriteEvent, (int?)2)]);
+        (await _repo.GetFavouritesForContributorAsync(other, ct)).Should().ContainSingle();
+        (await _repo.GetFavouritesForContributorAsync(source, ct)).Should().BeEmpty();
+        var preference = await _repo.GetPreferenceAsync(target, ct);
+        preference!.ExcludedCategorySlugs.Should().Be("[\"adult\"]");
+        preference.UpdatedAt.Should().Be(mergedAt);
+        (await _repo.GetPreferenceAsync(source, ct)).Should().BeNull();
+    }
+
+    [HumansFact]
+    public async Task ReassignToUserAsync_DropsFavouritesTheTargetCovers_AndKeepsTheTargetsPreference()
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var source = Guid.NewGuid();
+        var target = Guid.NewGuid();
+        var (wholeOnTarget, wholeOnSource, sameDay, otherDay) = (Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid());
+        await _db.EventFavourites.AddRangeAsync(
+            BuildFavourite(target, wholeOnTarget, dayOffset: null),
+            BuildFavourite(source, wholeOnTarget, dayOffset: 2),
+            BuildFavourite(target, wholeOnSource, dayOffset: 3),
+            BuildFavourite(source, wholeOnSource, dayOffset: null),
+            BuildFavourite(target, sameDay, dayOffset: 5),
+            BuildFavourite(source, sameDay, dayOffset: 5),
+            BuildFavourite(target, otherDay, dayOffset: 4),
+            BuildFavourite(source, otherDay, dayOffset: 2));
+        var targetPreference = BuildPreference(target, "[\"spiritual\"]");
+        var sourcePreference = BuildPreference(source, "[\"adult\"]");
+        await _db.EventPreferences.AddRangeAsync(targetPreference, sourcePreference);
+        await _db.SaveChangesAsync(ct);
+
+        await _repo.ReassignToUserAsync(source, target, _clock.GetCurrentInstant().Plus(Duration.FromHours(1)), ct);
+
+        // Survivor wins: a target favourite that already covers the source's is kept as-is.
+        (await _repo.GetFavouritesForContributorAsync(target, ct)).Select(f => (f.GuideEventId, f.DayOffset))
+            .Should().BeEquivalentTo(new (Guid, int?)[]
+            {
+                (wholeOnTarget, null), (wholeOnSource, 3), (sameDay, 5), (otherDay, 4), (otherDay, 2)
+            });
+        (await _repo.GetFavouritesForContributorAsync(source, ct)).Should().BeEmpty();
+        (await _repo.GetPreferenceAsync(target, ct)).Should().BeEquivalentTo(targetPreference);
+        (await _repo.GetPreferenceAsync(source, ct)).Should().BeEquivalentTo(sourcePreference,
+            "the losing preference stays on the archived account as history");
+    }
+
+    [HumansFact]
+    public async Task ReassignToUserAsync_RerunIsANoOp()
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var category = SeedCategory("Workshop", "workshop", 1);
+        var source = Guid.NewGuid();
+        var target = Guid.NewGuid();
+        var submission = SeedEvent(category.Id, source, EventStatus.Approved, _clock.GetCurrentInstant());
+        var eventId = Guid.NewGuid();
+        await _db.EventFavourites.AddRangeAsync(
+            BuildFavourite(source, eventId, dayOffset: 1),
+            BuildFavourite(target, eventId, dayOffset: 1),
+            BuildFavourite(source, Guid.NewGuid(), dayOffset: null));
+        await _db.EventPreferences.AddRangeAsync(BuildPreference(source, "[]"), BuildPreference(target, "[\"adult\"]"));
+        await _db.SaveChangesAsync(ct);
+        var firstRun = _clock.GetCurrentInstant().Plus(Duration.FromHours(1));
+        await _repo.ReassignToUserAsync(source, target, firstRun, ct);
+        var favouritesAfterFirst = await _repo.GetFavouritesForContributorAsync(target, ct);
+        var preferencesAfterFirst = await _db.EventPreferences.AsNoTracking().ToListAsync(ct);
+
+        await _repo.ReassignToUserAsync(source, target, firstRun.Plus(Duration.FromHours(1)), ct);
+
+        (await _repo.GetFavouritesForContributorAsync(target, ct)).Should().BeEquivalentTo(favouritesAfterFirst);
+        (await _db.EventPreferences.AsNoTracking().ToListAsync(ct)).Should().BeEquivalentTo(preferencesAfterFirst);
+        var moved = await _db.Events.AsNoTracking().SingleAsync(e => e.Id == submission.Id, ct);
+        moved.SubmitterUserId.Should().Be(target);
+        moved.LastUpdatedAt.Should().Be(firstRun, "a rerun finds nothing left to move");
     }
 
     private EventCategory SeedCategory(string name, string slug, int displayOrder, bool isActive = true)
@@ -375,6 +502,15 @@ public sealed class EventRepositoryTests : IDisposable
             GuideEventId = guideEventId,
             DayOffset = dayOffset,
             CreatedAt = _clock.GetCurrentInstant()
+        };
+
+    private EventPreference BuildPreference(Guid userId, string excludedSlugsJson)
+        => new()
+        {
+            Id = Guid.NewGuid(),
+            UserId = userId,
+            ExcludedCategorySlugs = excludedSlugsJson,
+            UpdatedAt = _clock.GetCurrentInstant()
         };
 
     private EventModerationAction BuildModerationAction(Guid guideEventId, Guid actorUserId, EventModerationActionType action)

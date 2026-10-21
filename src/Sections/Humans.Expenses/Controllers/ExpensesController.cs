@@ -25,6 +25,7 @@ internal sealed class ExpensesController(
     IExpenseReportManagement service,
     IBudgetService budgetService,
     IHoldedFinanceService holdedFinance,
+    IFinanceService finance,
     IPreapprovalService preapprovals,
     IAuthorizationService authService,
     IClock clock,
@@ -49,7 +50,6 @@ internal sealed class ExpensesController(
             var reports = (await service.GetForSubmitterAsync(user.Id, HttpContext.RequestAborted))
                 .OrderByDescending(r => r.CreatedAt).ToList();
             var activeYear = await budgetService.GetActiveYearAsync(HttpContext.RequestAborted);
-            var info = await _userService.GetUserInfoAsync(user.Id, HttpContext.RequestAborted);
 
             var bookingLabels = await ResolveBookingLabelsAsync(reports, HttpContext.RequestAborted);
 
@@ -83,7 +83,7 @@ internal sealed class ExpensesController(
             {
                 Reports = reports,
                 HasActiveYear = activeYear is not null,
-                HasIban = !string.IsNullOrEmpty(info?.Profile?.Iban),
+                HasIban = (await GetIbanViewAsync(user.Id, HttpContext.RequestAborted)).HasIban,
                 BookingLabels = bookingLabels,
                 OpenGrants = openGrants,
                 Today = Today,
@@ -228,11 +228,8 @@ internal sealed class ExpensesController(
 
             var isFinanceAdmin = await IsFinanceAdminAsync();
             var decisions = await ResolveDecisionsAsync(report);
-            // The submitter reads the payment half of the timeline; the finance admin reads the push
-            // half and is the only one who can act on a failed push.
-            var timeline = isSubmitter || isFinanceAdmin
-                ? await service.GetHoldedTimelineAsync(report, HttpContext.RequestAborted)
-                : null;
+            // Anyone who may view the report sees its whole Holded timeline; nothing in it is sensitive.
+            var timeline = await service.GetHoldedTimelineAsync(report, HttpContext.RequestAborted);
             var creditor = await GetCreditorBindingViewAsync(report.SubmitterUserId, isFinanceAdmin, HttpContext.RequestAborted);
             var grant = report.PreapprovalGrantId is { } grantId
                 ? await preapprovals.GetGrantAsync(grantId, HttpContext.RequestAborted)
@@ -762,11 +759,9 @@ internal sealed class ExpensesController(
                 SubmitterNames = submitterNames,
                 BookingLabels = await ResolveBookingLabelsAsync(reports, HttpContext.RequestAborted),
                 Grants = await ResolveGrantsAsync(reports, HttpContext.RequestAborted),
-                // Finance admins are the only ones who can act on a written-off push, and the
-                // list is queue-wide rather than scoped, so it stays with them.
-                FailedHoldedPushReportIds = isFinanceAdmin
-                    ? (await service.GetFailedHoldedPushReportIdsAsync(HttpContext.RequestAborted)).ToHashSet()
-                    : [],
+                FailedHoldedPushReportIds = (await service.GetFailedHoldedPushReportIdsAsync(
+                    isFinanceAdmin, HttpContext.RequestAborted)).ToHashSet(),
+                IsFinanceAdmin = isFinanceAdmin,
             });
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -859,18 +854,14 @@ internal sealed class ExpensesController(
 
     /// <summary>
     /// Which decisions the detail page offers the current user. The authorization handler owns the
-    /// actor matrix; the status guard here mirrors the repository's, so a button that would be
-    /// refused on arrival is not drawn.
+    /// actor matrix and each decision's status gate.
     /// </summary>
     private async Task<(bool Approve, bool FinanceReject, bool Endorse, bool CoordinatorReject)>
         ResolveDecisionsAsync(ExpenseReportDto report)
     {
-        var isPending = report.Status is ExpenseReportStatus.Submitted
-            or ExpenseReportStatus.CoordinatorEndorsed;
         return (
-            Approve: isPending && await AllowsAsync(report, ExpenseReportOperation.Approve),
-            FinanceReject: isPending && await AllowsAsync(report, ExpenseReportOperation.FinanceReject),
-            // The handler already restricts both coordinator operations to Submitted.
+            Approve: await AllowsAsync(report, ExpenseReportOperation.Approve),
+            FinanceReject: await AllowsAsync(report, ExpenseReportOperation.FinanceReject),
             Endorse: await AllowsAsync(report, ExpenseReportOperation.Endorse),
             CoordinatorReject: await AllowsAsync(report, ExpenseReportOperation.CoordinatorReject));
     }
@@ -1053,7 +1044,7 @@ internal sealed class ExpensesController(
 
     private async Task<(bool HasIban, string? MaskedIban)> GetIbanViewAsync(Guid userId, CancellationToken ct = default)
     {
-        var iban = (await _userService.GetUserInfoAsync(userId, ct))?.Profile?.Iban;
+        var iban = await finance.GetIbanAsync(userId, ct);
         var hasIban = !string.IsNullOrEmpty(iban);
         return (hasIban, hasIban ? IbanFormatter.Mask(iban!) : null);
     }

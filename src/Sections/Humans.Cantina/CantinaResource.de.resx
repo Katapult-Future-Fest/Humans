@@ -63,4 +63,35 @@
   <data name="Cantina_Matrix_OtherIntolerance" xml:space="preserve"><value>Other intolerance</value></data>
   <data name="Cantina_Matrix_OtherIntoleranceText" xml:space="preserve"><value>Other intolerance text</value></data>
   <data name="Cantina_Matrix_Totals" xml:space="preserve"><value>TOTALS</value></data>
+  <data name="Cantina_Dietary_DietaryPreference_Label" xml:space="preserve"><value>Ernährungsweise</value></data>
+  <data name="Cantina_Dietary_DietaryPreference_Omnivore" xml:space="preserve"><value>Omnivor</value></data>
+  <data name="Cantina_Dietary_DietaryPreference_Vegetarian" xml:space="preserve"><value>Vegetarisch</value></data>
+  <data name="Cantina_Dietary_DietaryPreference_Vegan" xml:space="preserve"><value>Vegan</value></data>
+  <data name="Cantina_Dietary_DietaryPreference_Pescatarian" xml:space="preserve"><value>Pescetarisch</value></data>
+  <data name="Cantina_Dietary_Allergies_Label" xml:space="preserve"><value>Allergien</value></data>
+  <data name="Cantina_Dietary_AllergyOther_Label" xml:space="preserve"><value>Andere Allergie — bitte beschreiben</value></data>
+  <data name="Cantina_Dietary_Intolerances_Label" xml:space="preserve"><value>Unverträglichkeiten</value></data>
+  <data name="Cantina_Dietary_IntoleranceOther_Label" xml:space="preserve"><value>Andere Unverträglichkeit — bitte beschreiben</value></data>
+  <data name="Cantina_Dietary_Allergy_Dairy" xml:space="preserve"><value>Milchprodukte</value></data>
+  <data name="Cantina_Dietary_Allergy_Egg" xml:space="preserve"><value>Ei</value></data>
+  <data name="Cantina_Dietary_Allergy_Peanut" xml:space="preserve"><value>Erdnuss</value></data>
+  <data name="Cantina_Dietary_Allergy_Sesame" xml:space="preserve"><value>Sesam</value></data>
+  <data name="Cantina_Dietary_Allergy_Shellfish" xml:space="preserve"><value>Schalentiere</value></data>
+  <data name="Cantina_Dietary_Allergy_Soy" xml:space="preserve"><value>Soja</value></data>
+  <data name="Cantina_Dietary_Allergy_Treenut" xml:space="preserve"><value>Schalenfrucht</value></data>
+  <data name="Cantina_Dietary_Allergy_WheatGluten" xml:space="preserve"><value>Weizen/Gluten</value></data>
+  <data name="Cantina_Dietary_Intolerance_Gluten" xml:space="preserve"><value>Gluten</value></data>
+  <data name="Cantina_Dietary_Intolerance_Histamine" xml:space="preserve"><value>Histamin</value></data>
+  <data name="Cantina_Dietary_Intolerance_Lactose" xml:space="preserve"><value>Laktose</value></data>
+  <data name="Cantina_Dietary_AllergyOther_Required" xml:space="preserve"><value>Bitte beschreibe die andere Allergie.</value></data>
+  <data name="Cantina_Dietary_IntoleranceOther_Required" xml:space="preserve"><value>Bitte beschreibe die andere Unverträglichkeit.</value></data>
+  <data name="Cantina_Dietary_BreadcrumbNavigation" xml:space="preserve"><value>Navigationspfad</value></data>
+  <data name="Cantina_Dietary_PageTitle" xml:space="preserve"><value>Ernährungsangaben</value></data>
+  <data name="Cantina_Dietary_Saved" xml:space="preserve"><value>Deine Ernährungsangaben wurden gespeichert.</value></data>
+  <data name="Cantina_Dietary_SaveFailed" xml:space="preserve"><value>Die Ernährungsangaben konnten nicht gespeichert werden.</value></data>
+  <data name="Cantina_Dietary_LoadFailed" xml:space="preserve"><value>Die Ernährungsangaben konnten nicht geladen werden.</value></data>
+  <data name="Cantina_Dietary_OptionalHint" xml:space="preserve"><value>Freiwillig. Es hilft der Kantine, die Mahlzeiten für lange Schichten zu planen, und hat nie Einfluss auf deine Schichtanmeldungen.</value></data>
+  <data name="Cantina_Dietary_DeclineButton" xml:space="preserve"><value>Ich möchte nicht antworten</value></data>
+  <data name="Cantina_Dietary_Declined" xml:space="preserve"><value>Alles klar – wir fragen nicht mehr nach deinen Ernährungsangaben. Du kannst sie hier jederzeit ergänzen.</value></data>
+  <data name="Cantina_Dietary_DeclinedNotice" xml:space="preserve"><value>Du hast entschieden, keine Ernährungsangaben zu machen, deshalb fragen wir nicht nach. Du kannst sie jederzeit ausfüllen.</value></data>
 </root>

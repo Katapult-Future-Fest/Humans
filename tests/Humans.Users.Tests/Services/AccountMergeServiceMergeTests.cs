@@ -1,12 +1,9 @@
 using Xunit;
 using Microsoft.EntityFrameworkCore;
 using Humans.Users.Data;
-using Humans.Auth.Contracts;
 using AwesomeAssertions;
-using Humans.Consent.Contracts;
 using Humans.Users.Tests.Infrastructure;
 using Humans.AuditLog.Contracts;
-using Humans.Base.Interfaces.Caching;
 using Humans.Notifications.Contracts;
 using Humans.Teams.Contracts;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -23,12 +20,10 @@ public class AccountMergeServiceMergeTests
     private readonly IAccountMergeRepository _mergeRepo = Substitute.For<IAccountMergeRepository>();
     private readonly IUserRepository _userEmailRepo = Substitute.For<IUserRepository>();
     private readonly IAuditLogService _audit = Substitute.For<IAuditLogService>();
-    private readonly IUserInfoInvalidator _userInfoInvalidator = Substitute.For<IUserInfoInvalidator>();
+    private readonly IUserInfoSliceRefresher _userInfoRefresher = Substitute.For<IUserInfoSliceRefresher>();
     private readonly IUserManagement _userService = Substitute.For<IUserManagement>();
-    private readonly IActiveTeamsCacheInvalidator _activeTeamsCacheInvalidator = Substitute.For<IActiveTeamsCacheInvalidator>();
-    private readonly IRoleAssignmentWrite _roles = Substitute.For<IRoleAssignmentWrite>();
+    private readonly ITeamWrite _teams = Substitute.For<ITeamWrite>();
     private readonly INotificationService _notify = Substitute.For<INotificationService>();
-    private readonly IConsentCacheInvalidator _consentCache = Substitute.For<IConsentCacheInvalidator>();
     private readonly List<IUserMerge> _userMerges = [];
     private readonly FakeClock _clock = new(NodaTime.Instant.FromUtc(2026, 5, 5, 12, 0));
 
@@ -42,9 +37,9 @@ public class AccountMergeServiceMergeTests
 
     private AccountMergeService BuildSut(IAccountMergeRepository? mergeRepository = null) =>
         new(
-            mergeRepository ?? _mergeRepo, _userEmailRepo, _audit, _userInfoInvalidator,
+            mergeRepository ?? _mergeRepo, _userEmailRepo, _audit, _userInfoRefresher,
             NullLogger<AccountMergeService>.Instance, _clock,
-            _userMerges, _userService, _activeTeamsCacheInvalidator, _roles, _notify, _consentCache);
+            _userMerges, _userService, _teams, _notify);
 
     private void SetupUsers(Guid sourceId, Guid targetId, bool sourceTombstoned = false)
     {
@@ -93,14 +88,14 @@ public class AccountMergeServiceMergeTests
                 CreatedAt = _clock.GetCurrentInstant()
             });
         }
-        await db.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+        await db.SaveChangesAsync(TestContext.Current.CancellationToken);
         var requestedId = requestArchivedId ? oldestId : survivorId;
         _userService.GetUserInfoAsync(requestedId, Arg.Any<CancellationToken>())
             .Returns(new User { Id = survivorId }.ToUserInfo() with { MergedUserIds = [oldestId, archivedId] });
         var repository = new AccountMergeRepository(new TestDbContextFactory(options));
 
         var slices = await BuildSut(repository).ContributeForUserAsync(
-            requestedId, Xunit.TestContext.Current.CancellationToken);
+            requestedId, TestContext.Current.CancellationToken);
 
         using var json = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(
             slices.Single(s => string.Equals(s.SectionName, AccountMergeService.AccountMergeRequests,
@@ -122,7 +117,7 @@ public class AccountMergeServiceMergeTests
         _userMerges.Add(merger);
 
         // survivor = tgt, archived = src.
-        await BuildSut().MergeAsync(tgt, src, admin, ct: Xunit.TestContext.Current.CancellationToken);
+        await BuildSut().MergeAsync(tgt, src, admin, ct: TestContext.Current.CancellationToken);
 
         // Ordered, not transactional: the tombstone lands after every fan-out reassign.
         Received.InOrder(() =>
@@ -144,7 +139,7 @@ public class AccountMergeServiceMergeTests
     public async Task MergeAsync_SurvivorEqualsArchived_Throws()
     {
         var id = Guid.NewGuid();
-        var act = () => BuildSut().MergeAsync(id, id, Guid.NewGuid(), ct: Xunit.TestContext.Current.CancellationToken);
+        var act = () => BuildSut().MergeAsync(id, id, Guid.NewGuid(), ct: TestContext.Current.CancellationToken);
         await act.Should().ThrowAsync<InvalidOperationException>();
     }
 
@@ -155,7 +150,7 @@ public class AccountMergeServiceMergeTests
         _userService.GetRawUserInfoAsync(tgt, Arg.Any<CancellationToken>())
             .Returns(UserInfoFactory.Create(new User { Id = tgt }, [], [], [], null, [], [], [], []));
         // archived (src) returns null by default — Substitute.For<>'s default for ValueTask<UserInfo?> is null
-        var act = () => BuildSut().MergeAsync(tgt, src, Guid.NewGuid(), ct: Xunit.TestContext.Current.CancellationToken);
+        var act = () => BuildSut().MergeAsync(tgt, src, Guid.NewGuid(), ct: TestContext.Current.CancellationToken);
         await act.Should().ThrowAsync<InvalidOperationException>();
     }
 
@@ -164,9 +159,44 @@ public class AccountMergeServiceMergeTests
     {
         var src = Guid.NewGuid(); var tgt = Guid.NewGuid();
         SetupUsers(src, tgt, sourceTombstoned: true);
-        var act = () => BuildSut().MergeAsync(tgt, src, Guid.NewGuid(), ct: Xunit.TestContext.Current.CancellationToken);
+        var act = () => BuildSut().MergeAsync(tgt, src, Guid.NewGuid(), ct: TestContext.Current.CancellationToken);
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*tombstoned*");
+    }
+
+    [HumansFact]
+    public async Task MergeAsync_EvictsTeamGraphAfterTombstone()
+    {
+        var src = Guid.NewGuid(); var tgt = Guid.NewGuid(); var admin = Guid.NewGuid();
+        SetupUsers(src, tgt);
+
+        await BuildSut().MergeAsync(tgt, src, admin, ct: TestContext.Current.CancellationToken);
+
+        // The team graph stitches members' UserInfo; the tombstone changes what the archived
+        // id resolves to, so the eviction must follow it, not ride Teams' own ReassignAsync.
+        Received.InOrder(() =>
+        {
+            _ = _userService.AnonymizeForMergeAsync(src, tgt,
+                Arg.Any<NodaTime.Instant>(), Arg.Any<CancellationToken>());
+            _teams.InvalidateActiveTeamsCache();
+        });
+        _teams.Received(1).InvalidateActiveTeamsCache();
+    }
+
+    [HumansFact]
+    public async Task MergeAsync_FanOutThrows_StillEvictsTeamGraph()
+    {
+        var src = Guid.NewGuid(); var tgt = Guid.NewGuid(); var admin = Guid.NewGuid();
+        SetupUsers(src, tgt);
+        var merger = Substitute.For<IUserMerge>();
+        merger.ReassignAsync(src, tgt, admin, Arg.Any<NodaTime.Instant>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromException(new InvalidOperationException("boom")));
+        _userMerges.Add(merger);
+
+        var act = () => BuildSut().MergeAsync(tgt, src, admin, ct: TestContext.Current.CancellationToken);
+
+        await act.Should().ThrowAsync<InvalidOperationException>();
+        _teams.Received(1).InvalidateActiveTeamsCache();
     }
 
     [HumansFact]
@@ -190,7 +220,7 @@ public class AccountMergeServiceMergeTests
         _userService.GetRawUserInfoAsync(tgt, Arg.Any<CancellationToken>())
             .Returns(new User { Id = tgt }.ToUserInfo());
 
-        await BuildSut().ReconcileMergedRequestAsync(req.Id, admin, Xunit.TestContext.Current.CancellationToken);
+        await BuildSut().ReconcileMergedRequestAsync(req.Id, admin, TestContext.Current.CancellationToken);
 
         req.Status.Should().Be(AccountMergeRequestStatus.Accepted);
         req.ResolvedByUserId.Should().Be(admin);
@@ -217,7 +247,7 @@ public class AccountMergeServiceMergeTests
         _userService.GetRawUserInfoAsync(tgt, Arg.Any<CancellationToken>())
             .Returns(new User { Id = tgt }.ToUserInfo());
 
-        var act = () => BuildSut().ReconcileMergedRequestAsync(req.Id, Guid.NewGuid(), Xunit.TestContext.Current.CancellationToken);
+        var act = () => BuildSut().ReconcileMergedRequestAsync(req.Id, Guid.NewGuid(), TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*not merged into each other*");
@@ -243,7 +273,7 @@ public class AccountMergeServiceMergeTests
         _userService.GetRawUserInfoAsync(tgt, Arg.Any<CancellationToken>())
             .Returns(new User { Id = tgt }.ToUserInfo());
 
-        var act = () => BuildSut().ReconcileMergedRequestAsync(req.Id, Guid.NewGuid(), Xunit.TestContext.Current.CancellationToken);
+        var act = () => BuildSut().ReconcileMergedRequestAsync(req.Id, Guid.NewGuid(), TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*not merged into each other*");

@@ -1,28 +1,29 @@
+using Humans.Cantina.Contracts;
 using Humans.Shifts.Contracts;
 using Microsoft.AspNetCore.Mvc;
-using Humans.Users.Contracts;
 
 namespace Humans.Shifts.ViewComponents;
 
 /// <summary>
-/// Renders a red banner on /Shifts and /Shifts/Mine when the user has a
-/// qualifying cantina signup but no dietary info on file. The visibility
-/// gate lives inside the component so callers can invoke it unconditionally.
-/// Spec: src/Sections/Humans.Users/Docs/features/dietary-medical-nudge.md (US-35.6)
+/// Renders a gentle dietary-info prompt on /Shifts and /Shifts/Mine when the user has a
+/// qualifying cantina signup and Cantina has neither a preference nor an "I don't want to answer"
+/// on file. It never blocks a signup. The visibility gate lives inside the
+/// component so callers can invoke it unconditionally.
+/// Spec: src/Sections/Humans.Cantina/Docs/features/dietary-nudge.md
 /// </summary>
 public sealed class DietaryMissingBannerViewComponent : ViewComponent
 {
-    private readonly IShiftManagementService _shiftMgmt;
-    private readonly IUserService _userRead;
+    private readonly IShiftService _shiftMgmt;
+    private readonly ICantinaService _cantina;
     private readonly ILogger<DietaryMissingBannerViewComponent> _logger;
 
     public DietaryMissingBannerViewComponent(
-        IShiftManagementService shiftMgmt,
-        IUserService userRead,
+        IShiftService shiftMgmt,
+        ICantinaService cantina,
         ILogger<DietaryMissingBannerViewComponent> logger)
     {
         _shiftMgmt = shiftMgmt;
-        _userRead = userRead;
+        _cantina = cantina;
         _logger = logger;
     }
 
@@ -31,11 +32,10 @@ public sealed class DietaryMissingBannerViewComponent : ViewComponent
         var ct = HttpContext.RequestAborted;
         try
         {
-            var hasQualifyingSignup = await _shiftMgmt.HasQualifyingCantinaSignupAsync(userId, ct);
-            if (!hasQualifyingSignup) return Content(string.Empty);
-
-            var profile = (await _userRead.GetUserInfoAsync(userId, ct))?.Profile;
-            if (!string.IsNullOrEmpty(profile?.DietaryPreference)) return Content(string.Empty);
+            // The banner's copy speaks to a long shift, so it only shows with one booked.
+            if (!await _shiftMgmt.HasQualifyingCantinaSignupAsync(userId, ct)) return Content(string.Empty);
+            var dietary = await _cantina.GetDietaryProfileAsync(userId, ct);
+            if (dietary is { HasPreference: true } or { DeclinedToAnswer: true }) return Content(string.Empty);
 
             return View();
         }

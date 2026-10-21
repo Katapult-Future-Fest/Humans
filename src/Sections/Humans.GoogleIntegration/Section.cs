@@ -1,5 +1,6 @@
 using Humans.Email.Contracts;
 using Humans.Gdpr.Contracts;
+using Humans.GoogleIntegration.Authorization;
 using Humans.GoogleIntegration.Contracts;
 using Humans.GoogleIntegration.Data;
 using Humans.GoogleIntegration.Jobs;
@@ -7,9 +8,11 @@ using Humans.GoogleIntegration.Services;
 using Humans.GoogleIntegration.Services.Workspace;
 using Humans.Base.Configuration;
 using Humans.Base.Hosting;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Humans.Base.Interfaces;
+using Humans.Users.Contracts;
 
 namespace Humans.GoogleIntegration;
 
@@ -46,6 +49,16 @@ public sealed class Section : ISection
         services.AddSingleton<IGoogleResourceRepository, GoogleResourceRepository>();
         services.AddSingleton<IGoogleSyncOutboxRepository, GoogleSyncOutboxRepository>();
         services.AddSingleton<IGoogleSyncLogRepository, GoogleSyncLogRepository>();
+        services.AddSingleton<IWorkspaceIdentityRepository, WorkspaceIdentityRepository>();
+
+        // google_workspace_identities (Users decomposition commit 15): reads, the Users seam,
+        // the Article 15/17 slice and the account-merge fold.
+        services.AddScoped<WorkspaceIdentityService>();
+        services.AddScoped<IWorkspaceIdentityManagement>(sp => sp.GetRequiredService<WorkspaceIdentityService>());
+        services.AddScoped<IGoogleIntegrationService>(sp => sp.GetRequiredService<WorkspaceIdentityService>());
+        services.AddScoped<IGoogleIntegrationWrite>(sp => sp.GetRequiredService<WorkspaceIdentityService>());
+        services.AddScoped<IUserDataContributor>(sp => sp.GetRequiredService<WorkspaceIdentityService>());
+        services.AddScoped<IUserMerge>(sp => sp.GetRequiredService<WorkspaceIdentityService>());
 
         services.AddScoped<GoogleSyncLogService>();
         services.AddScoped<IGoogleSyncLogService>(sp => sp.GetRequiredService<GoogleSyncLogService>());
@@ -75,7 +88,8 @@ public sealed class Section : ISection
 
         services.AddScoped<ITeamResourceManagement, TeamResourceService>();
         services.AddScoped<ITeamResourceService>(sp => sp.GetRequiredService<ITeamResourceManagement>());
-        services.AddScoped<ITeamResourceWrite>(sp => sp.GetRequiredService<ITeamResourceManagement>());
+        // The per-team gate on TeamResourcesController (/Google/Teams/{slug}/Resources).
+        services.AddScoped<IAuthorizationHandler, TeamResourceAuthorizationHandler>();
 
         // Real Google clients when a service-account key is configured, stubs otherwise.
         // The health check reports the missing configuration as Degraded in every environment.

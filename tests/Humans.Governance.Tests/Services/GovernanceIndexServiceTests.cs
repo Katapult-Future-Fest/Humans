@@ -36,13 +36,13 @@ public sealed class GovernanceIndexServiceTests
     {
         var userId = Guid.NewGuid();
         Applications.GetUserApplicationsAsync(userId, Arg.Any<CancellationToken>())
-            .Returns((IReadOnlyList<UserApplicationSnapshot>)[]);
+            .Returns([]);
         Applications.GetActiveApprovedTierUserIdsAsync(
                 MembershipTier.Colaborador, Arg.Any<LocalDate>(), Arg.Any<CancellationToken>())
-            .Returns((IReadOnlyList<Guid>)[userId]);
+            .Returns([userId]);
         Applications.GetActiveApprovedTierUserIdsAsync(
                 MembershipTier.Asociado, Arg.Any<LocalDate>(), Arg.Any<CancellationToken>())
-            .Returns((IReadOnlyList<Guid>)[userId, Guid.NewGuid()]);
+            .Returns([userId, Guid.NewGuid()]);
 
         var data = await CreateService().GetIndexDataAsync(userId);
 
@@ -56,7 +56,7 @@ public sealed class GovernanceIndexServiceTests
     {
         using var cancellation = new CancellationTokenSource();
         Applications.GetUserApplicationsAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>())
-            .Returns((IReadOnlyList<UserApplicationSnapshot>)[]);
+            .Returns([]);
 
         await CreateService().GetIndexDataAsync(Guid.NewGuid(), cancellation.Token);
 
@@ -74,7 +74,7 @@ public sealed class GovernanceIndexServiceTests
         var userId = Guid.NewGuid();
         var stored = new LocalDate(2029, 12, 31);
         Applications.GetUserApplicationsAsync(userId, Arg.Any<CancellationToken>())
-            .Returns((IReadOnlyList<UserApplicationSnapshot>)[Approved(userId, stored)]);
+            .Returns([Approved(userId, stored)]);
 
         var data = await CreateService().GetIndexDataAsync(userId);
 
@@ -86,7 +86,7 @@ public sealed class GovernanceIndexServiceTests
     {
         var userId = Guid.NewGuid();
         Applications.GetUserApplicationsAsync(userId, Arg.Any<CancellationToken>())
-            .Returns((IReadOnlyList<UserApplicationSnapshot>)[Approved(userId, null)]);
+            .Returns([Approved(userId, null)]);
 
         var data = await CreateService().GetIndexDataAsync(userId);
 
@@ -102,13 +102,13 @@ public sealed class GovernanceIndexServiceTests
         var userId = Guid.NewGuid();
         var user = new User { Id = userId, DisplayName = "Member", Email = "member@example.com" }.ToUserInfo();
         var abandon = false;
-        async ValueTask<UserInfo?> ReadUser(CallInfo call)
+        async ValueTask<UserInfo?> ReadUserAsync(CallInfo call)
         {
             call.Arg<CancellationToken>().ThrowIfCancellationRequested();
             if (abandon && cancelAfterViewer) await cancellation.CancelAsync();
             return user;
         }
-        Users.GetUserInfoAsync(userId, Arg.Any<CancellationToken>()).Returns(ReadUser);
+        Users.GetUserInfoAsync(userId, Arg.Any<CancellationToken>()).Returns(ReadUserAsync);
         Applications.GetUserApplicationsAsync(userId, Arg.Any<CancellationToken>()).Returns(call =>
         {
             call.Arg<CancellationToken>().ThrowIfCancellationRequested();

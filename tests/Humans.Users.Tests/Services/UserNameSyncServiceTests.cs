@@ -1,10 +1,6 @@
 using AwesomeAssertions;
 using Humans.AuditLog.Contracts;
-using Humans.Users.Controllers;
 using Humans.Users.Services;
-using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Logging.Abstractions;
 using Humans.Users.Contracts;
 using Humans.Users.Data;
 using Humans.Users.Data.Repositories;
@@ -44,34 +40,6 @@ public sealed class UserNameSyncServiceTests : IDisposable
     public void Dispose() => _dbContext.Dispose();
 
     [HumansFact]
-    public async Task Profile_confirm_without_actor_refuses_before_backfill()
-    {
-        var users = Substitute.For<IUserManagement>();
-        var controller = new ProfileBackfillAdminController(users,
-            NullLogger<ProfileBackfillAdminController>.Instance)
-        {
-            ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() }
-        };
-
-        (await controller.Run(Xunit.TestContext.Current.CancellationToken)).Should().BeOfType<UnauthorizedResult>();
-        users.ReceivedCalls().Should().BeEmpty();
-    }
-
-    [HumansFact]
-    public async Task Confirm_without_actor_refuses_before_backfill()
-    {
-        var sync = Substitute.For<IUserNameSyncService>();
-        var controller = new UserNameBackfillAdminController(Substitute.For<IUserManagement>(), sync,
-            NullLogger<UserNameBackfillAdminController>.Instance)
-        {
-            ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() }
-        };
-
-        (await controller.Run(Xunit.TestContext.Current.CancellationToken)).Should().BeOfType<UnauthorizedResult>();
-        sync.ReceivedCalls().Should().BeEmpty();
-    }
-
-    [HumansFact]
     public async Task Reports_a_human_whose_User_row_has_no_names_yet()
     {
         var userId = await SeedLegacyPairAsync("Sparkle", "Ada", "Lovelace");
@@ -92,7 +60,7 @@ public sealed class UserNameSyncServiceTests : IDisposable
         var userId = await SeedLegacyPairAsync("Sparkle", "Ada", "Lovelace");
 
         _audit.LogAsync(AuditAction.UserNamesBackfilled, nameof(User), userId,
-            Arg.Any<string>(), _actorId, null, null).Returns(async _ =>
+            Arg.Any<string>(), _actorId).Returns(async _ =>
             {
                 var saved = await _dbContext.Users.AsNoTracking().SingleAsync(u => u.Id == userId,
                     Xunit.TestContext.Current.CancellationToken);
@@ -110,7 +78,7 @@ public sealed class UserNameSyncServiceTests : IDisposable
 
         await _audit.Received(1).LogAsync(AuditAction.UserNamesBackfilled, nameof(User), userId,
             Arg.Is<string>(description => !description.Contains("Lovelace", StringComparison.Ordinal)),
-            _actorId, null, null);
+            _actorId);
 
         // Re-running reports nothing left and moves nothing.
         (await _service.GetUnsyncedAsync(Xunit.TestContext.Current.CancellationToken)).Should().BeEmpty();

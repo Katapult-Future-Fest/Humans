@@ -26,7 +26,7 @@ public sealed class CachingTeamServiceGetTeamDetailTests : IDisposable
     private readonly CachingTeamService _service;
     private readonly TeamPageService _pages;
     private readonly ISettingsService _settings = Substitute.For<ISettingsService>();
-    private readonly IShiftManagementService _shifts = Substitute.For<IShiftManagementService>();
+    private readonly IShiftService _shifts = Substitute.For<IShiftService>();
 
     public CachingTeamServiceGetTeamDetailTests()
     {
@@ -40,8 +40,8 @@ public sealed class CachingTeamServiceGetTeamDetailTests : IDisposable
 
         var services = new ServiceCollection();
         services.AddSingleton(userService);
-        services.AddSingleton<IUserService>(userService);
-        services.AddSingleton<IRoleAssignmentService>(_roleAssignmentService);
+        services.AddSingleton(userService);
+        services.AddSingleton(_roleAssignmentService);
         services.AddKeyedScoped<ITeamManagementService>(
             CachingTeamService.InnerServiceKey,
             (_, _) => _innerTeamService);
@@ -114,6 +114,27 @@ public sealed class CachingTeamServiceGetTeamDetailTests : IDisposable
 
         result.Should().NotBeNull();
         result.Team.Slug.Should().Be("public");
+    }
+
+    [HumansTheory]
+    [Xunit.InlineData(false)]
+    [Xunit.InlineData(true)]
+    public async Task GetTeamDetailAsync_OmitsUnsafeStoredActionsWithoutMutatingSource(bool authenticated)
+    {
+        var team = MakeTeam("Public", isPublicPage: true);
+        team.CallsToAction =
+        [
+            new CallToAction { Text = "Unsafe", Url = "javascript:alert(1)" },
+            new CallToAction { Text = "Obfuscated", Url = "java\tscript:alert(1)" },
+            new CallToAction { Text = "Join", Url = "/join" }
+        ];
+        SeedTeams(team);
+
+        var result = await _pages.GetTeamDetailAsync("public", authenticated ? Guid.NewGuid() : null,
+            Xunit.TestContext.Current.CancellationToken);
+
+        result!.Team.CallsToAction.Should().ContainSingle().Which.Url.Should().Be("/join");
+        team.CallsToAction.Should().HaveCount(3);
     }
 
     [HumansFact]
@@ -223,7 +244,7 @@ public sealed class CachingTeamServiceGetTeamDetailTests : IDisposable
         var privileged = role is RoleNames.Admin or RoleNames.Board or RoleNames.TeamsAdmin;
         rootPage.ChildTeams.Select(team => team.Id).Should().Equal(privileged ? new[] { hiddenChild.Id } : []);
         var parentId = childPage.Team.ParentTeam?.Id;
-        parentId.Should().Be(privileged ? hiddenParent.Id : (Guid?)null);
+        parentId.Should().Be(privileged ? hiddenParent.Id : null);
         childPage.Team.DisplayName.Should().Be(privileged ? "PrivateParent - VisibleChild" : "VisibleChild");
     }
 

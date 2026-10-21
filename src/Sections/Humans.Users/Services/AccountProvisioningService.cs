@@ -2,6 +2,7 @@ using System.Transactions;
 using Humans.AuditLog.Contracts;
 using Humans.Users.Data.Repositories;
 using Humans.Users.Contracts;
+using Humans.Users.Data;
 using Microsoft.AspNetCore.Identity;
 using NodaTime;
 
@@ -12,7 +13,7 @@ internal sealed class AccountProvisioningService(
     IUserRepository userRepository,
     IUserEmailService userEmailService,
     IUserManagement userService,
-    IUserInfoInvalidator userInfoInvalidator,
+    IUserInfoSliceRefresher userInfoRefresher,
     UserManager<User> userManager,
     IAuditLogService auditLogService,
     IClock clock,
@@ -40,7 +41,7 @@ internal sealed class AccountProvisioningService(
                 throw new InvalidOperationException("The planned unverified email could not be removed.");
             var result = await FindOrCreateCoreAsync(email, displayName, source, ct, affectedUsers);
             await auditLogService.LogAsync(AuditAction.UserEmailDeleted, nameof(UserEmail), emailId,
-                $"Replaced unverified email {email} with verified import account {result.User.Id} from {source}",
+                $"Replaced unverified email {email} with verified import account {result.UserId} from {source}",
                 nameof(AccountProvisioningService), relatedEntityId: userId, relatedEntityType: nameof(User));
             transaction.Complete();
             return result;
@@ -50,7 +51,7 @@ internal sealed class AccountProvisioningService(
             // SaveChanges/decorators refresh during writes. Rebuild after transaction disposal,
             // including on rollback, so no cached entry retains uncommitted row state.
             foreach (var affectedUser in affectedUsers)
-                await userInfoInvalidator.InvalidateAsync(affectedUser, CancellationToken.None);
+                await userInfoRefresher.RefreshAsync(affectedUser, CancellationToken.None);
         }
     }
 
@@ -83,10 +84,7 @@ internal sealed class AccountProvisioningService(
 
                 // Layer ContactSource onto self-registered users.
                 if (existingUser.ContactSource is null)
-                {
                     await userRepository.SetContactSourceIfNullAsync(existingUser.Id, source, ct);
-                    existingUser.ContactSource = source;
-                }
 
                 // User/email may have committed before profile creation failed. Retry the
                 // idempotent final step before reporting a successfully provisioned account.
@@ -94,7 +92,7 @@ internal sealed class AccountProvisioningService(
                     await auditLogService.LogAsync(AuditAction.StubProfileBackfilled, nameof(User), existingUser.Id,
                         $"Completed missing profile provisioning from {source}.", nameof(AccountProvisioningService));
 
-                return new AccountProvisioningResult(existingUser, Created: false);
+                return new AccountProvisioningResult(existingUser.Id, Created: false);
             }
         }
 
@@ -109,7 +107,6 @@ internal sealed class AccountProvisioningService(
         var newUser = new User
         {
             Id = newUserId,
-            DisplayName = resolvedDisplayName,
             BurnerName = resolvedDisplayName,
             ContactSource = source,
             CreatedAt = now,
@@ -147,14 +144,14 @@ internal sealed class AccountProvisioningService(
                 "Created new account {UserId} for {Email} (source: {Source}, displayName: {DisplayName})",
                 newUser.Id, email, source, resolvedDisplayName);
 
-            return new AccountProvisioningResult(newUser, Created: true);
+            return new AccountProvisioningResult(newUser.Id, Created: true);
         }
         finally
         {
             // The replacement path's outer transaction refreshes after its disposal.
             // Ordinary imports finish their own commit/rollback before rebuilding UserInfo.
             if (affectedUsers is null)
-                await userInfoInvalidator.InvalidateAsync(newUserId, CancellationToken.None);
+                await userInfoRefresher.RefreshAsync(newUserId, CancellationToken.None);
         }
     }
 
@@ -170,6 +167,15 @@ internal sealed class AccountProvisioningService(
         ArgumentException.ThrowIfNullOrWhiteSpace(firstName);
         ArgumentException.ThrowIfNullOrWhiteSpace(lastName);
 
+        burnerName = burnerName.Trim();
+        firstName = firstName.Trim();
+        lastName = lastName.Trim();
+        if (burnerName.Length > 256 || firstName.Length > 256 || lastName.Length > 256)
+        {
+            logger.LogWarning("Magic-link signup refused: a name exceeds the 256-character limit");
+            return new MagicLinkSignupCompletionResult(MagicLinkSignupCompletionOutcome.Failed, UserId: null);
+        }
+
         var existingEmail = (await userEmailService.FindByAddressAsync(email, aliased: true, verifiedOnly: true, ct))
             .FirstOrDefault();
         if (existingEmail is not null)
@@ -182,25 +188,24 @@ internal sealed class AccountProvisioningService(
                     existingEmail.UserId, email);
                 return new MagicLinkSignupCompletionResult(
                     MagicLinkSignupCompletionOutcome.Failed,
-                    User: null);
+                    UserId: null);
             }
 
             if (await userService.EnsureStubProfileAsync(
-                existingUser.Id, burnerName.Trim(), firstName.Trim(), lastName.Trim(), ct))
+                existingUser.Id, burnerName, firstName, lastName, ct))
                 await auditLogService.LogAsync(AuditAction.StubProfileBackfilled, nameof(User), existingUser.Id,
                     "Completed missing profile after interrupted magic-link signup.", existingUser.Id);
             await userService.RecordLoginAsync(existingUser.Id, ct);
             return new MagicLinkSignupCompletionResult(
                 MagicLinkSignupCompletionOutcome.ExistingUser,
-                existingUser);
+                existingUser.Id);
         }
 
         var now = clock.GetCurrentInstant();
         var user = new User
         {
             Id = Guid.NewGuid(),
-            DisplayName = burnerName.Trim(),
-            BurnerName = burnerName.Trim(),
+            BurnerName = burnerName,
             CreatedAt = now,
             LastLoginAt = now
         };
@@ -214,7 +219,7 @@ internal sealed class AccountProvisioningService(
                 string.Join(", ", createResult.Errors.Select(e => e.Description)));
             return new MagicLinkSignupCompletionResult(
                 MagicLinkSignupCompletionOutcome.Failed,
-                User: null);
+                UserId: null);
         }
 
         try
@@ -238,11 +243,11 @@ internal sealed class AccountProvisioningService(
             }
             return new MagicLinkSignupCompletionResult(
                 MagicLinkSignupCompletionOutcome.Failed,
-                User: null);
+                UserId: null);
         }
 
         await userService.EnsureStubProfileAsync(
-            user.Id, burnerName.Trim(), firstName.Trim(), lastName.Trim(), ct);
+            user.Id, burnerName, firstName, lastName, ct);
 
         logger.LogInformation(
             "Magic link signup: user {UserId} created account for {Email}",
@@ -250,6 +255,6 @@ internal sealed class AccountProvisioningService(
 
         return new MagicLinkSignupCompletionResult(
             MagicLinkSignupCompletionOutcome.Created,
-            user);
+            user.Id);
     }
 }
