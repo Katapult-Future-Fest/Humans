@@ -29,7 +29,7 @@ internal sealed class ShiftsController(
     IAuditLogService auditLogService,
     IUserService userService,
     IStringLocalizer<ShiftsResource> localizer,
-    // The name-gate message is Onboarding's copy, rendered from here (design §15 step 3b).
+    // The name-gate message is Onboarding's copy, rendered from here.
     IStringLocalizer<OnboardingResource> onboardingLocalizer,
     IClock clock,
     ShiftBrowsePageBuilder browsePageBuilder,
