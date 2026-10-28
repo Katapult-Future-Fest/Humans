@@ -38,7 +38,7 @@ body.admin-shell .m-nav {
     gap: 24px;
     height: 62px;
     font-family: var(--h-font-body);
-    border-bottom: 1px solid rgba(255,245,221,0.08);
+    border-bottom: 1px solid rgba(255, 255, 255,0.08);
 }
 
 body.admin-shell .m-nav .brand {
@@ -64,7 +64,7 @@ body.admin-shell .m-nav .brand small {
     opacity: 0.5;
     margin-left: 10px;
     padding-left: 10px;
-    border-left: 1px solid rgba(255,245,221,0.18);
+    border-left: 1px solid rgba(255, 255, 255,0.18);
 }
 
 body.admin-shell .m-nav .right {
@@ -86,13 +86,13 @@ body.admin-shell .m-nav .exit-admin {
     color: var(--h-parchment);
     text-decoration: none;
     opacity: 0.75;
-    border: 1px solid rgba(255,245,221,0.18);
+    border: 1px solid rgba(255, 255, 255,0.18);
 }
 
 body.admin-shell .m-nav .exit-admin:hover {
     opacity: 1;
     color: var(--h-gold);
-    border-color: rgba(201,169,110,0.4);
+    border-color: rgba(232, 88, 58,0.4);
 }
 
 /* Profile dropdown trigger (shared _LoginPartial) — recolor for dark topbar. */
@@ -149,13 +149,13 @@ body.admin-shell .sidebar a i {
 }
 
 body.admin-shell .sidebar a:hover {
-    background: rgba(255,245,221,0.05);
+    background: rgba(255, 255, 255,0.05);
     opacity: 1;
 }
 
 body.admin-shell .sidebar a.active {
     color: var(--h-gold);
-    background: rgba(201,169,110,0.1);
+    background: rgba(232, 88, 58,0.1);
     border-left-color: var(--h-gold);
     font-weight: 600;
     opacity: 1;
@@ -164,7 +164,7 @@ body.admin-shell .sidebar a.active {
 body.admin-shell .sidebar .pill,
 body.admin-shell .admin-tabs .pill {
     margin-left: auto;
-    background: rgba(255,245,221,0.15);
+    background: rgba(255, 255, 255,0.15);
     color: var(--h-gold);
     font-size: 0.65rem;
     padding: 2px 7px;
@@ -576,7 +576,7 @@ body.admin-shell .split-panels {
     body.admin-shell .sidebar {
         padding: 0;
         border-right: 0;
-        border-bottom: 1px solid rgba(255,245,221,0.1);
+        border-bottom: 1px solid rgba(255, 255, 255,0.1);
         min-width: 0;
         overflow: hidden;
     }
@@ -630,11 +630,11 @@ body.admin-shell .split-panels {
     }
     body.admin-shell .sidebar-rows-wrap::before {
         left: 0;
-        background: linear-gradient(to right, var(--h-aged-ink), rgba(28,24,20,0));
+        background: linear-gradient(to right, var(--h-aged-ink), rgba(23, 23, 27, 0));
     }
     body.admin-shell .sidebar-rows-wrap::after {
         right: 0;
-        background: linear-gradient(to left, var(--h-aged-ink), rgba(28,24,20,0));
+        background: linear-gradient(to left, var(--h-aged-ink), rgba(23, 23, 27, 0));
     }
     body.admin-shell .sidebar-rows-wrap[data-scroll-start="false"]::before { opacity: 1; }
     body.admin-shell .sidebar-rows-wrap[data-scroll-end="false"]::after { opacity: 1; }
