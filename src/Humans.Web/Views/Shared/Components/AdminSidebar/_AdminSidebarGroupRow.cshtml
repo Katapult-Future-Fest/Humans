@@ -1,0 +1,10 @@
+@model Humans.Web.ViewComponents.AdminSidebarGroupViewModel
+@{ var first = Model.First; }
+<a class="@(Model.IsActive ? "active" : null)" data-group="@Model.Label" href="@(first.RawHref ?? Url.Action(first.Action, first.Controller))">
+    <i class="@first.IconCssClass" aria-hidden="true"></i>
+    <span>@Model.Label</span>
+    @if (Model.PillSum.HasValue)
+    {
+        <span class="pill">@Model.PillSum.Value</span>
+    }
+</a>
