@@ -12,10 +12,10 @@ public class AdminMenuTests
             [Group("Debug"), Group("Settings"), Group("Tickets", active: true), Group("Brand new"), Group("Gate"), Group("Users")]);
 
         model.Menus.Select(m => m.Label).Should().Equal("Members", "On site", "System", "Other");
-        model.Menus.Single(m => m.Label == "On site").Groups.Select(g => g.Label).Should().Equal("Tickets", "Gate");
-        model.Menus.Single(m => m.Label == "Other").Groups.Select(g => g.Label).Should().Equal("Brand new");
+        model.Menus.Single(m => string.Equals(m.Label, "On site", StringComparison.Ordinal)).Groups.Select(g => g.Label).Should().Equal("Tickets", "Gate");
+        model.Menus.Single(m => string.Equals(m.Label, "Other", StringComparison.Ordinal)).Groups.Select(g => g.Label).Should().Equal("Brand new");
         model.Menus.Where(m => m.IsActive).Select(m => m.Label).Should().Equal("On site");
-        model.Menus.SelectMany(m => m.Groups).Should().NotContain(g => g.Label == "Settings");
+        model.Menus.SelectMany(m => m.Groups).Should().NotContain(g => string.Equals(g.Label, "Settings", StringComparison.Ordinal));
         model.Foot!.Label.Should().Be("Settings");
     }
 
