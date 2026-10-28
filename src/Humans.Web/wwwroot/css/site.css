@@ -24,27 +24,27 @@ html { scrollbar-gutter: stable; }
     --bs-secondary-color: var(--h-umber);
     --bs-tertiary-bg: var(--h-vellum);
     --bs-link-color: var(--h-gold-dark);
-    --bs-link-color-rgb: 168, 138, 78;
+    --bs-link-color-rgb: 194, 70, 43;
     --bs-link-hover-color: var(--h-aged-ink);
-    --bs-link-hover-color-rgb: 61, 43, 31;
-    --bs-focus-ring-color: rgba(201, 169, 110, 0.2);
+    --bs-link-hover-color-rgb: 23, 23, 27;
+    --bs-focus-ring-color: rgba(232, 88, 58, 0.2);
 
     --bs-primary: var(--h-gold-dark);
-    --bs-primary-rgb: 168, 138, 78;
+    --bs-primary-rgb: 194, 70, 43;
     --bs-secondary: var(--h-sepia);
-    --bs-secondary-rgb: 139, 115, 85;
+    --bs-secondary-rgb: 90, 90, 100;
     --bs-success: var(--h-sage-dark);
-    --bs-success-rgb: 79, 112, 84;
+    --bs-success-rgb: 63, 125, 92;
     --bs-info: var(--h-blue-muted);
-    --bs-info-rgb: 91, 125, 143;
+    --bs-info-rgb: 63, 127, 166;
     --bs-warning: var(--h-amber);
-    --bs-warning-rgb: 196, 138, 42;
+    --bs-warning-rgb: 201, 138, 46;
     --bs-danger: var(--h-rust);
-    --bs-danger-rgb: 160, 64, 48;
+    --bs-danger-rgb: 185, 82, 79;
     --bs-light: var(--h-vellum);
-    --bs-light-rgb: 240, 226, 200;
+    --bs-light-rgb: 244, 243, 240;
     --bs-dark: var(--h-aged-ink);
-    --bs-dark-rgb: 61, 43, 31;
+    --bs-dark-rgb: 23, 23, 27;
 
     --bs-primary-bg-subtle: var(--h-alert-info-bg);
     --bs-primary-text-emphasis: var(--h-alert-info-text);
@@ -258,7 +258,7 @@ h5, .h5 { font-size: 1.1rem; }
 .navbar .nav-link:hover,
 .navbar .nav-link:focus {
     color: var(--h-gold) !important;
-    background-color: rgba(255, 245, 221, 0.08);
+    background-color: rgba(255, 255, 255, 0.08);
 }
 
 .navbar .nav-link.active {
@@ -286,14 +286,14 @@ h5, .h5 { font-size: 1.1rem; }
 /* Language chooser in dark nav */
 .navbar .btn-outline-secondary {
     color: var(--h-parchment) !important;
-    border-color: rgba(245, 230, 200, 0.3) !important;
+    border-color: rgba(255, 255, 255, 0.3) !important;
     font-size: 0.78rem;
     text-transform: uppercase;
     letter-spacing: 0.05em;
 }
 
 .navbar .btn-outline-secondary:hover {
-    background-color: rgba(201, 169, 110, 0.15) !important;
+    background-color: rgba(232, 88, 58, 0.15) !important;
     color: var(--h-gold) !important;
 }
 
@@ -514,7 +514,7 @@ body.page-wide .main-content {
     background-color: var(--h-gold-dark);
     border-color: var(--h-gold-dark);
     color: var(--h-warm-white);
-    box-shadow: 0 2px 8px rgba(201, 169, 110, 0.3);
+    box-shadow: 0 2px 8px rgba(232, 88, 58, 0.3);
     transform: translateY(-1px);
 }
 
@@ -575,7 +575,7 @@ body.page-wide .main-content {
     background-color: var(--h-amber-light);
     border-color: var(--h-amber-dark);
     color: var(--h-aged-ink);
-    box-shadow: 0 2px 8px rgba(196, 138, 42, 0.3);
+    box-shadow: 0 2px 8px rgba(201, 138, 46, 0.3);
     transform: translateY(-1px);
 }
 
@@ -611,8 +611,8 @@ body.page-wide .main-content {
 }
 
 .btn-danger:hover {
-    background-color: #86372a;
-    border-color: #86372a;
+    background-color: #9a3f3c;
+    border-color: #9a3f3c;
     color: #fff;
 }
 
@@ -643,8 +643,8 @@ body.page-wide .main-content {
 }
 
 .btn-success:hover {
-    background-color: #3e5a42;
-    border-color: #3e5a42;
+    background-color: #346a4e;
+    border-color: #346a4e;
     color: #fff;
 }
 
@@ -719,7 +719,7 @@ body.page-wide .main-content {
 .form-control:focus-visible,
 .form-select:focus-visible {
     outline: none;
-    box-shadow: 0 0 0 3px rgba(201, 169, 110, 0.2);
+    box-shadow: 0 0 0 3px rgba(232, 88, 58, 0.2);
 }
 
 .btn-info {
@@ -734,8 +734,8 @@ body.page-wide .main-content {
 }
 
 .btn-info:hover {
-    background-color: #4a6977;
-    border-color: #4a6977;
+    background-color: #336a8b;
+    border-color: #336a8b;
     color: var(--h-text-on-dark);
 }
 
@@ -852,7 +852,7 @@ body.page-wide .main-content {
 
 .badge.rounded-pill.bg-primary,
 .badge.rounded-pill.bg-info {
-    background-color: #4a6977 !important;
+    background-color: #336a8b !important;
     color: #fff !important;
 }
 
@@ -1018,7 +1018,7 @@ body.page-wide .main-content {
 .form-control:focus,
 .form-select:focus {
     border-color: var(--h-gold);
-    box-shadow: 0 0 0 3px rgba(201, 169, 110, 0.2);
+    box-shadow: 0 0 0 3px rgba(232, 88, 58, 0.2);
     background-color: var(--h-bg-elevated);
 }
 
@@ -1057,7 +1057,7 @@ body.page-wide .main-content {
 
 .form-check-input:focus {
     border-color: var(--h-gold);
-    box-shadow: 0 0 0 3px rgba(201, 169, 110, 0.2);
+    box-shadow: 0 0 0 3px rgba(232, 88, 58, 0.2);
 }
 
 .is-invalid,
@@ -1073,7 +1073,7 @@ body.page-wide .main-content {
 .form-control.is-invalid:focus,
 .form-select.is-invalid:focus,
 .input-validation-error:focus {
-    box-shadow: 0 0 0 3px rgba(160, 64, 48, 0.15);
+    box-shadow: 0 0 0 3px rgba(185, 82, 79, 0.15);
 }
 
 .invalid-feedback,
@@ -1312,7 +1312,7 @@ footer {
 
 .accordion-button:focus {
     border-color: var(--h-gold);
-    box-shadow: 0 0 0 3px rgba(201, 169, 110, 0.2);
+    box-shadow: 0 0 0 3px rgba(232, 88, 58, 0.2);
 }
 
 /* --- Progress / spinner --- */
@@ -1375,7 +1375,7 @@ footer {
 #cookieConsent {
     background-color: var(--h-aged-ink) !important;
     border-top: 2px solid var(--h-gold);
-    box-shadow: 0 -4px 16px rgba(61, 43, 31, 0.15);
+    box-shadow: 0 -4px 16px rgba(23, 23, 27, 0.15);
 }
 
 #cookieConsent .btn-light {
@@ -1470,7 +1470,7 @@ a:hover {
 
 /* --- Selection --- */
 ::selection {
-    background-color: rgba(201, 169, 110, 0.25);
+    background-color: rgba(232, 88, 58, 0.25);
     color: var(--h-aged-ink);
 }
 
@@ -2563,15 +2563,15 @@ a.notification-row-line:hover .notification-title {
 }
 .phase-card-active.phase-card-build {
     border-color: var(--h-blue-muted, #5b7d8f);
-    background-color: rgba(91, 125, 143, 0.08);
+    background-color: rgba(63, 127, 166, 0.08);
 }
 .phase-card-active.phase-card-event {
     border-color: var(--h-sage, #6b8f71);
-    background-color: rgba(107, 143, 113, 0.08);
+    background-color: rgba(79, 154, 114, 0.08);
 }
 .phase-card-active.phase-card-strike {
     border-color: var(--h-sepia-light, #a69178);
-    background-color: rgba(166, 145, 120, 0.08);
+    background-color: rgba(138, 138, 147, 0.08);
 }
 
 /* Phase card checkbox colors — match the phase border */
