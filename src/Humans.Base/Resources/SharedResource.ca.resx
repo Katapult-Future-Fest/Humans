@@ -140,6 +140,7 @@
   <data name="Nav_Admin" xml:space="preserve">
     <value>Administració</value>
   </data>
+  <data name="Nav_Menu" xml:space="preserve"><value>Menú</value></data>
   <data name="CookieBanner_Title" xml:space="preserve">
     <value>Avís de galetes</value>
   </data>

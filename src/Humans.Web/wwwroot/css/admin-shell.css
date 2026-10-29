@@ -38,7 +38,7 @@ body.admin-shell .m-nav {
     gap: 24px;
     height: 62px;
     font-family: var(--h-font-body);
-    border-bottom: 1px solid rgba(255,245,221,0.08);
+    border-bottom: 1px solid rgba(255, 255, 255,0.08);
 }
 
 body.admin-shell .m-nav .brand {
@@ -64,7 +64,7 @@ body.admin-shell .m-nav .brand small {
     opacity: 0.5;
     margin-left: 10px;
     padding-left: 10px;
-    border-left: 1px solid rgba(255,245,221,0.18);
+    border-left: 1px solid rgba(255, 255, 255,0.18);
 }
 
 body.admin-shell .m-nav .right {
@@ -86,13 +86,13 @@ body.admin-shell .m-nav .exit-admin {
     color: var(--h-parchment);
     text-decoration: none;
     opacity: 0.75;
-    border: 1px solid rgba(255,245,221,0.18);
+    border: 1px solid rgba(255, 255, 255,0.18);
 }
 
 body.admin-shell .m-nav .exit-admin:hover {
     opacity: 1;
     color: var(--h-gold);
-    border-color: rgba(201,169,110,0.4);
+    border-color: rgba(232, 88, 58,0.4);
 }
 
 /* Profile dropdown trigger (shared _LoginPartial) — recolor for dark topbar. */
@@ -118,11 +118,14 @@ body.admin-shell .m-nav .dropdown > .btn-link:focus {
 
 /* ── Sidebar ──────────────────────────────────────────────────────────── */
 
-/* One row per nav group; the group's pages are the tab strip on the page. */
+/* KFF fork, after KFF Center: a light rail of main-menu items; hovering or
+   focusing one opens its panel of groups beside the rail. A group's pages are
+   the tab strip on the page. */
 body.admin-shell .sidebar {
-    background: var(--h-aged-ink);
-    color: var(--h-parchment);
-    padding: 24px 0;
+    background: var(--h-warm-white);
+    color: var(--h-sepia);
+    border-right: 1px solid var(--h-border-light);
+    padding: 16px 8px;
     font-family: var(--h-font-body);
 }
 
@@ -135,37 +138,112 @@ body.admin-shell .sidebar a {
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 7px 22px;
-    color: var(--h-parchment);
+    padding: 6px 10px;
+    margin-bottom: 1px;
+    border-radius: var(--h-radius);
+    color: var(--h-sepia);
     text-decoration: none;
     font-size: 0.88rem;
-    border-left: 3px solid transparent;
-    opacity: 0.8;
+    transition: background 0.12s, color 0.12s;
 }
 
 body.admin-shell .sidebar a i {
     width: 1.1em;
     text-align: center;
+    opacity: 0.8;
 }
 
-body.admin-shell .sidebar a:hover {
-    background: rgba(255,245,221,0.05);
+body.admin-shell .sidebar a:hover,
+body.admin-shell .sidebar .menu:hover > a.top,
+body.admin-shell .sidebar .menu:focus-within > a.top {
+    background: var(--h-vellum);
+    color: var(--h-aged-ink);
+}
+
+body.admin-shell .sidebar a.active,
+body.admin-shell .sidebar a.top.on {
+    background: linear-gradient(90deg, var(--h-gold), #e0577c);
+    color: #fff;
+    box-shadow: 0 2px 8px rgba(232, 88, 58, 0.25);
+}
+
+body.admin-shell .sidebar a.active i,
+body.admin-shell .sidebar a.top.on i {
     opacity: 1;
 }
 
-body.admin-shell .sidebar a.active {
-    color: var(--h-gold);
-    background: rgba(201,169,110,0.1);
-    border-left-color: var(--h-gold);
-    font-weight: 600;
-    opacity: 1;
+body.admin-shell .sidebar a.top .chev {
+    margin-left: auto;
+    font-size: 0.65rem;
+    opacity: 0.5;
+}
+
+body.admin-shell .sidebar a.top .pill + .chev {
+    margin-left: 6px;
+}
+
+body.admin-shell .sidebar .menu {
+    position: relative;
+}
+
+/* The panel: hidden until its top item is hovered or holds focus. */
+body.admin-shell .sidebar .subnav {
+    display: none;
+    position: absolute;
+    left: calc(100% + 8px);
+    top: -8px;
+    z-index: 20;
+    width: 250px;
+    padding: 8px;
+    background: var(--h-warm-white);
+    border: 1px solid var(--h-border-light);
+    border-radius: var(--h-radius-lg);
+    box-shadow: var(--h-shadow-lg);
+}
+
+/* Bridges the gap so the pointer can travel from the item into its panel. */
+body.admin-shell .sidebar .subnav::before {
+    content: '';
+    position: absolute;
+    left: -9px;
+    top: 0;
+    bottom: 0;
+    width: 9px;
+}
+
+body.admin-shell .sidebar .menu:hover > .subnav,
+body.admin-shell .sidebar .menu:focus-within > .subnav {
+    display: block;
+}
+
+body.admin-shell .sidebar .sub-head {
+    padding: 6px 10px 10px;
+}
+
+body.admin-shell .sidebar .sub-head b {
+    display: block;
+    color: var(--h-aged-ink);
+    font-size: 0.9rem;
+}
+
+body.admin-shell .sidebar .sub-head small {
+    display: block;
+    color: var(--h-sepia-light);
+    font-size: 0.75rem;
+    line-height: 1.35;
+}
+
+body.admin-shell .sidebar .foot {
+    border-top: 1px solid var(--h-border-light);
+    margin-top: 8px;
+    padding-top: 8px;
 }
 
 body.admin-shell .sidebar .pill,
 body.admin-shell .admin-tabs .pill {
     margin-left: auto;
-    background: rgba(255,245,221,0.15);
-    color: var(--h-gold);
+    background: var(--h-selected-bg);
+    color: var(--h-gold-dark);
     font-size: 0.65rem;
     padding: 2px 7px;
     border-radius: 999px;
@@ -174,9 +252,10 @@ body.admin-shell .admin-tabs .pill {
     font-weight: 700;
 }
 
-body.admin-shell .sidebar a.active .pill {
-    background: var(--h-gold);
-    color: var(--h-aged-ink);
+body.admin-shell .sidebar a.active .pill,
+body.admin-shell .sidebar a.top.on .pill {
+    background: #fff;
+    color: var(--h-gold);
 }
 
 /* ── Main content area ────────────────────────────────────────────────── */
@@ -576,7 +655,7 @@ body.admin-shell .split-panels {
     body.admin-shell .sidebar {
         padding: 0;
         border-right: 0;
-        border-bottom: 1px solid rgba(255,245,221,0.1);
+        border-bottom: 1px solid var(--h-border-light);
         min-width: 0;
         overflow: hidden;
     }
@@ -596,9 +675,16 @@ body.admin-shell .split-panels {
         cursor: grab;
     }
     body.admin-shell .sidebar-rows::-webkit-scrollbar { display: none; }
+    /* No hover on touch: the panels flatten into the strip, one row per group. */
+    body.admin-shell .sidebar .menu,
+    body.admin-shell .sidebar .subnav,
+    body.admin-shell .sidebar .foot { display: contents; }
+    body.admin-shell .sidebar a.top,
+    body.admin-shell .sidebar .sub-head { display: none; }
     body.admin-shell .sidebar a {
         padding: 14px 12px;
-        border-left: 0;
+        margin: 0;
+        border-radius: 0;
         border-bottom: 3px solid transparent;
         font-size: 0.74rem;
         white-space: nowrap;
@@ -606,15 +692,16 @@ body.admin-shell .split-panels {
         gap: 6px;
     }
     body.admin-shell .sidebar a.active {
-        border-left: 0;
         border-bottom-color: var(--h-gold);
         background: transparent;
+        box-shadow: none;
+        color: var(--h-gold-dark);
     }
     body.admin-shell .sidebar .pill { font-size: 0.6rem; padding: 1px 6px; }
 
     /* Edge-fade affordances, one pair per scrolling row. The overlay sits on
        the row wrapper (same bg as the strip), so fading from transparent to
-       --h-aged-ink creates a clean reveal/conceal of off-screen entries. JS
+       --h-warm-white creates a clean reveal/conceal of off-screen entries. JS
        toggles data-scroll-start/end on the wrapper. */
     body.admin-shell .sidebar-rows-wrap::before,
     body.admin-shell .sidebar-rows-wrap::after {
@@ -630,11 +717,11 @@ body.admin-shell .split-panels {
     }
     body.admin-shell .sidebar-rows-wrap::before {
         left: 0;
-        background: linear-gradient(to right, var(--h-aged-ink), rgba(28,24,20,0));
+        background: linear-gradient(to right, var(--h-warm-white), rgba(255, 255, 255, 0));
     }
     body.admin-shell .sidebar-rows-wrap::after {
         right: 0;
-        background: linear-gradient(to left, var(--h-aged-ink), rgba(28,24,20,0));
+        background: linear-gradient(to left, var(--h-warm-white), rgba(255, 255, 255, 0));
     }
     body.admin-shell .sidebar-rows-wrap[data-scroll-start="false"]::before { opacity: 1; }
     body.admin-shell .sidebar-rows-wrap[data-scroll-end="false"]::after { opacity: 1; }
