@@ -532,7 +532,8 @@ function showToast(message, type) {
     [horizontal.matches ? rows && rows.querySelector('a.active') : null, tabs && tabs.querySelector('a.active')]
         .forEach(function (el) {
             if (!el) return;
-            var row = el.parentElement;
+            // closest, not parentElement: a sidebar row sits in a display:contents menu panel.
+            var row = el.closest('.sidebar-rows, .admin-tabs');
             var prev = row.style.scrollBehavior;
             row.style.scrollBehavior = 'auto';
             row.scrollLeft = el.offsetLeft - (row.clientWidth - el.offsetWidth) / 2;

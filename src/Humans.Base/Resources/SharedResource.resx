@@ -77,6 +77,7 @@
   <data name="Nav_Privacy" xml:space="preserve"><value>Privacy</value></data>
   <data name="Nav_About" xml:space="preserve"><value>About</value></data>
   <data name="Nav_Admin" xml:space="preserve"><value>Admin</value></data>
+  <data name="Nav_Menu" xml:space="preserve"><value>Menu</value></data>
 
   <!-- ======================== -->
   <!-- Cookie Banner (_Layout)  -->

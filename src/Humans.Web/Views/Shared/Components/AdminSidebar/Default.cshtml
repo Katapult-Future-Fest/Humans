@@ -1,7 +1,8 @@
 @model Humans.Web.ViewComponents.AdminSidebarViewModel
 
-@* One row per group, alphabetical; the group's items are the tab strip on its pages.
-   Desktop: a vertical list. Below 768px: a horizontally scrolling strip. *@
+@* KFF fork: the main menu folds the groups (AdminMenu); hovering or focusing a top item opens its
+   panel of groups, and each group's items are the tab strip on its pages. Below 768px the panels
+   flatten into the horizontally scrolling strip of group rows. *@
 <div class="sidebar-rows-wrap">
     <nav class="sidebar-rows" aria-label="Admin sections">
         @if (Model.ShowDashboard)
@@ -12,17 +13,32 @@
                 <span>Dashboard</span>
             </a>
         }
-        @foreach (var group in Model.Groups)
+        @foreach (var menu in Model.Menus)
         {
-            var first = group.First;
-            <a class="@(group.IsActive ? "active" : null)" data-group="@group.Label" href="@(first.RawHref ?? Url.Action(first.Action, first.Controller))">
-                <i class="@first.IconCssClass" aria-hidden="true"></i>
-                <span>@group.Label</span>
-                @if (group.PillSum.HasValue)
-                {
-                    <span class="pill">@group.PillSum.Value</span>
-                }
-            </a>
+            <div class="menu">
+                <a class="top@(menu.IsActive ? " on" : null)" href="@(menu.First.RawHref ?? Url.Action(menu.First.Action, menu.First.Controller))" aria-haspopup="true">
+                    <i class="@menu.IconCssClass" aria-hidden="true"></i>
+                    <span>@menu.Label</span>
+                    @if (menu.PillSum.HasValue)
+                    {
+                        <span class="pill">@menu.PillSum.Value</span>
+                    }
+                    <i class="fa-solid fa-chevron-right chev" aria-hidden="true"></i>
+                </a>
+                <div class="subnav" role="group" aria-label="@menu.Label">
+                    <div class="sub-head"><b>@menu.Label</b><small>@menu.Description</small></div>
+                    @foreach (var group in menu.Groups)
+                    {
+                        <partial name="~/Views/Shared/Components/AdminSidebar/_AdminSidebarGroupRow.cshtml" model="group" />
+                    }
+                </div>
+            </div>
+        }
+        @if (Model.Foot is { } foot)
+        {
+            <div class="foot">
+                <partial name="~/Views/Shared/Components/AdminSidebar/_AdminSidebarGroupRow.cshtml" model="foot" />
+            </div>
         }
     </nav>
 </div>

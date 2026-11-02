@@ -415,6 +415,100 @@ body.page-wide .main-content {
     }
 }
 
+/* --- Member side menu (KFF fork, after KFF Center) ---
+   From 768px a light rail beside the page; below that Bootstrap's offcanvas-md
+   slides it in from the navbar's menu button. The Events dropdown shows its
+   children open and indented. */
+.member-frame {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+}
+
+.member-frame > .main-content {
+    min-width: 0;
+}
+
+.member-side .offcanvas-body {
+    flex-direction: column;
+    padding: 16px 8px;
+}
+
+.member-side .navbar-nav {
+    width: 100%;
+}
+
+.member-side .nav-link,
+.member-side .dropdown-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 10px;
+    margin-bottom: 1px;
+    border-radius: var(--h-radius);
+    color: var(--h-sepia);
+    font-size: 0.9rem;
+    font-weight: 500;
+    white-space: nowrap;
+    transition: background 0.12s, color 0.12s;
+}
+
+.member-side .nav-link:hover,
+.member-side .nav-link:focus,
+.member-side .dropdown-item:hover,
+.member-side .dropdown-item:focus {
+    background: var(--h-vellum);
+    color: var(--h-aged-ink);
+}
+
+.member-side .nav-link.active,
+.member-side .dropdown-item.active {
+    background: linear-gradient(90deg, var(--h-gold), #e0577c);
+    color: #fff;
+    box-shadow: 0 2px 8px rgba(232, 88, 58, 0.25);
+}
+
+.member-side .nav-link.nav-restricted:not(.active) {
+    color: var(--h-amber-dark);
+}
+
+.member-side .dropdown-toggle::after {
+    display: none;
+}
+
+.member-side .dropdown-menu {
+    display: block;
+    position: static;
+    min-width: 0;
+    margin: 0;
+    padding: 0 0 0 18px;
+    border: 0;
+    background: none;
+    box-shadow: none;
+}
+
+.member-side .dropdown-item {
+    font-size: 0.85rem;
+}
+
+.member-side-foot {
+    border-top: 1px solid var(--h-border-light);
+    margin-top: 8px;
+    padding-top: 8px;
+}
+
+.navbar .member-menu-toggle {
+    font-size: 1.2rem;
+}
+
+@media (min-width: 768px) {
+    .member-side {
+        flex: 0 0 220px;
+        background-color: var(--h-warm-white) !important; /* offcanvas-md sets transparent !important */
+        border-right: 1px solid var(--h-border-light);
+    }
+}
+
 /* --- Cards --- */
 .card {
     background-color: var(--h-bg-card);
