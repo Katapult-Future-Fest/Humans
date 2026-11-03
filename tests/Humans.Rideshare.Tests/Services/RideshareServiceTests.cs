@@ -8,6 +8,8 @@ using Humans.Rideshare.Data;
 using Humans.Rideshare.Services;
 using Humans.Rideshare.Services.Routing;
 using Humans.Rideshare.Tests.Infrastructure;
+using Humans.Settings.Contracts;
+using Humans.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Logging;
@@ -24,10 +26,53 @@ namespace Humans.Rideshare.Tests.Services;
 /// </summary>
 public sealed class RideshareServiceTests : RideshareTestHarness
 {
+    [HumansTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CreateOffer_RefusesAnUnrepresentableTravelEnd_OnEitherLeg(bool inverseLeg)
+    {
+        var settings = await SeedSettingsAsync();
+        if (inverseLeg)
+        {
+            settings.OutboundWindowStart = LocalDate.MaxIsoValue;
+            settings.OutboundWindowEnd = LocalDate.MaxIsoValue;
+            await Db.SaveChangesAsync(Ct);
+        }
+        var save = NewTripSave(departure: inverseLeg ? null : LocalDate.MaxIsoValue, durationDays: 2);
+
+        var result = await NewService().CreateOfferAsync(SeedUser(), EventId, save, Ct);
+
+        result.Refusal!.Key.Should().Be("Rideshare_InvalidDate");
+        await using var ctx = OpenContext();
+        (await ctx.Trips.CountAsync(Ct)).Should().Be(0);
+    }
+
+    [HumansTheory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public async Task UpdateOffer_RequiresARepresentableTravelEnd(int durationDays)
+    {
+        var driver = SeedUser();
+        var trip = await SeedTripAsync(driver);
+        var result = await NewService().UpdateOfferAsync(trip.Id, driver,
+            NewTripSave(departure: LocalDate.MaxIsoValue, durationDays: durationDays), Ct);
+
+        await using var ctx = OpenContext();
+        var stored = await ctx.Trips.SingleAsync(Ct);
+        if (durationDays == 1)
+        {
+            result.Refusal.Should().BeNull();
+            stored.DepartureDate.Should().Be(LocalDate.MaxIsoValue);
+        }
+        else
+        {
+            result.Refusal!.Key.Should().Be("Rideshare_InvalidDate");
+            stored.DepartureDate.Should().Be(trip.DepartureDate);
+        }
+    }
+
     private static readonly GeoPoint Lyon = new(45.76, 4.84);
     private static readonly GeoPoint Bordeaux = new(44.84, -0.58);
-
-    // ── Offers: inverse leg ───────────────────────────────────────────────
 
     [HumansTheory]
     [InlineData(true)]
@@ -43,7 +88,7 @@ public sealed class RideshareServiceTests : RideshareTestHarness
         var departure = new LocalDate(Year, 7, 3);
 
         var id = (await NewService().CreateOfferAsync(
-            driver, Year, NewTripSave(direction, waypoints: ["Lyon", "Bordeaux"], departure: departure, seats: 2), Ct)).Id!.Value;
+            driver, EventId, NewTripSave(direction, waypoints: ["Lyon", "Bordeaux"], departure: departure, seats: 2), Ct)).Id!.Value;
 
         await using var ctx = OpenContext();
         var trips = await ctx.Trips.ToListAsync(Ct);
@@ -93,8 +138,6 @@ public sealed class RideshareServiceTests : RideshareTestHarness
         }
     }
 
-    // ── Offers: geocoding and routing ─────────────────────────────────────
-
     [HumansFact]
     public async Task CreateOffer_GeocodesTheMemberPlace_WhenCoordinatesAreMissing()
     {
@@ -103,7 +146,7 @@ public sealed class RideshareServiceTests : RideshareTestHarness
             .Returns(new GeoPoint(52.52, 13.405));
 
         var id = (await NewService().CreateOfferAsync(
-            SeedUser(), Year, NewTripSave(place: "Berlin", latitude: null, longitude: null), Ct)).Id!.Value;
+            SeedUser(), EventId, NewTripSave(place: "Berlin", latitude: null, longitude: null), Ct)).Id!.Value;
 
         await using var ctx = OpenContext();
         var trip = await ctx.Trips.SingleAsync(t => t.Id == id, Ct);
@@ -117,7 +160,7 @@ public sealed class RideshareServiceTests : RideshareTestHarness
         await SeedSettingsAsync();
 
         await NewService().CreateOfferAsync(
-            SeedUser(), Year, NewTripSave(place: "Berlin", latitude: 52.52, longitude: 13.405), Ct);
+            SeedUser(), EventId, NewTripSave(place: "Berlin", latitude: 52.52, longitude: 13.405), Ct);
 
         await RouteProvider.DidNotReceive().GeocodeAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
@@ -129,7 +172,7 @@ public sealed class RideshareServiceTests : RideshareTestHarness
         RouteProvider.GeocodeAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns((GeoPoint?)null);
 
         var act = () => NewService().CreateOfferAsync(
-            SeedUser(), Year, NewTripSave(place: "Atlantis", latitude: null, longitude: null), Ct);
+            SeedUser(), EventId, NewTripSave(place: "Atlantis", latitude: null, longitude: null), Ct);
 
         (await act()).Refusal!.Args.Should().Contain("Atlantis");
         await using var ctx = OpenContext();
@@ -143,7 +186,7 @@ public sealed class RideshareServiceTests : RideshareTestHarness
         RouteProvider.GeocodeAsync("Nowhere Junction", Arg.Any<CancellationToken>()).Returns((GeoPoint?)null);
 
         var act = () => NewService().CreateOfferAsync(
-            SeedUser(), Year, NewTripSave(waypoints: ["Nowhere Junction"]), Ct);
+            SeedUser(), EventId, NewTripSave(waypoints: ["Nowhere Junction"]), Ct);
 
         (await act()).Refusal!.Args.Should().Contain("Nowhere Junction");
     }
@@ -155,7 +198,7 @@ public sealed class RideshareServiceTests : RideshareTestHarness
         RouteProvider.GetRouteGeoJsonAsync(Arg.Any<IReadOnlyList<GeoPoint>>(), Arg.Any<CancellationToken>())
             .Returns((string?)null);
 
-        var id = (await NewService().CreateOfferAsync(SeedUser(), Year, NewTripSave(), Ct)).Id!.Value;
+        var id = (await NewService().CreateOfferAsync(SeedUser(), EventId, NewTripSave(), Ct)).Id!.Value;
 
         await using var ctx = OpenContext();
         var trips = await ctx.Trips.ToListAsync(Ct);
@@ -166,14 +209,12 @@ public sealed class RideshareServiceTests : RideshareTestHarness
     }
 
     [HumansFact]
-    public async Task CreateOffer_WithoutSettingsForTheYear_ReturnsARefusal()
+    public async Task CreateOffer_WithoutSettingsForTheEvent_ReturnsARefusal()
     {
-        var act = () => NewService().CreateOfferAsync(SeedUser(), Year, NewTripSave(), Ct);
+        var act = () => NewService().CreateOfferAsync(SeedUser(), EventId, NewTripSave(), Ct);
 
-        (await act()).Refusal!.Args.Should().Contain(Year);
+        (await act()).Refusal!.Args.Should().Contain(Burn.EventName);
     }
-
-    // ── Offers: ownership and state ───────────────────────────────────────
 
     [HumansFact]
     public async Task UpdateOffer_OnACancelledTrip_ReturnsARefusal()
@@ -321,8 +362,6 @@ public sealed class RideshareServiceTests : RideshareTestHarness
         await act.Should().ThrowAsync<UnauthorizedAccessException>();
     }
 
-    // ── Seats ─────────────────────────────────────────────────────────────
-
     [HumansFact]
     public async Task Snapshot_DerivesSeatsRemainingFromAcceptedInterestsOnly()
     {
@@ -335,7 +374,7 @@ public sealed class RideshareServiceTests : RideshareTestHarness
         var full = await SeedTripAsync(driver, seatsOffered: 2);
         await SeedInterestAsync(SeedUser(), full.Id, seats: 2, status: InterestStatus.Accepted);
 
-        var snapshot = await NewService().GetSnapshotAsync(Year, Ct);
+        var snapshot = await NewService().GetSnapshotAsync(EventId, Ct);
 
         var openView = snapshot.Trips.Single(t => t.Id == open.Id);
         openView.SeatsRemaining.Should().Be(1);
@@ -551,16 +590,14 @@ public sealed class RideshareServiceTests : RideshareTestHarness
         var trip = await SeedTripAsync(driver, seatsOffered: 3);
         var accepted = await SeedInterestAsync(rider, trip.Id, seats: 2, status: InterestStatus.Accepted);
         var service = NewService();
-        (await service.GetSnapshotAsync(Year, Ct)).Trips.Single().SeatsRemaining.Should().Be(1);
+        (await service.GetSnapshotAsync(EventId, Ct)).Trips.Single().SeatsRemaining.Should().Be(1);
 
         await service.WithdrawInterestAsync(accepted.Id, rider, Ct);
 
-        (await service.GetSnapshotAsync(Year, Ct)).Trips.Single().SeatsRemaining.Should().Be(3);
+        (await service.GetSnapshotAsync(EventId, Ct)).Trips.Single().SeatsRemaining.Should().Be(3);
         await using var ctx = OpenContext();
         (await ctx.Interests.SingleAsync(i => i.Id == accepted.Id, Ct)).Status.Should().Be(InterestStatus.Withdrawn);
     }
-
-    // ── Interests: who may do what ────────────────────────────────────────
 
     [HumansFact]
     public async Task AcceptAndDecline_ByAnyoneButThePostingOwner_Throw()
@@ -783,13 +820,11 @@ public sealed class RideshareServiceTests : RideshareTestHarness
         interest.RequestId.Should().Be(request.Id);
         interest.FromUserId.Should().Be(driver);
         await Notifications.Received(1).SendAsync(
-            NotificationSource.RideshareInterestReceived, NotificationClass.Actionable, Arg.Any<NotificationPriority>(),
+            RideshareNotificationSources.RideshareInterestReceived, NotificationClass.Actionable, Arg.Any<NotificationPriority>(),
             "Ada can take you", Arg.Is<IReadOnlyList<Guid>>(r => r.Single() == rider),
             Arg.Is<string?>(b => b!.Contains(request.PickupPlaceLabel) && b.Contains("2 seats")),
             "/Rideshare/Mine", Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
     }
-
-    // ── Interests: decline privacy, matching ──────────────────────────────
 
     [HumansFact]
     public async Task DeclineInterest_StoresNoReason_StampsRespondedAt_AndTellsTheAuthorNeutrally()
@@ -808,7 +843,7 @@ public sealed class RideshareServiceTests : RideshareTestHarness
         declined.RespondedAt.Should().Be(Clock.GetCurrentInstant());
         declined.Message.Should().BeNull();
         await Notifications.Received(1).SendAsync(
-            NotificationSource.RideshareInterestDeclined, NotificationClass.Informational, Arg.Any<NotificationPriority>(),
+            RideshareNotificationSources.RideshareInterestDeclined, NotificationClass.Informational, Arg.Any<NotificationPriority>(),
             "Ride update", Arg.Is<IReadOnlyList<Guid>>(r => r.Single() == rider),
             "Ada wasn't able to offer a spot this time.",
             "/Rideshare/Mine", Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
@@ -826,7 +861,7 @@ public sealed class RideshareServiceTests : RideshareTestHarness
         await NewService().DeclineInterestAsync(interest.Id, rider, Ct);
 
         await Notifications.Received(1).SendAsync(
-            NotificationSource.RideshareInterestDeclined, NotificationClass.Informational, Arg.Any<NotificationPriority>(),
+            RideshareNotificationSources.RideshareInterestDeclined, NotificationClass.Informational, Arg.Any<NotificationPriority>(),
             "Ride update", Arg.Is<IReadOnlyList<Guid>>(r => r.Single() == driver),
             "Bo went with another ride this time.",
             "/Rideshare/Mine", Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
@@ -868,7 +903,7 @@ public sealed class RideshareServiceTests : RideshareTestHarness
         var wrongWayRequest = await SeedRequestAsync(wrongWay);
         await SeedInterestAsync(wrongWay, returnTrip.Id, status: InterestStatus.Accepted);
 
-        var snapshot = await NewService().GetSnapshotAsync(Year, Ct);
+        var snapshot = await NewService().GetSnapshotAsync(EventId, Ct);
 
         snapshot.Requests.Single(r => r.Id == otherDayRequest.Id).IsMatched.Should().BeFalse();
         snapshot.Requests.Single(r => r.Id == wrongWayRequest.Id).IsMatched.Should().BeFalse();
@@ -877,8 +912,6 @@ public sealed class RideshareServiceTests : RideshareTestHarness
         snapshot.Requests.Single(r => r.Id == pendingRequest.Id).IsMatched.Should().BeFalse();
         snapshot.Requests.Single(r => r.Id == strandedRequest.Id).IsMatched.Should().BeFalse();
     }
-
-    // ── Notifications ─────────────────────────────────────────────────────
 
     [HumansFact]
     public async Task ExpressInterest_TellsTheDriver()
@@ -889,7 +922,7 @@ public sealed class RideshareServiceTests : RideshareTestHarness
         await NewService().ExpressInterestAsync(SeedUser("Bo"), trip.Id, null, 1, "Room for a tent?", Ct);
 
         await Notifications.Received(1).SendAsync(
-            NotificationSource.RideshareInterestReceived, NotificationClass.Actionable, Arg.Any<NotificationPriority>(),
+            RideshareNotificationSources.RideshareInterestReceived, NotificationClass.Actionable, Arg.Any<NotificationPriority>(),
             "Bo is interested in your ride", Arg.Is<IReadOnlyList<Guid>>(r => r.Single() == driver),
             Arg.Is<string?>(b => b!.Contains("Paris") && b.Contains("1 seat") && b.Contains("Room for a tent?")),
             "/Rideshare/Mine", Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
@@ -915,7 +948,7 @@ public sealed class RideshareServiceTests : RideshareTestHarness
         await NewService().ExpressInterestAsync(rider, trip.Id, null, 1, null, Ct);
 
         await Notifications.Received(1).SendAsync(
-            NotificationSource.RideshareInterestReceived, NotificationClass.Actionable, Arg.Any<NotificationPriority>(),
+            RideshareNotificationSources.RideshareInterestReceived, NotificationClass.Actionable, Arg.Any<NotificationPriority>(),
             title, Arg.Is<IReadOnlyList<Guid>>(r => r.Single() == driver),
             Arg.Any<string?>(), "/Rideshare/Mine", Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<string?>(),
             Arg.Any<CancellationToken>());
@@ -943,7 +976,7 @@ public sealed class RideshareServiceTests : RideshareTestHarness
         await NewService().ExpressInterestAsync(rider, trip.Id, null, 1, null, Ct);
 
         await Notifications.Received(1).SendAsync(
-            NotificationSource.RideshareInterestReceived, NotificationClass.Actionable, Arg.Any<NotificationPriority>(),
+            RideshareNotificationSources.RideshareInterestReceived, NotificationClass.Actionable, Arg.Any<NotificationPriority>(),
             "Bo is interested in your ride", Arg.Is<IReadOnlyList<Guid>>(r => r.Single() == driver),
             Arg.Is<string?>(b => b!.Contains(englishDate) && b.Contains("1 seat")),
             "/Rideshare/Mine", "Open Rideshare", Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
@@ -967,7 +1000,7 @@ public sealed class RideshareServiceTests : RideshareTestHarness
         accepted.Status.Should().Be(InterestStatus.Accepted);
         accepted.RespondedAt.Should().Be(Clock.GetCurrentInstant());
         await Notifications.Received(1).SendAsync(
-            NotificationSource.RideshareInterestAccepted, NotificationClass.Informational, Arg.Any<NotificationPriority>(),
+            RideshareNotificationSources.RideshareInterestAccepted, NotificationClass.Informational, Arg.Any<NotificationPriority>(),
             "You're in: ride with Ada", Arg.Is<IReadOnlyList<Guid>>(r => r.Single() == rider),
             Arg.Any<string?>(), "/Rideshare/Mine", Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<string?>(),
             Arg.Any<CancellationToken>());
@@ -985,7 +1018,7 @@ public sealed class RideshareServiceTests : RideshareTestHarness
         await NewService().AcceptInterestAsync(answer.Id, rider, Ct);
 
         await Notifications.Received(1).SendAsync(
-            NotificationSource.RideshareInterestAccepted, NotificationClass.Informational, Arg.Any<NotificationPriority>(),
+            RideshareNotificationSources.RideshareInterestAccepted, NotificationClass.Informational, Arg.Any<NotificationPriority>(),
             "Bo accepted your offer of a ride", Arg.Is<IReadOnlyList<Guid>>(r => r.Single() == driver),
             Arg.Any<string?>(), "/Rideshare/Mine", Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<string?>(),
             Arg.Any<CancellationToken>());
@@ -1039,7 +1072,7 @@ public sealed class RideshareServiceTests : RideshareTestHarness
     {
         var trip = await SeedTripAsync(SeedUser("Ada"));
         Notifications.SendAsync(
-                Arg.Any<NotificationSource>(), Arg.Any<NotificationClass>(), Arg.Any<NotificationPriority>(),
+                Arg.Any<NotificationSourceDefinition>(), Arg.Any<NotificationClass>(), Arg.Any<NotificationPriority>(),
                 Arg.Any<string>(), Arg.Any<IReadOnlyList<Guid>>(), Arg.Any<string?>(), Arg.Any<string?>(),
                 Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
             .ThrowsAsync(new InvalidOperationException("mail is down"));
@@ -1051,33 +1084,69 @@ public sealed class RideshareServiceTests : RideshareTestHarness
         Logger.Entries.Should().Contain(e => e.Level == LogLevel.Error && e.Exception != null);
     }
 
-    [HumansFact]
-    public async Task ExpressInterest_PropagatesCallerCancellationDuringNotification()
+    [HumansTheory]
+    [InlineData("express", false)]
+    [InlineData("accept", false)]
+    [InlineData("decline", false)]
+    [InlineData("express", true)]
+    [InlineData("accept", true)]
+    [InlineData("decline", true)]
+    public async Task InterestMutation_CompletesNotificationAfterCallerCancellation(string action, bool cancelDuringLookup)
     {
-        var trip = await SeedTripAsync(SeedUser("Ada"));
+        var driver = SeedUser("Ada");
+        var rider = SeedUser("Bo");
+        var trip = await SeedTripAsync(driver);
+        var interestId = string.Equals(action, "express", StringComparison.Ordinal) ? (Guid?)null : (await SeedInterestAsync(rider, trip.Id)).Id;
+        var actor = string.Equals(action, "express", StringComparison.Ordinal) ? rider : driver;
+        var actorInfo = await Users.GetUserInfoAsync(actor, Ct);
         using var cancellation = new CancellationTokenSource();
+        Users.GetUserInfoAsync(actor, Arg.Any<CancellationToken>())
+            .Returns(call => LookupActorAsync(call.Arg<CancellationToken>()));
+
+        async ValueTask<Humans.Users.Contracts.UserInfo?> LookupActorAsync(CancellationToken token)
+        {
+            if (cancelDuringLookup) await cancellation.CancelAsync();
+            token.ThrowIfCancellationRequested();
+            return actorInfo;
+        }
+
         Notifications.SendAsync(
-                Arg.Any<NotificationSource>(), Arg.Any<NotificationClass>(), Arg.Any<NotificationPriority>(),
+                Arg.Any<NotificationSourceDefinition>(), Arg.Any<NotificationClass>(), Arg.Any<NotificationPriority>(),
                 Arg.Any<string>(), Arg.Any<IReadOnlyList<Guid>>(), Arg.Any<string?>(), Arg.Any<string?>(),
                 Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
-            .Returns(async _ =>
+            .Returns(async call =>
             {
                 await cancellation.CancelAsync();
-                throw new OperationCanceledException(cancellation.Token);
+                call.Arg<CancellationToken>().ThrowIfCancellationRequested();
             });
+        var service = NewService();
 
-        var act = () => NewService().ExpressInterestAsync(SeedUser("Bo"), trip.Id, null, 1, null, cancellation.Token);
+        var result = action switch
+        {
+            "express" => await service.ExpressInterestAsync(rider, trip.Id, null, 1, null, cancellation.Token),
+            "accept" => await service.AcceptInterestAsync(interestId!.Value, driver, cancellation.Token),
+            _ => await service.DeclineInterestAsync(interestId!.Value, driver, cancellation.Token)
+        };
 
-        await act.Should().ThrowAsync<OperationCanceledException>();
+        result.Refusal.Should().BeNull();
+        cancellation.IsCancellationRequested.Should().BeTrue();
         await using var ctx = OpenContext();
-        (await ctx.Interests.AnyAsync(i => i.TripId == trip.Id, Ct)).Should().BeTrue();
+        var stored = await ctx.Interests.SingleAsync(Ct);
+        stored.Status.Should().Be(action switch
+        {
+            "accept" => InterestStatus.Accepted,
+            "decline" => InterestStatus.Declined,
+            _ => InterestStatus.Pending
+        });
+        await Notifications.Received(1).SendAsync(
+            Arg.Any<NotificationSourceDefinition>(), Arg.Any<NotificationClass>(), Arg.Any<NotificationPriority>(),
+            Arg.Any<string>(), Arg.Any<IReadOnlyList<Guid>>(), Arg.Any<string?>(), Arg.Any<string?>(),
+            Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<string?>(), CancellationToken.None);
         Logger.Entries.Should().NotContain(e => e.Level == LogLevel.Error);
     }
 
-    // ── Settings ──────────────────────────────────────────────────────────
-
     [HumansFact]
-    public async Task SaveSettings_UpsertsByYear_AndAuditsEachSave()
+    public async Task SaveSettings_UpsertsByEvent_AndAuditsEachSave()
     {
         var admin = SeedUser("Admin");
         var service = NewService();
@@ -1086,46 +1155,135 @@ public sealed class RideshareServiceTests : RideshareTestHarness
             new LocalDate(Year, 7, 1), new LocalDate(Year, 7, 10),
             new LocalDate(Year, 7, 12), new LocalDate(Year, 7, 20));
 
-        await service.SaveSettingsAsync(Year, save, admin, Ct);
+        await service.SaveSettingsAsync(EventId, save, admin, Ct);
 
         await using var first = OpenContext();
         var row = await first.Settings.SingleAsync(Ct);
         row.Year.Should().Be(Year);
+        row.EventSettingsId.Should().Be(EventId);
         row.DestinationLabel.Should().Be("Elsewhere");
         await AuditLog.Received(1).LogAsync(
-            AuditAction.RideshareSettingsUpdated, AuditEntityTypes.RideshareSettings, row.Id,
+            RideshareAuditActions.RideshareSettingsUpdated, AuditEntityTypes.RideshareSettings, row.Id,
             Arg.Is<string>(d => d.Contains("Elsewhere")), admin, Arg.Any<Guid?>(), Arg.Any<string?>());
 
-        await service.SaveSettingsAsync(Year, save with { DestinationLabel = "Somewhere else" }, admin, Ct);
+        await service.SaveSettingsAsync(EventId, save with { DestinationLabel = "Somewhere else" }, admin, Ct);
 
         await using var second = OpenContext();
         var updated = await second.Settings.SingleAsync(Ct);
         updated.Id.Should().Be(row.Id);
         updated.DestinationLabel.Should().Be("Somewhere else");
         await AuditLog.Received(2).LogAsync(
-            AuditAction.RideshareSettingsUpdated, AuditEntityTypes.RideshareSettings, row.Id,
+            RideshareAuditActions.RideshareSettingsUpdated, AuditEntityTypes.RideshareSettings, row.Id,
             Arg.Any<string>(), admin, Arg.Any<Guid?>(), Arg.Any<string?>());
+    }
+
+    [HumansFact]
+    public async Task SaveSettings_StampsTheLegacyRowOfTheEventsYear_InsteadOfAddingOne()
+    {
+        var legacy = await SeedSettingsAsync();
+
+        await NewService().SaveSettingsAsync(EventId, new SettingsSave(
+            "Somewhere else", 43.2, -2.4,
+            new LocalDate(Year, 7, 1), new LocalDate(Year, 7, 10),
+            new LocalDate(Year, 7, 12), new LocalDate(Year, 7, 20)), SeedUser(), Ct);
+
+        await using var ctx = OpenContext();
+        var row = await ctx.Settings.SingleAsync(Ct);
+        row.Id.Should().Be(legacy.Id);
+        row.EventSettingsId.Should().Be(EventId);
+        row.DestinationLabel.Should().Be("Somewhere else");
+    }
+
+    [HumansFact]
+    public async Task ASecondEventInTheSameYear_GetsItsOwnRides_AndTheLegacyRowsStayWithTheFirst()
+    {
+        var autumn = StubAutumnEvent();
+        await SeedSettingsAsync();
+        var legacyTrip = await SeedTripAsync(SeedUser("Ada"));
+        var service = NewService();
+        await service.SaveSettingsAsync(autumn.Id, new SettingsSave(
+            "Autumn site", 40.0, -3.0,
+            new LocalDate(Year, 10, 1), new LocalDate(Year, 10, 3),
+            new LocalDate(Year, 10, 5), new LocalDate(Year, 10, 7)), SeedUser(), Ct);
+
+        var autumnTripId = (await service.CreateOfferAsync(
+            SeedUser("Bo"), autumn.Id, NewTripSave(departure: new LocalDate(Year, 10, 2)), Ct)).Id!.Value;
+
+        var summer = await service.GetSnapshotAsync(EventId, Ct);
+        summer.Settings!.DestinationLabel.Should().Be("Elsewhere");
+        summer.Trips.Select(t => t.Id).Should().Equal(legacyTrip.Id);
+
+        var autumnSnapshot = await service.GetSnapshotAsync(autumn.Id, Ct);
+        autumnSnapshot.EventName.Should().Be("Autumn Burn");
+        autumnSnapshot.Settings!.DestinationLabel.Should().Be("Autumn site");
+        autumnSnapshot.Trips.Should().HaveCount(2).And.OnlyContain(t => t.Id == autumnTripId || t.LinkedTripId == autumnTripId);
+    }
+
+    [HumansFact]
+    public async Task WithNoActiveEvent_TheSnapshotIsEmpty_AndPostingIsRefused()
+    {
+        await SeedSettingsAsync();
+        await SeedTripAsync(SeedUser());
+        var service = NewService();
+
+        var snapshot = await service.GetSnapshotAsync(null, Ct);
+        snapshot.Settings.Should().BeNull();
+        snapshot.Trips.Should().BeEmpty();
+        (await service.CreateRequestAsync(SeedUser(), null, NewRequestSave(), Ct)).Refusal!.Key
+            .Should().Be("Rideshare_Error_NotSetUp");
+    }
+
+    [HumansFact]
+    public async Task AssignEventIds_StampsLegacyRowsWithTheEarliestEventOfTheirYear_AndIsIdempotent()
+    {
+        StubAutumnEvent();
+        var settings = await SeedSettingsAsync();
+        var trip = await SeedTripAsync(SeedUser());
+        var request = await SeedRequestAsync(SeedUser());
+        var orphan = await SeedTripAsync(SeedUser(), year: 2019);
+        var service = NewService();
+
+        (await service.GetEventIdPlanAsync(Ct)).Where(p => p.Event is not null).Should().HaveCount(3)
+            .And.OnlyContain(p => p.Event!.Id == EventId);
+
+        (await service.AssignEventIdsAsync(Ct)).Should().Be(3);
+        (await service.AssignEventIdsAsync(Ct)).Should().Be(0);
+
+        await using var ctx = OpenContext();
+        (await ctx.Settings.SingleAsync(s => s.Id == settings.Id, Ct)).EventSettingsId.Should().Be(EventId);
+        (await ctx.Trips.SingleAsync(t => t.Id == trip.Id, Ct)).EventSettingsId.Should().Be(EventId);
+        (await ctx.Requests.SingleAsync(r => r.Id == request.Id, Ct)).EventSettingsId.Should().Be(EventId);
+        (await ctx.Trips.SingleAsync(t => t.Id == orphan.Id, Ct)).EventSettingsId.Should().BeNull();
+        (await service.GetSnapshotAsync(EventId, Ct)).Trips.Select(t => t.Id).Should().Equal(trip.Id);
+    }
+
+    /// <summary>A second, later event in <see cref="RideshareTestHarness.Year"/>; the harness's event stays the earliest.</summary>
+    private EventSettingsInfo StubAutumnEvent()
+    {
+        var autumn = BurnFixtures.Burn(eventName: "Autumn Burn", year: Year, gateOpeningDate: new LocalDate(Year, 10, 1));
+        BurnSettings.GetAllEventSettingsAsync(Arg.Any<CancellationToken>()).Returns([Burn, autumn]);
+        return autumn;
     }
 
     [HumansFact]
     public async Task SaveSettings_RejectsAWindowThatEndsBeforeItStarts()
     {
         var act = () => NewService().SaveSettingsAsync(
-            Year,
+            EventId,
             new SettingsSave("Elsewhere", 43.2, -2.4,
                 new LocalDate(Year, 7, 10), new LocalDate(Year, 7, 1),
                 new LocalDate(Year, 7, 12), new LocalDate(Year, 7, 20)),
             SeedUser(), Ct);
 
         (await act()).Refusal!.Key.Should().Be("Rideshare_Error_WindowOrder");
-        await AuditLog.DidNotReceiveWithAnyArgs().LogAsync(default, default!, default, default!, default(Guid));
+        await AuditLog.DidNotReceiveWithAnyArgs().LogAsync(null!, default!, default, default!, default(Guid));
     }
 
     [HumansFact]
     public async Task SaveSettings_RequiresADestinationLabel()
     {
         var act = () => NewService().SaveSettingsAsync(
-            Year,
+            EventId,
             new SettingsSave("  ", 43.2, -2.4,
                 new LocalDate(Year, 7, 1), new LocalDate(Year, 7, 10),
                 new LocalDate(Year, 7, 12), new LocalDate(Year, 7, 20)),
@@ -1135,8 +1293,6 @@ public sealed class RideshareServiceTests : RideshareTestHarness
         await using var ctx = OpenContext();
         (await ctx.Settings.CountAsync(Ct)).Should().Be(0);
     }
-
-    // ── GDPR ──────────────────────────────────────────────────────────────
 
     [HumansFact]
     public async Task Export_ReturnsThreeSlices_WithEmptyListsForAHumanWithNothing()

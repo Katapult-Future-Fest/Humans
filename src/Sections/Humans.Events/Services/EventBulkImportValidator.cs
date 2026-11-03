@@ -5,10 +5,11 @@ using Humans.Events.Domain;
 using Humans.Events.Services.Dtos;
 using NodaTime;
 using NodaTime.Text;
+using static Humans.Events.Helpers.EventsTimeHelpers;
 
 namespace Humans.Events.Services;
 
-/// <summary>Validation boundary for the all-or-nothing barrio bulk-upload format.</summary>
+/// <summary>All or nothing.</summary>
 internal static class EventBulkImportValidator
 {
     public static List<BulkImportRowError> ValidateRows(
@@ -72,22 +73,6 @@ internal static class EventBulkImportValidator
                 errors.Add(new BulkImportRowError(row.RowNumber, row.Title, rowErrors));
         }
         return errors;
-    }
-
-    private static bool CanDisplaySchedule(LocalDateTime localStart, int durationMinutes, DateTimeZone timeZone)
-    {
-        // CSV accepts NodaTime dates beyond the DateTime range used by calendars and views.
-        try
-        {
-            var start = localStart.InZoneLeniently(timeZone).ToInstant();
-            var end = start + Duration.FromMinutes(durationMinutes);
-            return start.InUtc().Year >= 1 && start.InZone(timeZone).Year >= 1
-                && end.InUtc().Year >= 1 && end.InZone(timeZone).Year >= 1;
-        }
-        catch (Exception ex) when (ex is OverflowException or ArgumentOutOfRangeException)
-        {
-            return false;
-        }
     }
 
     private static void ValidateCategory(

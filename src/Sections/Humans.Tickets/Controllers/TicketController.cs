@@ -1,3 +1,5 @@
+using Humans.Tickets.Contracts;
+using Humans.Finance.Contracts;
 using CsvHelper;
 using Hangfire;
 using Humans.Base.Csv;
@@ -13,7 +15,7 @@ using Humans.Users.Contracts;
 
 namespace Humans.Tickets.Controllers;
 
-[Authorize(Policy = PolicyNames.TicketAdminBoardOrAdmin)]
+[Authorize(Policy = TicketsPolicies.Read)]
 [Route("Tickets")]
 internal sealed class TicketController(
     ITicketManagement ticketQueryService,
@@ -26,7 +28,7 @@ internal sealed class TicketController(
     [HttpGet("")]
     public async Task<IActionResult> Index()
     {
-        return View(await dashboardPageBuilder.BuildAsync(RoleChecks.CanAccessFinance(User)));
+        return View(await dashboardPageBuilder.BuildAsync(FinanceRoles.IsFinanceAdmin(User)));
     }
 
     [HttpGet("Orders")]
@@ -163,7 +165,7 @@ internal sealed class TicketController(
 
     [HttpPost("Sync")]
     [ValidateAntiForgeryToken]
-    [Authorize(Policy = PolicyNames.TicketAdminOrAdmin)]
+    [Authorize(Policy = TicketsPolicies.Manage)]
     public IActionResult Sync()
     {
         BackgroundJob.Enqueue<TicketSyncJob>(job => job.ExecuteAsync(CancellationToken.None));
@@ -240,7 +242,7 @@ internal sealed class TicketController(
     }
 
     [HttpGet("Export/Attendees")]
-    [Authorize(Policy = PolicyNames.TicketAdminOrAdmin)]
+    [Authorize(Policy = TicketsPolicies.Manage)]
     public async Task<IActionResult> ExportAttendees()
     {
         var actorId = GetCurrentUserId();
@@ -261,7 +263,7 @@ internal sealed class TicketController(
     }
 
     [HttpGet("Export/Orders")]
-    [Authorize(Policy = PolicyNames.TicketAdminOrAdmin)]
+    [Authorize(Policy = TicketsPolicies.Manage)]
     public async Task<IActionResult> ExportOrders()
     {
         var actorId = GetCurrentUserId();
@@ -298,13 +300,8 @@ internal sealed class TicketController(
         return File(bytes, "text/csv", "orders-export.csv");
     }
 
-    /// <summary>
-    /// Monthly ticket-income recap for the accountant: gross split into
-    /// taxable ticket income, 10% VAT and VAT-free donations, plus fees and
-    /// refunded gross so it ties to the Stripe statement.
-    /// </summary>
     [HttpGet("Export/AccountantReport")]
-    [Authorize(Policy = PolicyNames.TicketAdminOrAdmin)]
+    [Authorize(Policy = TicketsPolicies.Manage)]
     public async Task<IActionResult> ExportAccountantReport()
     {
         var months = (await ticketQueryService.GetSalesAggregatesAsync(HttpContext.RequestAborted)).MonthlySales;
@@ -330,11 +327,6 @@ internal sealed class TicketController(
         return File(bytes, "text/csv", "ticket-income-by-month.csv");
     }
 
-    /// <summary>
-    /// Donor list for the accountant: one row per donation on a paid order — the
-    /// part of a VIP ticket above the threshold, or a separate checkout donation —
-    /// with the buyer's name and email. Admin only; each download is audited.
-    /// </summary>
     [HttpGet("Export/Donations")]
     [Authorize(Policy = PolicyNames.AdminOnly)]
     public async Task<IActionResult> ExportDonations()

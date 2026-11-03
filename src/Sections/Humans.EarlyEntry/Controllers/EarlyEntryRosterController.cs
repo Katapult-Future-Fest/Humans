@@ -1,3 +1,4 @@
+using Humans.Shifts.Contracts;
 using Humans.EarlyEntry.Contracts;
 using Humans.EarlyEntry.Models;
 using Humans.Base.Authorization;
@@ -9,7 +10,7 @@ using Humans.Users.Contracts;
 namespace Humans.EarlyEntry.Controllers;
 
 [Route("Shifts/Admin/EarlyEntry")]
-[Authorize(Policy = PolicyNames.ShiftDashboardAccess)]
+[Authorize(Policy = ShiftsPolicies.Read)]
 internal sealed class EarlyEntryRosterController(
     IEarlyEntryService earlyEntryService,
     IUserService userService) : HumansControllerBase(userService)
@@ -24,8 +25,7 @@ internal sealed class EarlyEntryRosterController(
             .ThenBy(r => r.UserId)
             .ToList();
 
-        // Burner name renders from UserId via <vc:human>; no DisplayName field
-        // (memory/code/no-new-displayname-fields.md). Legal name is the separate read below.
+        // Burner name renders from UserId via <vc:human>; legal name is the separate read below.
         var vms = new List<EarlyEntryRosterRowVm>(ordered.Count);
         foreach (var r in ordered)
         {

@@ -7,17 +7,6 @@ using Humans.AuditLog.Contracts;
 
 namespace Humans.AuditLog.Tests;
 
-/// <summary>
-/// Happy-path tests for <see cref="AuditLogRepository"/> at the repository
-/// boundary — exercises the real EF implementation against an in-memory
-/// database via <see cref="TestDbContextFactory{TContext}"/>.
-///
-/// The broader <c>AuditLogServiceTests</c> covers most query paths through
-/// the service → repo integration. These tests are here to satisfy the
-/// 1-to-1 production-class-to-test-file mapping invariant and to document
-/// <see cref="AuditLogRepository"/> as the sole writer of
-/// <c>ctx.AuditLogEntries</c>.
-/// </summary>
 public class AuditLogRepositoryTests
 {
     private readonly IDbContextFactory<AuditLogDbContext> _factory;
@@ -35,23 +24,43 @@ public class AuditLogRepositoryTests
     [HumansFact]
     public async Task GetFilteredAsync_LargePageDoesNotWrapToEarlierEntries()
     {
-        await _sut.AddAsync(MakeEntry(AuditAction.VolunteerApproved, "User", Guid.NewGuid()), Xunit.TestContext.Current.CancellationToken);
-        var first = await _sut.GetFilteredAsync(null, 1, 50, Xunit.TestContext.Current.CancellationToken);
+        await _sut.AddAsync(MakeEntry(TestActions.VolunteerApproved, "User", Guid.NewGuid()), Xunit.TestContext.Current.CancellationToken);
+        var first = await _sut.GetFilteredAsync(null, [], 1, 50, Xunit.TestContext.Current.CancellationToken);
         first.Items.Should().ContainSingle();
-        var result = await _sut.GetFilteredAsync(null, int.MaxValue, 50, Xunit.TestContext.Current.CancellationToken);
+        var result = await _sut.GetFilteredAsync(null, [], int.MaxValue, 50, Xunit.TestContext.Current.CancellationToken);
         result.Items.Should().BeEmpty();
         result.TotalCount.Should().Be(1);
-        result.AnomalyCount.Should().Be(0);
+        result.AlertCounts.Should().BeEmpty();
+    }
+
+    [HumansFact]
+    public async Task GetFilteredAsync_CountsEveryAlertActionOverTheWholeLog()
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        await _sut.AddAsync(MakeEntry(TestActions.AnomalousPermissionDetected, "GoogleResource", Guid.NewGuid()), ct);
+        await _sut.AddAsync(MakeEntry(TestActions.AnomalousPermissionDetected, "GoogleResource", Guid.NewGuid()), ct);
+        await _sut.AddAsync(MakeEntry(TestActions.MemberSuspended, "User", Guid.NewGuid()), ct);
+
+        var result = await _sut.GetFilteredAsync(
+            TestActions.MemberSuspended.Name,
+            [TestActions.AnomalousPermissionDetected.Name, TestActions.MemberSuspended.Name],
+            1, 50, ct);
+
+        result.Items.Should().ContainSingle();
+        result.AlertCounts.Should().BeEquivalentTo(new Dictionary<string, int>(StringComparer.Ordinal)
+        {
+            [TestActions.AnomalousPermissionDetected.Name] = 2,
+            [TestActions.MemberSuspended.Name] = 1,
+        });
     }
 
     [HumansFact]
     public async Task AddAsync_PersistsEntry_VisibleOnNextRead()
     {
-        var entry = MakeEntry(AuditAction.VolunteerApproved, "User", Guid.NewGuid());
+        var entry = MakeEntry(TestActions.VolunteerApproved, "User", Guid.NewGuid());
 
         await _sut.AddAsync(entry, Xunit.TestContext.Current.CancellationToken);
 
-        // Round-trip via a fresh context confirms the row was saved by AddAsync.
         await using var ctx = await _factory.CreateDbContextAsync(Xunit.TestContext.Current.CancellationToken);
         var stored = await ctx.AuditLogEntries.AsNoTracking()
             .FirstOrDefaultAsync(e => e.Id == entry.Id, Xunit.TestContext.Current.CancellationToken);
@@ -69,7 +78,7 @@ public class AuditLogRepositoryTests
         var ct = Xunit.TestContext.Current.CancellationToken;
         var now = Instant.FromUtc(2026, 5, 12, 10, 0);
 
-        await _sut.AddAsync(MakeEntry(AuditAction.VolunteerApproved, "User", Guid.NewGuid()), ct);
+        await _sut.AddAsync(MakeEntry(TestActions.VolunteerApproved, "User", Guid.NewGuid()), ct);
         var newer = MakeGoogleSyncEntry(now);
         var older = MakeGoogleSyncEntry(now - Duration.FromHours(3));
         await _sut.AddAsync(newer, ct);
@@ -84,7 +93,7 @@ public class AuditLogRepositoryTests
     private static AuditLogEntry MakeGoogleSyncEntry(Instant occurredAt) => new()
     {
         Id = Guid.NewGuid(),
-        Action = AuditAction.GoogleResourceAccessGranted,
+        Action = TestActions.GoogleResourceAccessGranted.Name,
         EntityType = "GoogleResource",
         EntityId = Guid.NewGuid(),
         Description = "GoogleWorkspaceSyncService: Granted Drive access",
@@ -97,11 +106,11 @@ public class AuditLogRepositoryTests
     };
 
     private static AuditLogEntry MakeEntry(
-        AuditAction action, string entityType, Guid entityId,
+        AuditActionDefinition action, string entityType, Guid entityId,
         Instant? occurredAt = null) => new()
         {
             Id = Guid.NewGuid(),
-            Action = action,
+            Action = action.Name,
             EntityType = entityType,
             EntityId = entityId,
             Description = $"Test {action}",

@@ -24,12 +24,12 @@ Asked by Peter for the 2026 cycle. Combines **shift-based** workload (Confirmed 
 
 ### US-WL.1: Admin Sees Per-Person Workload
 
-**As an** Admin / NoInfoAdmin / VolunteerCoordinator
+**As an** Admin / ShiftsNoInfo / ShiftsAdmin
 **I want to** see every volunteer with shift signups or role assignments, with their hours split by period and Pending count
 **So that** I can identify volunteers nearing burnout and volunteers who have queued work but no approved work
 
 **Acceptance Criteria:**
-- Row per user with `≥ 1` Pending/Confirmed signup **or** a role assignment carrying estimated hours, for the active event
+- Row per user with `≥ 1` Pending/Confirmed signup **or** a role assignment carrying estimated hours, for the active event; role rows also appear before any shifts exist
 - Columns: Display name, Confirmed signup count, Pending signup count, Year-round / Build / Event / Strike hours, Total
 - Confirmed shift hours land in their shift period's column; a held role's `EstimatedHours` (full annual estimate, per holder) lands in the column matching the role's `RolePeriod`
 - Pending signups do **not** contribute to hours (no burnout inflation from queued work)
@@ -38,7 +38,7 @@ Asked by Peter for the 2026 cycle. Combines **shift-based** workload (Confirmed 
 
 ### US-WL.2: Admin Sees Per-Rota Coverage
 
-**As an** Admin / NoInfoAdmin / VolunteerCoordinator
+**As an** Admin / ShiftsNoInfo / ShiftsAdmin
 **I want to** see every rota with shifts in the active event, with planned/filled slots and hours, coverage %, and Pending count
 **So that** I can find rotas that still need fills
 
@@ -53,7 +53,7 @@ Asked by Peter for the 2026 cycle. Combines **shift-based** workload (Confirmed 
 
 ### US-WL.3: Admin Sees Per-Department Roll-Up
 
-**As an** Admin / NoInfoAdmin / VolunteerCoordinator
+**As an** Admin / ShiftsNoInfo / ShiftsAdmin
 **I want to** see every department with planned vs filled slots and hours, plus coverage %
 **So that** I can find departments that are under-staffed at the planning level
 
@@ -94,13 +94,13 @@ The admin workload view includes every shift on every rota in the active event �
 
 | Route | Purpose | Auth |
 |---|---|---|
-| `GET /Shifts/Admin/Workload` | Workload dashboard (three tabs) | `ShiftDashboardAccess` (Admin / NoInfoAdmin / VolunteerCoordinator) |
+| `GET /Shifts/Admin/Workload` | Workload dashboard (three tabs) | `ShiftsPolicies.Manage` (Admin / ShiftsNoInfo / ShiftsAdmin) |
 
 Lives under `/Shifts/Admin/*` per `memory/architecture/no-admin-url-section.md`. Surfaced in the admin sidebar under the "Shifts" group.
 
 ## Authorization
 
-Gated to `PolicyNames.ShiftDashboardAccess` at the controller — same narrow policy that controls the privileged sub-panels on the existing `/Shifts/Dashboard`. Department coordinators do **not** see this view (they have per-department visibility on `/Shifts/Dashboard` already).
+Gated to `ShiftsPolicies.Manage` at the controller — same narrow policy that controls the privileged sub-panels on the existing `/Shifts/Dashboard`. Department coordinators do **not** see this view (they have per-department visibility on `/Shifts/Dashboard` already).
 
 ## Architecture
 
@@ -113,8 +113,6 @@ Gated to `PolicyNames.ShiftDashboardAccess` at the controller — same narrow po
 ## Deferred — Year filter
 
 - **Year filter** — there is no multi-year surface on `IShiftManagement` today. The view uses the active event. Easy follow-up once a year-based lookup lands.
-
-Role hours only surface when the active event has at least one shift (the report short-circuits to empty for a shift-less event); revisit if year-round role workload needs to show before any shifts exist.
 
 ## Related Features
 

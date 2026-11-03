@@ -7,6 +7,7 @@ using Humans.Finance.Contracts;
 using Humans.Finance.Controllers;
 using Humans.Finance.Models;
 using Humans.Finance.Services;
+using Humans.Holded.Contracts;
 using Humans.Tickets.Contracts;
 using Humans.Users.Contracts;
 using Microsoft.AspNetCore.Http;
@@ -25,8 +26,7 @@ namespace Humans.Finance.Tests;
 
 /// <summary>
 /// The controller owns everything /Finance/Creditors renders that the service does not: which
-/// column sorts, which way, the tie-break, and the one place Holded's balance sign is flipped for
-/// a human. None of it was covered before, so all of it is asserted here.
+/// column sorts, which way, the tie-break, and the one place Holded's balance sign is flipped.
 /// </summary>
 public class FinanceControllerTests
 {
@@ -38,16 +38,29 @@ public class FinanceControllerTests
     private readonly IUserService _users = Substitute.For<IUserService>();
     private readonly IBudgetService _budget = Substitute.For<IBudgetService>();
     private readonly IExpenseReportService _expenses = Substitute.For<IExpenseReportService>();
+    private readonly IHoldedService _holdedLedger = Substitute.For<IHoldedService>();
 
-    public FinanceControllerTests() =>
+    public FinanceControllerTests()
+    {
         _expenses.GetReviewQueueAsync(Arg.Any<Guid>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
             .Returns(Array.Empty<ExpenseReportDto>());
+        _finance.GetExpenseReconAsync(Arg.Any<int?>(), Arg.Any<CancellationToken>())
+            .Returns(ExpenseRecon.Unavailable(null, "never synced"));
+    }
 
     private FinanceController MakeController() =>
-        new(_users, _finance, _connector, _expenses, new CashFlowService(_budget, Substitute.For<ITicketService>()),
-            NullLogger<FinanceController>.Instance)
+        new(_users, _finance, _connector, _expenses,
+            new CashFlowService(_budget, Substitute.For<ITicketService>()),
+            new CreditorMatchService(_holdedLedger, _expenses), NullLogger<FinanceController>.Instance)
         {
-            ControllerContext = new() { HttpContext = new DefaultHttpContext() }
+            ControllerContext = new()
+            {
+                HttpContext = new DefaultHttpContext
+                {
+                    User = new ClaimsPrincipal(new ClaimsIdentity(
+                        [new Claim(ClaimTypes.NameIdentifier, Ana.ToString())], authenticationType: "test")),
+                },
+            },
         };
 
     /// <summary>A controller wired with a real HttpContext and TempData, for actions
@@ -230,8 +243,6 @@ public class FinanceControllerTests
         await read.Should().ThrowAsync<OperationCanceledException>();
     }
 
-    // ─── Sorting ─────────────────────────────────────────────────────────────────
-
     [HumansFact]
     public async Task Creditors_DefaultsToAccountNumberAscending()
     {
@@ -312,8 +323,6 @@ public class FinanceControllerTests
         page.Accounts.Select(a => a.SupplierAccountNum).Should().Equal(40000003, 40000006, 40000009);
     }
 
-    // ─── The one sign flip ───────────────────────────────────────────────────────
-
     [HumansFact]
     public async Task Creditors_ShowsTheBalanceFromTheMembersSide()
     {
@@ -326,7 +335,34 @@ public class FinanceControllerTests
         page.Accounts[2].Balance.Should().BeNull();   // no cached lines — not zero
     }
 
-    // ─── Members ─────────────────────────────────────────────────────────────────
+    [HumansTheory]
+    [InlineData(3, 3)]
+    [InlineData(null, null)]
+    public async Task Creditors_CarriesTheReconciliationProblems_NullWhenItCannotBeComputed(int? problems, int? expected)
+    {
+        Accounts([]);
+        _finance.GetExpenseReconAsync(null, Arg.Any<CancellationToken>()).Returns(problems is { } n
+            ? new ExpenseReconReport(null, Instant.FromUtc(2026, 10, 29, 3, 0), null, [], [], [], [],
+                new ExpenseReconTotals(1, 1, 1, 0, 0, 0m, n, 2))
+            : ExpenseRecon.Unavailable(null, "never synced"));
+
+        var page = PageOf(await MakeController().Creditors(sort: null, dir: null));
+
+        page.ReconProblems.Should().Be(expected);
+        page.ReconWarnings.Should().Be(expected is null ? 0 : 2);
+        page.ReconUnavailable.Should().Be(expected is null);
+    }
+
+    [HumansFact]
+    public async Task ExpenseRecon_PassesTheYearThrough()
+    {
+        var report = ExpenseRecon.Unavailable(2025, "never synced");
+        _finance.GetExpenseReconAsync(2025, Arg.Any<CancellationToken>()).Returns(report);
+
+        var result = await MakeController().ExpenseRecon(2025, TestContext.Current.CancellationToken);
+
+        result.Should().BeOfType<ViewResult>().Which.Model.Should().BeSameAs(report);
+    }
 
     [HumansFact]
     public async Task Creditors_NamesEveryBoundMember_IncludingACollision()
@@ -364,8 +400,6 @@ public class FinanceControllerTests
         page.Unresolved.Should().ContainSingle().Which.MemberName.Should().Be("Bo");
     }
 
-    // ─── SEPA generation cap ─────────────────────────────────────────────────────
-
     [HumansTheory]
     [InlineData("not-a-number")]
     [InlineData("0")]
@@ -392,6 +426,7 @@ public class FinanceControllerTests
     public async Task GenerateSepa_InvalidBinding_DoesNotGeneratePartialBatch(bool hasActor)
     {
         var controller = hasActor ? MakeControllerWithHttpContext(Ana) : MakeController();
+        if (!hasActor) controller.HttpContext.User = new ClaimsPrincipal(new ClaimsIdentity());
         var registrations = new ServiceCollection().AddLogging();
         registrations.AddControllers();
         using var services = registrations.BuildServiceProvider();
@@ -438,8 +473,6 @@ public class FinanceControllerTests
         await _connector.Received(1).GenerateSepaPayoutAsync(
             Arg.Any<IReadOnlyList<SepaPayoutSelection>>(), 75.00m, Ana, Arg.Any<CancellationToken>());
     }
-
-    // ─── Statement ───────────────────────────────────────────────────────────────
 
     [HumansFact]
     public async Task CreditorStatement_AccountWithNoCachedLedger_IsNotFound()
@@ -564,13 +597,11 @@ public class FinanceControllerTests
         Lines = [],
     };
 
-    // ─── Connector index ─────────────────────────────────────────────────────────
-
     [HumansFact]
     public async Task Holded_RendersTheConnectorOverviewUnchanged()
     {
-        // The action is dispatch only — the read model is the service's, and the page has no
-        // controller-side assembly to get wrong (nobodies-collective/Humans#1000).
+        // The action is dispatch only: the read model is the service's, and the page has no
+        // controller-side assembly to get wrong.
         var vm = new HoldedConnectorVm(
             new HoldedDocSyncVm(null, "Idle", null, 0, null, IsStale: true), 3, [], [], []);
         _connector.GetConnectorOverviewAsync(Arg.Any<CancellationToken>()).Returns(vm);
@@ -579,8 +610,6 @@ public class FinanceControllerTests
 
         result.Should().BeOfType<ViewResult>().Subject.Model.Should().BeSameAs(vm);
     }
-
-    // ─── SEPA transfers screen ───────────────────────────────────────────────────
 
     [HumansFact]
     public async Task Sepa_GroupsByFileNewestFirst_AndOrdersTransfersByAccount()
@@ -842,7 +871,6 @@ public class FinanceControllerTests
         FallbackPictureUrl: null,
         CreatedAt: Instant.FromUtc(2026, 1, 1, 0, 0),
         LastLoginAt: null,
-        LastConsentReminderSentAt: null,
         DeletionRequestedAt: null,
         DeletionScheduledFor: null,
         DeletionEligibleAfter: null,

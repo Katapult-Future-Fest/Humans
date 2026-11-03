@@ -1,4 +1,5 @@
 using Humans.Email.Contracts;
+using Humans.Users.Contracts;
 using Humans.Auth.Contracts;
 using Humans.Notifications.Data;
 using Humans.Notifications.Services;
@@ -6,7 +7,6 @@ using AwesomeAssertions;
 using static Humans.Notifications.Tests.NotificationTestFixtures;
 using Humans.Notifications.Contracts;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
 using NodaTime;
 using NodaTime.Testing;
@@ -22,7 +22,6 @@ public class NotificationServiceTests : IDisposable
     private readonly PreferenceRegistry _dbContext = new();
     private readonly NotificationsDbContext _notificationsDb;
     private readonly FakeClock _clock;
-    private readonly IMemoryCache _cache;
     private readonly NotificationRepository _repo;
     private readonly NotificationService _service;
     private readonly ICommunicationPreferenceService _preferenceService = Substitute.For<ICommunicationPreferenceService>();
@@ -38,24 +37,22 @@ public class NotificationServiceTests : IDisposable
 
         _notificationsDb = new NotificationsDbContext(notificationsOptions);
         _clock = new FakeClock(Instant.FromUtc(2026, 4, 1, 12, 0));
-        _cache = new MemoryCache(new MemoryCacheOptions());
         _repo = new NotificationRepository(new TestDbContextFactory<NotificationsDbContext>(notificationsOptions));
 
         // Delegate to in-memory DB so seeded preferences are respected.
         _preferenceService.StubInboxDisabledFrom(_dbContext);
 
         var emitter = new NotificationEmitter(
-            _repo, _preferenceService, _clock, _cache,
+            _repo, _preferenceService, _clock,
             NullLogger<NotificationEmitter>.Instance);
         _service = new NotificationService(
             emitter, _repo, _roleAssignmentService, _preferenceService,
-            _clock, _cache, NullLogger<NotificationService>.Instance);
+            _clock, NullLogger<NotificationService>.Instance);
     }
 
     public void Dispose()
     {
         _notificationsDb.Dispose();
-        _cache.Dispose();
         GC.SuppressFinalize(this);
     }
 
@@ -64,13 +61,13 @@ public class NotificationServiceTests : IDisposable
     {
         // NotificationService.SendAsync is a pass-through to INotificationEmitter.
         // What SendAsync *does* — per-recipient rows, preference suppression,
-        // field persistence, badge-cache eviction — is the emitter's behaviour and
+        // field persistence, badge freshness — is the emitter's behaviour and
         // is covered once, in NotificationEmitterTests. This asserts only that the
         // delegation is live, so the pass-through cannot silently become a no-op.
         var user = Guid.NewGuid();
 
         await _service.SendAsync(
-            NotificationSource.TeamMemberAdded,
+            TestSources.TeamUpdate,
             NotificationClass.Informational,
             NotificationPriority.Normal,
             "Added to team",
@@ -89,6 +86,44 @@ public class NotificationServiceTests : IDisposable
 
 
     [HumansFact]
+    public async Task ReassignAsync_RefreshesBothUsersBadgeCountsAfterMovingRecipients()
+    {
+        var source = Guid.NewGuid();
+        var target = Guid.NewGuid();
+        var ct = TestContext.Current.CancellationToken;
+        await _service.SendAsync(TestSources.TeamUpdate, NotificationClass.Informational,
+            NotificationPriority.Normal, "Source notice", [source], cancellationToken: ct);
+        await _service.SendAsync(TestSources.TeamUpdate, NotificationClass.Informational,
+            NotificationPriority.Normal, "Target notice", [target], cancellationToken: ct);
+        var inbox = new NotificationInboxService(_repo, Substitute.For<IUserService>(), TestSources.Registry, _clock);
+        (await inbox.GetUnreadBadgeCountsAsync(source, ct)).Should().Be((0, 1));
+        (await inbox.GetUnreadBadgeCountsAsync(target, ct)).Should().Be((0, 1));
+
+        await _service.ReassignAsync(source, target, Guid.NewGuid(), _clock.GetCurrentInstant(), ct);
+
+        (await inbox.GetUnreadBadgeCountsAsync(source, ct)).Should().Be((0, 0));
+        (await inbox.GetUnreadBadgeCountsAsync(target, ct)).Should().Be((0, 2));
+    }
+
+    [HumansFact]
+    public async Task ReassignAsync_PropagatesPersistenceFailure()
+    {
+        var source = Guid.NewGuid();
+        var target = Guid.NewGuid();
+        var failure = new IOException("Save acknowledgement lost");
+        var repo = Substitute.For<INotificationRepository>();
+        repo.ReassignRecipientsToUserAsync(source, target, Arg.Any<CancellationToken>())
+            .Returns(Task.FromException(failure));
+        var service = new NotificationService(Substitute.For<INotificationEmitter>(), repo,
+            _roleAssignmentService, _preferenceService, _clock, NullLogger<NotificationService>.Instance);
+
+        var act = () => service.ReassignAsync(source, target, Guid.NewGuid(), _clock.GetCurrentInstant(),
+            TestContext.Current.CancellationToken);
+
+        (await act.Should().ThrowAsync<IOException>()).Which.Should().BeSameAs(failure);
+    }
+
+    [HumansFact]
     public async Task SendToRoleAsync_CreatesSharedNotificationForRoleHolders()
     {
         var user1 = Guid.NewGuid();
@@ -98,7 +133,7 @@ public class NotificationServiceTests : IDisposable
             .Returns([user1, user2]);
 
         await _service.SendToRoleAsync(
-            NotificationSource.ApplicationSubmitted,
+            TestSources.Approval,
             NotificationClass.Actionable,
             NotificationPriority.Normal,
             "New tier application submitted",
@@ -124,7 +159,7 @@ public class NotificationServiceTests : IDisposable
         var title = "Working group applied: " + new string('x', 200);
         var detail = string.Concat(Enumerable.Repeat("🚀", 2000));
 
-        await _service.SendToRoleAsync(NotificationSource.WorkgroupRegistrationPending,
+        await _service.SendToRoleAsync(TestSources.Approval,
             NotificationClass.Actionable, NotificationPriority.Normal, title, "Board", detail,
             cancellationToken: TestContext.Current.CancellationToken);
 
@@ -146,12 +181,12 @@ public class NotificationServiceTests : IDisposable
         _dbContext.CommunicationPreferences.Add(new()
         {
             UserId = suppressed,
-            Category = NotificationSource.TeamMemberAdded.ToMessageCategory(),
+            Category = TestSources.TeamUpdate.Category,
             InboxEnabled = false,
         });
 
         await _service.SendToRoleAsync(
-            NotificationSource.TeamMemberAdded,
+            TestSources.TeamUpdate,
             NotificationClass.Informational,
             NotificationPriority.Normal,
             "Heads up",
@@ -174,7 +209,7 @@ public class NotificationServiceTests : IDisposable
         _dbContext.CommunicationPreferences.Add(new()
         {
             UserId = holder,
-            Category = NotificationSource.TeamMemberAdded.ToMessageCategory(),
+            Category = TestSources.TeamUpdate.Category,
             InboxEnabled = false,
         });
 
@@ -184,7 +219,7 @@ public class NotificationServiceTests : IDisposable
                 .Returns(Task.FromException<IReadOnlySet<Guid>>(new InvalidOperationException("Preferences unavailable")));
 
         await _service.SendToRoleAsync(
-            NotificationSource.TeamMemberAdded,
+            TestSources.TeamUpdate,
             NotificationClass.Actionable,
             NotificationPriority.Normal,
             "Act on this",
@@ -205,12 +240,12 @@ public class NotificationServiceTests : IDisposable
         _dbContext.CommunicationPreferences.Add(new()
         {
             UserId = holder,
-            Category = NotificationSource.TeamMemberAdded.ToMessageCategory(),
+            Category = TestSources.TeamUpdate.Category,
             InboxEnabled = false,
         });
 
         await _service.SendToRoleAsync(
-            NotificationSource.TeamMemberAdded,
+            TestSources.TeamUpdate,
             NotificationClass.Informational,
             NotificationPriority.Normal,
             "Heads up",

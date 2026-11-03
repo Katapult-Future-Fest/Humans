@@ -18,23 +18,15 @@ using Microsoft.Extensions.Options;
 namespace Humans.Backdoor.Controllers;
 
 /// <summary>
-/// Read-only Backdoor export of expense reports, creditor bindings, the category map and SEPA
-/// transfers, for the agent doing the books who needs Humans' side of a Holded break
-/// (peterdrier/Humans#1838). Every action reuses an <c>IHoldedFinanceService</c> method, sorts and formats.
+/// GET only. Authorization is imperative, like <c>ExpensesController</c>: each action checks
+/// <see cref="IAuthorizationService"/> against the key owner's roles. No raw IBAN leaves: the projections mask
+/// <see cref="ExpenseReportDto.PayeeIban"/> and <see cref="HoldedContactInfo.Iban"/>, and
+/// <see cref="OnResultExecuting"/> masks every other string.
 /// </summary>
-/// <remarks>
-/// Unlike Store, a key here does not read everything its owner's role permits without a check —
-/// authorization is imperative, the same way <c>ExpensesController</c> does it: each action calls
-/// <see cref="IAuthorizationService"/> against the key owner's roles, which
-/// <see cref="BackdoorApiKeyAuthFilter"/> has already installed on <c>User</c>. GET only, nothing
-/// here writes to the DB or to Holded, and no raw IBAN ever leaves this controller —
-/// <see cref="ExpenseReportDto.PayeeIban"/> and <see cref="HoldedContactInfo.Iban"/> are masked
-/// in the projections, and <see cref="OnResultExecuting"/> runs every other string any action
-/// emits through <see cref="IbanFormatter.MaskAllIn"/> on the way out.
-/// </remarks>
 [ApiController]
 [Route("api/backdoor/finance")]
 [ServiceFilter(typeof(BackdoorApiKeyAuthFilter))]
+[AllowAnonymous]
 internal sealed class BackdoorFinanceController(
     IExpenseReportService expenses,
     IHoldedFinanceService finance,
@@ -42,8 +34,6 @@ internal sealed class BackdoorFinanceController(
     IAuthorizationService authService,
     IUserService users) : ApiControllerBase(users), IResultFilter
 {
-    // ─── Expense reports ────────────────────────────────────────────────────────
-
     /// <summary>The key owner's review queue — everything <c>/Expenses/Review</c> would show them —
     /// optionally narrowed to one budget year and/or status.</summary>
     [HttpGet("expense-reports")]
@@ -123,8 +113,6 @@ internal sealed class BackdoorFinanceController(
         return File(attachment.Bytes, attachment.ContentType, attachment.OriginalFileName);
     }
 
-    // ─── Creditor accounts ──────────────────────────────────────────────────────
-
     /// <summary>Every 400000xx account, its bindings, and the bindings with no account at all.</summary>
     [HttpGet("creditor-accounts")]
     public async Task<IActionResult> CreditorAccounts(CancellationToken ct)
@@ -162,8 +150,6 @@ internal sealed class BackdoorFinanceController(
             contact = ProjectContact(ledger.Contact),
         });
     }
-
-    // ─── Category map & SEPA ────────────────────────────────────────────────────
 
     /// <summary>Every live category-map row — what each budget category is actually booked to.</summary>
     [HttpGet("category-map")]
@@ -204,8 +190,6 @@ internal sealed class BackdoorFinanceController(
         });
     }
 
-    // ─── Holded sync ────────────────────────────────────────────────────────────
-
     /// <summary>The purchase-doc sync's state plus the docs it could not match.</summary>
     [HttpGet("holded-sync")]
     public async Task<IActionResult> HoldedSync(CancellationToken ct)
@@ -235,12 +219,86 @@ internal sealed class BackdoorFinanceController(
         });
     }
 
-    // ─── IBAN scrub ─────────────────────────────────────────────────────────────
+    /// <summary><c>/Finance/ExpenseRecon</c> as JSON: Finance's report, projected only to give dates and enums a wire
+    /// form. The report carries no IBAN.</summary>
+    [HttpGet("expense-recon")]
+    public async Task<IActionResult> ExpenseRecon([FromQuery] int? year, CancellationToken ct)
+    {
+        if (!await IsFinanceAdminAsync()) return StatusCode(StatusCodes.Status403Forbidden);
 
-    /// <summary>The one place free text is scrubbed: every string in every JSON body, and the
-    /// attachment's download filename, goes through <see cref="IbanFormatter.MaskAllIn"/> after
-    /// the action, so a field added later cannot forget to (peterdrier/Humans#1839). File bytes
-    /// are left alone.</summary>
+        var r = await finance.GetExpenseReconAsync(year, ct);
+        return Ok(new
+        {
+            year = r.Year,
+            mirrorSyncedAt = r.MirrorSyncedAt?.ToIso8601(),
+            unavailableReason = r.UnavailableReason,
+            years = r.Years,
+            totals = new
+            {
+                reports = r.Totals.Reports,
+                lines = r.Totals.Lines,
+                holdedDocs = r.Totals.HoldedDocs,
+                problemLines = r.Totals.ProblemLines,
+                duplicateDocs = r.Totals.DuplicateDocs,
+                excessAmount = r.Totals.ExcessAmount,
+                orphans = r.Totals.Orphans,
+                membersOff = r.Totals.MembersOff,
+                problems = r.Totals.Problems,
+                warnings = r.Totals.Warnings,
+            },
+            lines = r.Lines.Select(l => new
+            {
+                expenseReportId = l.ExpenseReportId,
+                lineId = l.LineId,
+                creditorUserId = l.CreditorUserId,
+                memberName = l.MemberName,
+                description = l.Description,
+                expectedAmount = l.ExpectedAmount,
+                documentDate = l.DocumentDate.ToInvariantDate(),
+                pushState = l.PushState,
+                status = l.Status.ToString(),
+                isProblem = l.IsProblem,
+                holdedDocId = l.HoldedDocId,
+                holdedDocNumber = l.HoldedDocNumber,
+                holdedTotal = l.HoldedTotal,
+                holdedContactName = l.HoldedContactName,
+                duplicateDocIds = l.DuplicateDocIds,
+                excessAmount = l.ExcessAmount,
+            }),
+            orphans = r.Orphans.Select(o => new
+            {
+                holdedDocId = o.HoldedDocId,
+                docNumber = o.DocNumber,
+                date = o.Date.ToInvariantDate(),
+                contactName = o.ContactName,
+                description = o.Description,
+                notes = o.Notes,
+                total = o.Total,
+                kind = o.Kind.ToString(),
+            }),
+            members = r.Members.Select(m => new
+            {
+                userId = m.UserId,
+                memberName = m.MemberName,
+                supplierAccountNum = m.SupplierAccountNum,
+                ledgerBalance = m.LedgerBalance,
+                expectedBalance = m.ExpectedBalance,
+                difference = m.Difference,
+                status = m.Status.ToString(),
+                isWarning = m.IsWarning,
+                openTransfers = m.OpenTransfers.Select(t => new
+                {
+                    transferId = t.TransferId,
+                    fileName = t.FileName,
+                    generatedAt = t.GeneratedAt.ToIso8601(),
+                    amount = t.Amount,
+                }),
+            }),
+        });
+    }
+
+    /// <summary>The one place free text is scrubbed: every string in every JSON body, and the attachment's download
+    /// filename, so a field added later cannot forget to. File bytes are left alone.</summary>
     public void OnResultExecuting(ResultExecutingContext context)
     {
         switch (context.Result)
@@ -281,19 +339,14 @@ internal sealed class BackdoorFinanceController(
         }
     }
 
-    // ─── Shared authorization ───────────────────────────────────────────────────
-
     private async Task<bool> IsFinanceAdminAsync() =>
-        (await authService.AuthorizeAsync(User, PolicyNames.FinanceAdminOrAdmin)).Succeeded;
+        (await authService.AuthorizeAsync(User, FinancePolicies.Manage)).Succeeded;
 
     private async Task<bool> CanViewAsync(ExpenseReportDto report) =>
         (await authService.AuthorizeAsync(User, report, PolicyNames.ExpenseReportView)).Succeeded;
 
-    // ─── Shared lookups ─────────────────────────────────────────────────────────
-
-    /// <summary>The full budget-year projection for every distinct year the given reports book to —
-    /// gives both the year label and, per report, its category's name in one lookup (a report can be
-    /// booked to a year other than the active one).</summary>
+    /// <summary>Per distinct year the reports book to: a report can be booked to a year other than the active
+    /// one.</summary>
     private async Task<Dictionary<Guid, BudgetYearDetail>> ResolveBudgetYearsAsync(
         IReadOnlyCollection<ExpenseReportDto> reports, CancellationToken ct)
     {
@@ -324,12 +377,8 @@ internal sealed class BackdoorFinanceController(
     private static string? CategoryName(BudgetYearDetail? year, Guid? categoryId) =>
         year?.Groups.SelectMany(g => g.Categories).FirstOrDefault(c => c.Id == categoryId)?.Name;
 
-    // ─── Projections ────────────────────────────────────────────────────────────
-
-    /// <summary>The payee name, the masked IBAN, and the Holded timeline are only ever meaningful to
-    /// the report's submitter or a finance admin — the same audience <c>ExpensesController.Detail</c>
-    /// shows them to (peterdrier/Humans#1839). The Holded contact/supplier/doc ids are
-    /// finance-admin only, matching the same view's finance card. Everyone else who can pass the
+    /// <summary>Payee name, masked IBAN and the Holded timeline go to the submitter or a finance admin only, as on
+    /// <c>ExpensesController.Detail</c>; the Holded ids to finance admins only. Anyone else who passes the
     /// <c>View</c> check (e.g. a category coordinator) gets these fields null.</summary>
     private static object ProjectReportSummary(
         ExpenseReportDto r, BudgetYearDetail? year, string? submitterName, ExpenseHoldedTimeline? timeline,

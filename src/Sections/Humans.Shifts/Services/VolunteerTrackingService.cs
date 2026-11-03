@@ -27,12 +27,13 @@ internal sealed class VolunteerTrackingService(
         if (calendar is null || dayOffsets.Any(day => day < calendar.BuildStartOffset || day > calendar.StrikeEndOffset))
             return false;
 
+        var offsets = dayOffsets.Distinct().Order().ToArray();
         var now = clock.GetCurrentInstant();
-        await trackingRepo.UpsertAvailabilityAsync(userId, eventSettingsId, dayOffsets, now);
+        await trackingRepo.UpsertAvailabilityAsync(userId, eventSettingsId, offsets, now);
         await audit.LogAsync(
-            dayOffsets.Count == 0 ? AuditAction.VolunteerAvailabilityCleared : AuditAction.VolunteerAvailabilitySet,
+            offsets.Length == 0 ? ShiftsAuditActions.VolunteerAvailabilityCleared : ShiftsAuditActions.VolunteerAvailabilitySet,
             "GeneralAvailability", userId,
-            $"EventSettingsId={eventSettingsId}; AvailableDays={dayOffsets.Count}; self-service update", userId,
+            $"EventSettingsId={eventSettingsId}; AvailableDays={offsets.Length}; self-service update", userId,
             relatedEntityId: eventSettingsId, relatedEntityType: "EventSettings");
         viewInvalidator.InvalidateUser(userId);
         return true;
@@ -41,7 +42,7 @@ internal sealed class VolunteerTrackingService(
     public async Task<IReadOnlyList<GeneralAvailabilitySnapshot>> GetAvailableForDayAsync(
         Guid eventSettingsId, int dayOffset, CancellationToken ct = default)
     {
-        // EF can't translate List<int>.Contains over jsonb; load all and filter in memory (small user base).
+        // EF can't translate List<int>.Contains over jsonb, so filter in memory.
         var all = await trackingRepo.GetAvailabilityForEventAsync(eventSettingsId, ct: ct);
         return all
             .Where(g => g.AvailableDayOffsets.Contains(dayOffset))
@@ -65,7 +66,7 @@ internal sealed class VolunteerTrackingService(
 
         var current = (await trackingRepo.GetAvailabilityForUserAsync(userId, eventSettingsId, ct).ConfigureAwait(false))
             .FirstOrDefault();
-        var offsets = current?.AvailableDayOffsets.ToList() ?? [];
+        var offsets = current?.AvailableDayOffsets.Distinct().ToList() ?? [];
 
         if (available)
         {
@@ -81,10 +82,10 @@ internal sealed class VolunteerTrackingService(
         await trackingRepo.UpsertAvailabilityAsync(userId, eventSettingsId, offsets, clock.GetCurrentInstant(), ct).ConfigureAwait(false);
         await (available
             ? audit.LogAsync(
-                AuditAction.VolunteerAvailabilitySet, nameof(GeneralAvailability), userId,
+                ShiftsAuditActions.VolunteerAvailabilitySet, nameof(GeneralAvailability), userId,
                 $"DayOffset={dayOffset}; marked available by coordinator", coordinatorUserId)
             : audit.LogAsync(
-                AuditAction.VolunteerAvailabilityCleared, nameof(GeneralAvailability), userId,
+                ShiftsAuditActions.VolunteerAvailabilityCleared, nameof(GeneralAvailability), userId,
                 $"DayOffset={dayOffset}; availability cleared by coordinator", coordinatorUserId)).ConfigureAwait(false);
         viewInvalidator.InvalidateUser(userId);
         return true;
@@ -337,7 +338,7 @@ internal sealed class VolunteerTrackingService(
 
         if (setupOffset >= 0)
         {
-            return new SetCampSetupResult(false, "VolTrack_Err_SetupAtOrAfterGateOpen", null);
+            return new SetCampSetupResult(false, "Shifts_VolTrack_Err_SetupAtOrAfterGateOpen", null);
         }
 
         var signups = await shiftManagement.GetEligibleBuildSignupsAsync(es.Id, es.BuildStartOffset, ct).ConfigureAwait(false);
@@ -348,7 +349,7 @@ internal sealed class VolunteerTrackingService(
             .Min();
         if (firstSignup.HasValue && setupOffset < firstSignup.Value)
         {
-            return new SetCampSetupResult(false, "VolTrack_Err_SetupBeforeFirstSignup", null);
+            return new SetCampSetupResult(false, "Shifts_VolTrack_Err_SetupBeforeFirstSignup", null);
         }
 
         var trimmed = await trackingRepo.UpsertCampSetupAsync(
@@ -362,7 +363,7 @@ internal sealed class VolunteerTrackingService(
             ct).ConfigureAwait(false);
 
         await audit.LogAsync(
-            AuditAction.VolunteerCampSetupSet,
+            ShiftsAuditActions.VolunteerCampSetupSet,
             nameof(VolunteerBuildStatus),
             targetUserId,
             $"BarrioSetupStartDate set to {LocalDatePattern.Iso.Format(barrioSetupStartDate)}; notes={notes ?? "—"}",
@@ -370,10 +371,10 @@ internal sealed class VolunteerTrackingService(
 
         if (trimmed is { Count: > 0 })
         {
-            // Fresh DbContext per call → safe to fan out concurrently.
+            // Audit writes through a fresh context per call, so the fan-out is safe.
             await Task.WhenAll(trimmed.Select(dayOffset =>
                 audit.LogAsync(
-                    AuditAction.VolunteerDayOffCleared,
+                    ShiftsAuditActions.VolunteerDayOffCleared,
                     nameof(VolunteerBuildStatus),
                     targetUserId,
                     $"DayOffset={dayOffset}; auto-cleared by camp-setup change",
@@ -398,7 +399,7 @@ internal sealed class VolunteerTrackingService(
             setupOffsetThreshold: null,
             ct).ConfigureAwait(false);
         await audit.LogAsync(
-            AuditAction.VolunteerCampSetupCleared,
+            ShiftsAuditActions.VolunteerCampSetupCleared,
             nameof(VolunteerBuildStatus),
             targetUserId,
             "BarrioSetupStartDate cleared",
@@ -414,14 +415,14 @@ internal sealed class VolunteerTrackingService(
 
         if (dayOffset < es.BuildStartOffset || dayOffset >= 0)
         {
-            return new SetDayOffResult(false, "VolTrack_Err_DayOffOutsideBuild");
+            return new SetDayOffResult(false, "Shifts_VolTrack_Err_DayOffOutsideBuild");
         }
 
         var signups = await shiftManagement.GetEligibleBuildSignupsAsync(es.Id, es.BuildStartOffset, ct).ConfigureAwait(false);
         var hasSignupThatDay = signups.Any(s => s.UserId == targetUserId && s.DayOffset == dayOffset);
         if (hasSignupThatDay)
         {
-            return new SetDayOffResult(false, "VolTrack_Err_DayOffWithSignups");
+            return new SetDayOffResult(false, "Shifts_VolTrack_Err_DayOffWithSignups");
         }
 
         var trimmed = string.IsNullOrWhiteSpace(reason) ? null : reason.Trim();
@@ -439,7 +440,7 @@ internal sealed class VolunteerTrackingService(
 
         await trackingRepo.UpsertDayOffAsync(targetUserId, es.Id, entry, ct).ConfigureAwait(false);
         await audit.LogAsync(
-            AuditAction.VolunteerDayOffMarked,
+            ShiftsAuditActions.VolunteerDayOffMarked,
             nameof(VolunteerBuildStatus),
             targetUserId,
             $"DayOffset={dayOffset}; reason={(string.IsNullOrWhiteSpace(reason) ? "—" : reason)}",
@@ -459,7 +460,7 @@ internal sealed class VolunteerTrackingService(
         if (removed)
         {
             await audit.LogAsync(
-                AuditAction.VolunteerDayOffCleared,
+                ShiftsAuditActions.VolunteerDayOffCleared,
                 nameof(VolunteerBuildStatus),
                 targetUserId,
                 $"DayOffset={dayOffset}; cleared by coordinator",

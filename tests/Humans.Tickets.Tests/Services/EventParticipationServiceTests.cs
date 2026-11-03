@@ -32,11 +32,6 @@ using TicketRow = Humans.Tickets.Domain.EventParticipation;
 
 namespace Humans.Tickets.Tests.Services;
 
-/// <summary>
-/// tickets_event_participations (Users decomposition commit 13): the read with its legacy Users
-/// fallback, writes over a legacy row, the admin backfill audit, the tickets.event-participations
-/// copy, the merge fold, export and erasure, the onsite chip and the declaration endpoints.
-/// </summary>
 public sealed class EventParticipationServiceTests : IDisposable
 {
     private static readonly Instant Now = Instant.FromUtc(2026, 10, 21, 12, 0);
@@ -91,8 +86,6 @@ public sealed class EventParticipationServiceTests : IDisposable
     private Task<List<TicketRow>> RowsAsync(Guid userId) =>
         _db.EventParticipations.AsNoTracking().Where(r => r.UserId == userId).ToListAsync(Ct);
 
-    // ─── Read ────────────────────────────────────────────────────────────────────
-
     [HumansFact]
     public async Task Read_FallsBackToTheLegacyRow_UntilARowExistsForThatYear()
     {
@@ -124,8 +117,6 @@ public sealed class EventParticipationServiceTests : IDisposable
         (await _sut.GetParticipationsAsync(archivedId, Ct)).Should().ContainSingle()
             .Which.UserId.Should().Be(survivor.Id);
     }
-
-    // ─── Writes over a legacy row ────────────────────────────────────────────────
 
     [HumansFact]
     public async Task Undo_OfALegacyDeclaration_LeavesAClearedRow_SoTheLegacyValueNeverComesBack()
@@ -183,7 +174,7 @@ public sealed class EventParticipationServiceTests : IDisposable
 
         (await _sut.BackfillParticipationsAsync(2025, entries, actorId, Ct)).Should().Be(1);
 
-        await _audit.Received(1).LogAsync(AuditAction.ParticipationBackfilled, nameof(User), user.Id,
+        await _audit.Received(1).LogAsync(TicketsAuditActions.ParticipationBackfilled, nameof(User), user.Id,
             Arg.Is<string>(d => d.Contains("NoShow", StringComparison.Ordinal) && d.Contains("2025", StringComparison.Ordinal)),
             actorId);
         _audit.ReceivedCalls().Should().HaveCount(1);
@@ -192,8 +183,6 @@ public sealed class EventParticipationServiceTests : IDisposable
         (await _sut.BackfillParticipationsAsync(2025, entries, actorId, Ct)).Should().Be(0);
         _audit.ReceivedCalls().Should().HaveCount(1);
     }
-
-    // ─── tickets.event-participations ────────────────────────────────────────────
 
     [HumansFact]
     public async Task Copy_ListsEveryUncopiedLegacyRow_ThenIsIdempotent()
@@ -233,15 +222,13 @@ public sealed class EventParticipationServiceTests : IDisposable
     {
         SeedUser((2026, LegacyParticipationStatus.Ticketed, LegacyParticipationSource.TicketSync));
         var services = new ServiceCollection().AddSingleton<IEventParticipationManagement>(_sut).BuildServiceProvider();
-        var migration = new SectionDataMigrations().Migrations().Should().ContainSingle().Subject;
+        var migration = ((ISectionDataMigrations)new Section()).Migrations().Should().ContainSingle().Subject;
 
         migration.Key.Should().Be("tickets.event-participations");
         (await migration.Status(services, Ct)).Pending.Should().Be(1);
         (await migration.Apply(services, Guid.NewGuid(), Ct)).Should().Be(1);
         (await migration.Status(services, Ct)).Pending.Should().Be(0);
     }
-
-    // ─── Merge ───────────────────────────────────────────────────────────────────
 
     [HumansFact]
     public async Task Merge_FoldsBothUsersLegacyRows_ByPrecedence_AndClearsTheSource()
@@ -265,8 +252,6 @@ public sealed class EventParticipationServiceTests : IDisposable
         (await _sut.GetParticipationsAsync(source.Id, Ct)).Should().BeEmpty();
         (await RowsAsync(source.Id)).Should().OnlyContain(r => r.Status == null);
     }
-
-    // ─── Export, erasure ─────────────────────────────────────────────────────────
 
     [HumansFact]
     public async Task Export_CarriesTheEffectiveRows_AsAList()
@@ -294,12 +279,10 @@ public sealed class EventParticipationServiceTests : IDisposable
         (await RowsAsync(user.Id)).Should().ContainSingle();
     }
 
-    // ─── Onsite chip ─────────────────────────────────────────────────────────────
-
     [HumansFact]
     public void UserParts_IncludeTheOnsiteChipOnTheProfile()
     {
-        new SectionUserParts().Parts().Should().Contain(
+        ((IUserPart)new Section()).Parts().Should().Contain(
             new UserPart(UserPartSlots.Profile, typeof(OnsiteChipViewComponent), Weight: 10));
     }
 
@@ -322,7 +305,7 @@ public sealed class EventParticipationServiceTests : IDisposable
         settings.GetActiveEventSettingsAsync(Arg.Any<CancellationToken>())
             .Returns(BurnFixtures.Burn(year: 2026));
         var authorization = Substitute.For<IAuthorizationService>();
-        authorization.AuthorizeAsync(Arg.Any<ClaimsPrincipal>(), Arg.Any<object?>(), PolicyNames.TicketAdminBoardOrAdmin)
+        authorization.AuthorizeAsync(Arg.Any<ClaimsPrincipal>(), Arg.Any<object?>(), TicketsPolicies.Read)
             .Returns(viewerPassesPolicy ? AuthorizationResult.Success() : AuthorizationResult.Failed());
         var component = WithContext(new OnsiteChipViewComponent(tickets, settings, authorization));
 
@@ -350,15 +333,13 @@ public sealed class EventParticipationServiceTests : IDisposable
             .Should().BeOfType<ContentViewComponentResult>().Which.Content.Should().BeEmpty();
     }
 
-    // ─── /Tickets/DeclareNotAttending, /Tickets/UndoNotAttending ───────────────────
-
     [HumansTheory]
     [InlineData(nameof(TicketParticipationController.DeclareNotAttending), "DeclareNotAttending")]
     [InlineData(nameof(TicketParticipationController.UndoNotAttending), "UndoNotAttending")]
     public void Declaration_IsAnAuthorizedAntiforgeryPost_AtTheTicketsUrl(string action, string template)
     {
         var type = typeof(TicketParticipationController);
-        type.GetCustomAttributes(typeof(AuthorizeAttribute), true).Should().ContainSingle();
+        type.GetCustomAttributes(typeof(AuthorizeAttribute), inherit: false).Should().ContainSingle();
         ((RouteAttribute)type.GetCustomAttributes(typeof(RouteAttribute), true).Single()).Template.Should().Be("Tickets");
         var method = type.GetMethod(action)!;
         method.GetCustomAttributes(typeof(ValidateAntiForgeryTokenAttribute), true).Should().ContainSingle();

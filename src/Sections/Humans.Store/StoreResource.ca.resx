@@ -120,4 +120,10 @@
   <data name="Store_DepartmentOnly" xml:space="preserve"><value>Només els departaments poden tenir comandes d’equip.</value></data>
   <data name="Store_TeamOrderExists" xml:space="preserve"><value>Aquest departament ja té una comanda de la botiga per a l’any de l’esdeveniment actiu.</value></data>
   <data name="Store_CreateOrderFailed" xml:space="preserve"><value>No s’ha pogut crear la comanda.</value></data>
+  <data name="Store_UnknownProduct" xml:space="preserve"><value>(producte desconegut)</value></data>
+  <data name="Store_UnknownTeam" xml:space="preserve"><value>(equip desconegut)</value></data>
+  <data name="Store_UnknownCamp" xml:space="preserve"><value>(campament desconegut)</value></data>
+  <data name="Store_UnknownCounterparty" xml:space="preserve"><value>(desconegut)</value></data>
+  <data name="Store_CheckoutCampOrder" xml:space="preserve"><value>Comanda del campament</value></data>
+  <data name="Store_PaymentPrecision" xml:space="preserve"><value>Introdueix un import amb un màxim de dos decimals.</value></data>
 </root>

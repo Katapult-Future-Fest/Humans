@@ -9,33 +9,28 @@ using Humans.Users.Contracts;
 
 namespace Humans.AuditLog.Services;
 
-/// <summary>
-/// <see cref="IAuditLogService"/> impl. Append-only (design-rules §12); best-effort — repo failures logged and swallowed (§7a).
-/// Callers must audit AFTER business save. Also <see cref="IUserDataContributor"/> for GDPR export.
-/// </summary>
 [DontFix(
     reason: "Audit (crosscut) reads merged-account source IDs via IUserService so queries follow merged identities. Extracting merge-id resolution to a standalone leaf is deferred and Peter-owned.",
     since: "2026-05-25")]
 internal sealed class AuditLogService(
     IAuditLogRepository repo,
     IUserService userService,
+    AuditActionRegistry registry,
     IClock clock,
     ILogger<AuditLogService> logger)
     : IAuditLogService, IAuditLogReader, IUserDataContributor, ILegacyGoogleSyncAuditReader
 {
     internal const string AuditLog = "AuditLog";
 
-    // ─── Writes (append-only) ───
-
     /// <inheritdoc />
-    public async Task LogAsync(AuditAction action, string entityType, Guid entityId,
+    public async Task LogAsync(AuditActionDefinition action, string entityType, Guid entityId,
         string description, string jobName,
         Guid? relatedEntityId = null, string? relatedEntityType = null)
     {
         var entry = new AuditLogEntry
         {
             Id = Guid.NewGuid(),
-            Action = action,
+            Action = action.Name,
             EntityType = entityType,
             EntityId = entityId,
             Description = $"{jobName}: {description}",
@@ -48,18 +43,18 @@ internal sealed class AuditLogService(
         await PersistAsync(entry);
 
         logger.LogInformation("Audit: {Action} on {EntityType} {EntityId} by {Actor} — {Description}",
-            action, entityType, entityId, jobName, description);
+            action.Name, entityType, entityId, jobName, description);
     }
 
     /// <inheritdoc />
-    public async Task LogAsync(AuditAction action, string entityType, Guid entityId,
+    public async Task LogAsync(AuditActionDefinition action, string entityType, Guid entityId,
         string description, Guid actorUserId,
         Guid? relatedEntityId = null, string? relatedEntityType = null)
     {
         var entry = new AuditLogEntry
         {
             Id = Guid.NewGuid(),
-            Action = action,
+            Action = action.Name,
             EntityType = entityType,
             EntityId = entityId,
             Description = description,
@@ -72,8 +67,11 @@ internal sealed class AuditLogService(
         await PersistAsync(entry);
 
         logger.LogInformation("Audit: {Action} on {EntityType} {EntityId} by user {ActorUserId} — {Description}",
-            action, entityType, entityId, actorUserId, description);
+            action.Name, entityType, entityId, actorUserId, description);
     }
+
+    private static IReadOnlyList<string> Names(IReadOnlyList<AuditActionDefinition> actions) =>
+        actions.Select(a => a.Name).ToList();
 
     private async Task PersistAsync(AuditLogEntry entry)
     {
@@ -83,14 +81,11 @@ internal sealed class AuditLogService(
         }
         catch (Exception ex)
         {
-            // Best-effort: log loudly, do not propagate (would break the business op).
             logger.LogError(ex,
                 "Failed to persist audit entry {EntryId} ({Action} on {EntityType} {EntityId})",
                 entry.Id, entry.Action, entry.EntityType, entry.EntityId);
         }
     }
-
-    // ─── Reads ───
 
     private static AuditLogEntrySnapshot ToSnapshot(AuditLogEntry entry) =>
         new(
@@ -105,18 +100,13 @@ internal sealed class AuditLogService(
             entry.RelatedEntityType);
 
     /// <inheritdoc />
-    public async Task<(IReadOnlyList<AuditLogEntrySnapshot> Items, int TotalCount, int AnomalyCount)> GetFilteredAsync(
+    public async Task<(IReadOnlyList<AuditLogEntrySnapshot> Items, int TotalCount, IReadOnlyDictionary<string, int> AlertCounts)> GetFilteredAsync(
         string? actionFilter, int page, int pageSize, CancellationToken ct = default)
     {
-        AuditAction? parsed = null;
-        if (!string.IsNullOrWhiteSpace(actionFilter) &&
-            Enum.TryParse<AuditAction>(actionFilter, ignoreCase: true, out var action))
-        {
-            parsed = action;
-        }
+        var filter = string.IsNullOrWhiteSpace(actionFilter) ? null : registry.CanonicalName(actionFilter.Trim());
 
-        var (items, totalCount, anomalyCount) = await repo.GetFilteredAsync(parsed, page, pageSize, ct);
-        return (items.Select(ToSnapshot).ToList(), totalCount, anomalyCount);
+        var (items, totalCount, alertCounts) = await repo.GetFilteredAsync(filter, registry.AlertNames, page, pageSize, ct);
+        return (items.Select(ToSnapshot).ToList(), totalCount, alertCounts);
     }
 
     /// <inheritdoc />
@@ -126,67 +116,62 @@ internal sealed class AuditLogService(
         // the id asked with may itself be an archived one: the read resolves it forward, so
         // the ids are the resolved record's, not the caller's.
         var allIds = (await userService.GetUserInfoAsync(userId, ct))?.AllUserIds ?? [userId];
-        if (allIds.Count == 1)
-        {
-            var entries = await repo.GetByUserAsync(allIds[0], count, ct);
-            return entries.Select(ToSnapshot).ToList();
-        }
-
-        var mergedEntries = await repo.GetByUserIdsAsync(allIds, count, ct);
-        return mergedEntries.Select(ToSnapshot).ToList();
+        var entries = await repo.GetByUserIdsAsync(allIds, count, ct);
+        return entries.Select(ToSnapshot).ToList();
     }
 
     /// <inheritdoc />
-    public async Task<IReadOnlyList<AuditLogEntrySnapshot>> GetFilteredEntriesAsync(
+    public Task<IReadOnlyList<AuditLogEntrySnapshot>> GetFilteredEntriesAsync(
+        IReadOnlyList<AuditActionDefinition> actions,
         string? entityType = null,
         Guid? entityId = null,
         Guid? userId = null,
-        IReadOnlyList<AuditAction>? actions = null,
         int limit = 20,
-        CancellationToken ct = default)
+        CancellationToken ct = default) =>
+        FilterByNamesAsync(entityType, entityId, userId, Names(actions), limit, ct);
+
+    Task<IReadOnlyList<AuditLogEntrySnapshot>> IAuditLogReader.GetFilteredEntriesAsync(
+        string? entityType,
+        Guid? entityId,
+        Guid? userId,
+        IReadOnlyList<string>? actions,
+        int limit,
+        CancellationToken ct) =>
+        FilterByNamesAsync(entityType, entityId, userId, actions, limit, ct);
+
+    private async Task<IReadOnlyList<AuditLogEntrySnapshot>> FilterByNamesAsync(
+        string? entityType,
+        Guid? entityId,
+        Guid? userId,
+        IReadOnlyList<string>? actionNames,
+        int limit,
+        CancellationToken ct)
     {
-        // Rows attributed to an account merged into this one belong to the same human; the
-        // id list is the resolved record's, as in GetByUserAsync.
         IReadOnlyCollection<Guid>? userIds = null;
         if (userId.HasValue)
         {
             userIds = (await userService.GetUserInfoAsync(userId.Value, ct))?.AllUserIds ?? [userId.Value];
         }
 
-        var entries = await repo.GetFilteredEntriesAsync(entityType, entityId, userIds, actions, limit, ct);
+        var entries = await repo.GetFilteredEntriesAsync(entityType, entityId, userIds, actionNames, limit, ct);
         return entries.Select(ToSnapshot).ToList();
     }
 
-    // ─── IUserDataContributor (GDPR export) ───
-
     public async Task<IReadOnlyList<UserDataSlice>> ContributeForUserAsync(Guid userId, CancellationToken ct)
     {
-        // Rows attributed to an account merged into this one belong to the same human; the
-        // id list is the resolved record's, as in GetByUserAsync.
         var allIds = (await userService.GetUserInfoAsync(userId, ct))?.AllUserIds ?? [userId];
-        IReadOnlyList<AuditLogEntry> entries;
-        if (allIds.Count == 1)
-        {
-            entries = await repo.GetAllForUserContributorAsync(allIds[0], ct);
-        }
-        else
-        {
-            entries = await repo.GetAllForUserIdsContributorAsync(allIds, ct);
-        }
+        var entries = await repo.GetAllForUserIdsContributorAsync(allIds, ct);
 
-        // Post-merge: source rows surface as Subject for the target (actor context anonymized via AnonymizeForMergeAsync).
         var shaped = entries.Select(a => new
         {
             a.Action,
             a.EntityType,
             OccurredAt = a.OccurredAt.ToIso8601(),
-            Role = a.ActorUserId == userId ? "Actor" : "Subject"
+            Role = a.ActorUserId is { } actor && allIds.Contains(actor) ? "Actor" : "Subject"
         }).ToList();
 
         return [new UserDataSlice(AuditLog, shaped)];
     }
-
-    // ─── IUserDataContributor (GDPR erasure) ───
 
     private static readonly IReadOnlyDictionary<string, string?> Erasure =
         new Dictionary<string, string?>(StringComparer.Ordinal)
@@ -206,11 +191,9 @@ internal sealed class AuditLogService(
 
     public Task<IReadOnlySet<Guid>> GetEntityIdsForEntityTypeActionsAsync(
         string entityType,
-        IReadOnlyList<AuditAction> actions,
+        IReadOnlyList<AuditActionDefinition> actions,
         CancellationToken ct = default) =>
-        repo.GetEntityIdsForEntityTypeActionsAsync(entityType, actions, ct);
-
-    // ─── ILegacyGoogleSyncAuditReader (goes with the six Google columns) ───
+        repo.GetEntityIdsForEntityTypeActionsAsync(entityType, Names(actions), ct);
 
     public async Task<IReadOnlyList<LegacyGoogleSyncAuditRow>> GetLegacyGoogleSyncRowsAsync(
         CancellationToken ct = default)

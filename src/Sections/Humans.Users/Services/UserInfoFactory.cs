@@ -3,13 +3,11 @@ using Humans.Users.Contracts;
 namespace Humans.Users.Services;
 
 /// <summary>
-/// Projects the section's entity graph onto <see cref="UserInfo"/>. The six Profile-side entities
-/// are internal to this assembly (nobodies-collective/Humans#1051), so the entity-taking factory
-/// lives here and <see cref="UserInfo.Create"/> keeps only the primitive-only overload.
+/// The entity-taking <see cref="UserInfo"/> factory lives here because the Profile-side entities
+/// are internal to this assembly.
 /// </summary>
 internal static class UserInfoFactory
 {
-    /// <summary>Builds <see cref="UserInfo"/> from the contributing tables.</summary>
     public static UserInfo Create(
         User user,
         IReadOnlyList<UserEmail> userEmails,
@@ -75,11 +73,6 @@ internal static class UserInfoFactory
             EmergencyContactName: profile.EmergencyContactName,
             EmergencyContactPhone: profile.EmergencyContactPhone,
             EmergencyContactRelationship: profile.EmergencyContactRelationship,
-            DietaryPreference: profile.DietaryPreference,
-            Allergies: profile.Allergies,
-            AllergyOtherText: profile.AllergyOtherText,
-            Intolerances: profile.Intolerances,
-            IntoleranceOtherText: profile.IntoleranceOtherText,
             MedicalConditions: profile.MedicalConditions,
             HasCustomPicture: profile.ProfilePictureContentType is not null,
             ProfilePictureContentType: profile.ProfilePictureContentType,
@@ -90,7 +83,6 @@ internal static class UserInfoFactory
             BoardNotes: profile.BoardNotes,
             Iban: profile.Iban,
             IsApproved: profile.IsApproved,
-            MembershipTier: profile.MembershipTier,
             ConsentCheckStatus: profile.ConsentCheckStatus,
             ConsentCheckAt: profile.ConsentCheckAt,
             ConsentCheckedByUserId: profile.ConsentCheckedByUserId,

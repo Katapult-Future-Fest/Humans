@@ -1,3 +1,4 @@
+using Humans.Users.Contracts;
 using System.Security.Claims;
 using AwesomeAssertions;
 using Humans.Base.Authorization;
@@ -16,7 +17,7 @@ namespace Humans.Campaigns.Tests.ViewComponents;
 
 /// <summary>
 /// The "My Codes" and "Campaign Codes" cards, contributed to the profile and admin-detail
-/// slots (Users decomposition commit 2): who sees them, and what they show.
+/// slots: who sees them, and what they show.
 /// </summary>
 public class UserPartsTests
 {
@@ -25,12 +26,12 @@ public class UserPartsTests
 
     private CampaignGrantSummary Grant(string title) => new(
         Guid.NewGuid(), Guid.NewGuid(), title, Guid.NewGuid(), "CODE-" + title, _userId,
-        Instant.FromUtc(2026, 1, 1, 0, 0), null, null, null);
+        Instant.FromUtc(2026, 1, 1, 0, 0), null);
 
     [HumansFact]
     public void Parts_ContributeMyCodesToProfile_AndCampaignCodesToAdminDetail()
     {
-        IUserPart contribution = new SectionUserParts();
+        IUserPart contribution = ((IUserPart)new Section());
 
         contribution.Parts().Should().BeEquivalentTo(
         [
@@ -38,8 +39,6 @@ public class UserPartsTests
             new UserPart(UserPartSlots.AdminDetail, typeof(CampaignCodesViewComponent), 100),
         ]);
     }
-
-    // ─── My Codes ───────────────────────────────────────────────────────────────
 
     [HumansFact]
     public async Task MyCodes_ShowsTheViewersActiveOrCompletedGrants()
@@ -85,8 +84,6 @@ public class UserPartsTests
         await _campaigns.DidNotReceive().GetActiveOrCompletedGrantsForUserAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>());
     }
 
-    // ─── Campaign Codes ─────────────────────────────────────────────────────────
-
     [HumansFact]
     public async Task CampaignCodes_ShowsEveryGrantToAnAuthorizedAdminView()
     {
@@ -121,15 +118,13 @@ public class UserPartsTests
         await _campaigns.DidNotReceive().GetAllGrantsForUserAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>());
     }
 
-    // ─── Builders ───────────────────────────────────────────────────────────────
-
     private MyCodesViewComponent BuildMyCodes(Guid viewerId) =>
         new(_campaigns) { ViewComponentContext = Context(viewerId) };
 
     private CampaignCodesViewComponent BuildCampaignCodes(bool authorized)
     {
         var authorization = Substitute.For<IAuthorizationService>();
-        authorization.AuthorizeAsync(Arg.Any<ClaimsPrincipal>(), Arg.Any<object?>(), PolicyNames.HumanAdminBoardOrAdmin)
+        authorization.AuthorizeAsync(Arg.Any<ClaimsPrincipal>(), Arg.Any<object?>(), UsersPolicies.Read)
             .Returns(authorized ? AuthorizationResult.Success() : AuthorizationResult.Failed());
         return new CampaignCodesViewComponent(_campaigns, authorization) { ViewComponentContext = Context(Guid.NewGuid()) };
     }

@@ -1,3 +1,4 @@
+using Humans.Base.Attributes;
 using Humans.Base.Controllers;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -7,12 +8,8 @@ using Humans.Users.Contracts;
 
 namespace Humans.Onboarding.Controllers;
 
-/// <summary>
-/// Dashboard for profileless accounts (authenticated users without a Profile). Comms
-/// preferences, GDPR tools and ticket status are contributed by their own sections into
-/// this page's cards / chrome slot.
-/// </summary>
 [Authorize]
+[AllowBeforeActiveMembership]
 internal sealed class GuestController(
     IUserService userService,
     IOnboardingWidgetState widgetState) : HumansControllerBase(userService)

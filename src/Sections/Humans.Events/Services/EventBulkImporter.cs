@@ -8,19 +8,19 @@ using NodaTime;
 
 namespace Humans.Events.Services;
 
-/// <summary>Validates the whole CSV before applying changed rows to a barrio's events.</summary>
 internal sealed class EventBulkImporter(
     IEventRepository repo,
     IClock clock,
     IStringLocalizer<EventsResource> localizer) : IApplicationService
 {
     public async Task<BulkImportResult> ImportAsync(
-        Guid campId, Guid submitterUserId, IReadOnlyList<BulkCsvRow> rows,
+        Guid campId, Guid submitterUserId, Guid eventSettingsId, IReadOnlyList<BulkCsvRow> rows,
         LocalDate gateOpeningDate, int eventEndOffset, DateTimeZone timeZone,
         CancellationToken ct = default)
     {
         var categories = await repo.GetActiveCategoriesAsync(ct);
-        var existingEvents = await repo.GetCampSubmissionsAsync(campId, ct);
+        var existingEvents = (await repo.GetCampSubmissionsAsync(campId, ct))
+            .Where(e => e.IsInEvent(eventSettingsId)).ToList();
 
         var errors = EventBulkImportValidator.ValidateRows(rows, categories, existingEvents, timeZone, localizer);
         if (errors.Count > 0)
@@ -44,14 +44,14 @@ internal sealed class EventBulkImporter(
                 {
                     Id = Guid.NewGuid(),
                     CampId = campId,
-                    SubmitterUserId = submitterUserId
+                    SubmitterUserId = submitterUserId,
+                    EventSettingsId = eventSettingsId
                 };
             var recurrenceChanged = true;
             if (row.Id.HasValue)
             {
-                // Compare recurrence by day-name set, not the raw offset string, so a
-                // lossless round-trip ("0" ⇄ "Mon") isn't mistaken for an edit and the
-                // event isn't needlessly re-queued for moderation.
+                // Compare recurrence by day-name set, so a lossless round-trip ("0" ⇄ "Mon") isn't mistaken for an
+                // edit and re-queued for moderation.
                 var existingDays = target.IsRecurring && !string.IsNullOrEmpty(target.RecurrenceDays)
                     ? EventRecurrenceDays.OffsetsToDisplayDays(target.RecurrenceDays, gateOpeningDate)
                     : string.Empty;

@@ -7,9 +7,8 @@ namespace Humans.Rideshare.Models;
 /// <summary>One of the current human's offers that could take a rider off this board: active, same direction, travelling on the date.</summary>
 internal sealed record MyOfferOption(Guid Id, string PlaceLabel, LocalDate DepartureDate, int SeatsRemaining);
 
-/// <summary>The board for one date + direction: the map's config plus the accessible list under it.</summary>
 internal sealed record BoardViewModel(
-    int Year,
+    string EventName,
     LocalDate Date,
     RideshareDirection Direction,
     SettingsView? Settings,
@@ -30,7 +29,7 @@ internal sealed record BoardViewModel(
             .ToList();
 
         return new BoardViewModel(
-            snapshot.Year,
+            snapshot.EventName,
             date,
             direction,
             snapshot.Settings,
@@ -42,7 +41,7 @@ internal sealed record BoardViewModel(
             mine);
     }
 
-    /// <summary>Default board date: the direction's window start when the year is set up, else today.</summary>
+    /// <summary>Default board date: the direction's window start when the event is set up, else today.</summary>
     public static LocalDate DefaultDate(SettingsView? settings, RideshareDirection direction, LocalDate today) =>
         settings is null ? today
         : direction == RideshareDirection.Inbound ? settings.InboundWindowStart

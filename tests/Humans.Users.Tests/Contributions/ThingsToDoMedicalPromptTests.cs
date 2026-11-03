@@ -1,3 +1,4 @@
+using Humans.Base.Interfaces;
 using Humans.Users.Services;
 using System.Security.Claims;
 using AwesomeAssertions;
@@ -14,11 +15,6 @@ using NSubstitute;
 
 namespace Humans.Users.Tests.Contributions;
 
-/// <summary>
-/// Covers the optional medical-conditions prompt in Users' <see cref="SectionThingsToDo"/>: shown
-/// while Cantina's dietary nudge is open and no medical conditions are on file (Users
-/// decomposition commit 10). The dietary nudge itself is Cantina's (DietaryProfileTests).
-/// </summary>
 public class ThingsToDoMedicalPromptTests
 {
     private readonly IUserService _userService = Substitute.For<IUserService>();
@@ -27,7 +23,7 @@ public class ThingsToDoMedicalPromptTests
     private readonly IMembershipCalculator _membershipCalculator = Substitute.For<IMembershipCalculator>();
     private readonly IStringLocalizer<SharedResource> _localizer = Substitute.For<IStringLocalizer<SharedResource>>();
     private readonly IServiceProvider _services;
-    private readonly SectionThingsToDo _sut = new();
+    private readonly ISectionThingsToDo _sut = new Section();
 
     public ThingsToDoMedicalPromptTests()
     {
@@ -49,7 +45,7 @@ public class ThingsToDoMedicalPromptTests
             .AddSingleton(_shiftView)
             .AddSingleton(_membershipCalculator)
             .AddSingleton(_localizer)
-            .AddSingleton<ILogger<SectionThingsToDo>>(NullLogger<SectionThingsToDo>.Instance)
+            .AddSingleton<ILogger<Section>>(NullLogger<Section>.Instance)
             .BuildServiceProvider();
     }
 
@@ -106,6 +102,26 @@ public class ThingsToDoMedicalPromptTests
         var entries = await _sut.EntriesAsync(_services, Principal(userId));
 
         entries.Should().NotContain(e => e.Key == "dietary-medical" || e.Key == "dietary");
+    }
+
+    [HumansTheory]
+    [Xunit.InlineData(false)]
+    [Xunit.InlineData(true)]
+    public async Task AbortedNudgeRead_PropagatesCancellation(bool medical)
+    {
+        var id = StubUser(dietary: null, medical: null);
+        using var aborted = new CancellationTokenSource();
+        await aborted.CancelAsync();
+        if (medical)
+            _cantina.GetDietaryProfileAsync(id, aborted.Token)
+                .Returns(Task.FromCanceled<DietaryProfileInfo?>(aborted.Token));
+        else
+            _userService.GetUserInfoAsync(id, aborted.Token)
+                .Returns(ValueTask.FromCanceled<UserInfo?>(aborted.Token));
+
+        var load = () => _sut.EntriesAsync(_services, Principal(id), aborted.Token).AsTask();
+
+        await load.Should().ThrowAsync<OperationCanceledException>();
     }
 
     private Guid StubUser(string? dietary, string? medical, bool declined = false)

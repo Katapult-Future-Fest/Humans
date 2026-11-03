@@ -99,7 +99,7 @@ public class AgentToolDispatcherTests
         new(
             Id: Guid.NewGuid(),
             OccurredAt: NodaTime.Instant.FromUtc(2026, 4, 30, 17, 0),
-            Action: AuditLog.Contracts.AuditAction.ShiftSignupVoluntold,
+            Action: new AuditLog.Contracts.AuditActionDefinition("ShiftSignupVoluntold", Verb: "voluntold", DescriptionIsTail: true),
             ActorUserId: actor,
             ActorDisplayName: "Frank",
             EntityType: "ShiftSignup",
@@ -117,7 +117,7 @@ public class AgentToolDispatcherTests
         new(
             Id: Guid.NewGuid(),
             OccurredAt: NodaTime.Instant.FromUtc(2026, 4, 30, 17, 0),
-            Action: AuditLog.Contracts.AuditAction.AnomalousPermissionDetected,
+            Action: new AuditLog.Contracts.AuditActionDefinition("AnomalousPermissionDetected"),
             ActorUserId: null,
             ActorDisplayName: null,
             EntityType: "GoogleResource",
@@ -380,7 +380,7 @@ public class AgentToolDispatcherTests
     /// <summary>
     /// A miss must name the accepted keys. A bare "Unknown section: X" left the model nothing to
     /// correct with: 20 out-of-whitelist lookups across 9 production conversations, three of which
-    /// ended in an empty reply to the user (nobodies-collective/Humans#949).
+    /// ended in an empty reply to the user.
     /// </summary>
     [HumansFact]
     public async Task FetchSectionGuide_miss_lists_the_valid_section_keys()
@@ -634,9 +634,7 @@ public class AgentToolDispatcherTests
             LastLimit = count;
             return Task.FromResult(Events);
         }
-        public Task<Humans.AuditLog.Contracts.AuditEventPage> GetPageAsync(string? actionFilter, int page, int pageSize, CancellationToken ct = default) =>
-            Task.FromResult(new Humans.AuditLog.Contracts.AuditEventPage(Events, Events.Count, 0));
-        public Task<IReadOnlyList<Humans.AuditLog.Contracts.AuditEvent>> GetFilteredAsync(string? entityType, Guid? entityId, Guid? userId, IReadOnlyList<Humans.AuditLog.Contracts.AuditAction>? actions, int limit, CancellationToken ct = default) => Task.FromResult(Events);
+        public Task<IReadOnlyList<Humans.AuditLog.Contracts.AuditEvent>> GetFilteredAsync(string? entityType, Guid? entityId, Guid? userId, IReadOnlyList<string>? actions, int limit, CancellationToken ct = default) => Task.FromResult(Events);
     }
 
 }

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Claims;
 using Microsoft.EntityFrameworkCore;
 using Humans.Base.Extensions;
@@ -60,10 +61,6 @@ public class ServiceTests
         _service = new Service(_repo, _audit, _campService, _teams, _clock, _shifts, _stripeService, _holded, Options.Create(_storeOptions), NullLogger<Service>.Instance);
     }
 
-    // ==========================================================================
-    // Read paths
-    // ==========================================================================
-
     [HumansFact]
     public async Task GetIndexDataAsync_cancels_settings_read_before_loading_catalog()
     {
@@ -76,6 +73,36 @@ public class ServiceTests
 
         await act.Should().ThrowAsync<OperationCanceledException>();
         await _repo.DidNotReceive().GetActiveProductsForYearAsync(Arg.Any<int>(), Arg.Any<CancellationToken>());
+    }
+
+    [HumansTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Line_edit_cancellation_during_event_zone_lookup_stops_before_mutation(bool remove)
+    {
+        using var cancellation = new CancellationTokenSource();
+        var order = new Order { Id = Guid.NewGuid(), Year = 2026, State = OrderState.Open };
+        var product = MakeProduct();
+        var lineId = Guid.NewGuid();
+        _repo.GetOrderByIdAsync(order.Id, Arg.Any<CancellationToken>()).Returns(order);
+        _repo.GetProductByIdAsync(product.Id, Arg.Any<CancellationToken>()).Returns(product);
+        _repo.GetLineWithOrderAndProductAsync(lineId, Arg.Any<CancellationToken>())
+            .Returns(new LineContext(lineId, order.Id, Guid.NewGuid(), OrderState.Open, product.OrderableUntil));
+        _shifts.GetActiveEventSettingsAsync(Arg.Any<CancellationToken>()).Returns(async call =>
+        {
+            await cancellation.CancelAsync();
+            call.Arg<CancellationToken>().ThrowIfCancellationRequested();
+            return (EventSettingsInfo?)BurnFixtures.Burn(year: 2026, timeZoneId: "Europe/Madrid");
+        });
+
+        var act = () => remove
+            ? _service.RemoveLineAsync(order.Id, lineId, Guid.NewGuid(), cancellation.Token)
+            : _service.AddLineAsync(order.Id, product.Id, 1, Guid.NewGuid(), cancellation.Token);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        await _repo.DidNotReceive().AddLineAsync(Arg.Any<OrderLine>(), Arg.Any<CancellationToken>());
+        await _repo.DidNotReceive().RemoveLineAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>());
+        _audit.ReceivedCalls().Should().BeEmpty();
     }
 
     [HumansFact]
@@ -402,7 +429,7 @@ public class ServiceTests
             && row.ResolvedYear == null);
         await _repo.DidNotReceive().UpdateOrderAsync(Arg.Any<Order>(), Arg.Any<CancellationToken>());
         await _audit.DidNotReceive().LogAsync(
-            Arg.Any<AuditAction>(), Arg.Any<string>(), Arg.Any<Guid>(),
+            Arg.Any<AuditActionDefinition>(), Arg.Any<string>(), Arg.Any<Guid>(),
             Arg.Any<string>(), Arg.Any<Guid>(), Arg.Any<Guid?>(), Arg.Any<string?>());
     }
 
@@ -441,7 +468,7 @@ public class ServiceTests
             Arg.Is<Order>(order => order.Id == unresolvedOrderId),
             Arg.Any<CancellationToken>());
         await _audit.Received(1).LogAsync(
-            AuditAction.StoreOrderYearBackfilled,
+            StoreAuditActions.StoreOrderYearBackfilled,
             AuditEntityTypes.Order,
             firstOrderId,
             Arg.Any<string>(),
@@ -449,7 +476,7 @@ public class ServiceTests
             Arg.Any<Guid?>(),
             Arg.Any<string?>());
         await _audit.Received(1).LogAsync(
-            AuditAction.StoreOrderYearBackfilled,
+            StoreAuditActions.StoreOrderYearBackfilled,
             AuditEntityTypes.Order,
             secondOrderId,
             Arg.Any<string>(),
@@ -478,10 +505,6 @@ public class ServiceTests
         await _repo.Received(1).UpdateOrderAsync(Arg.Any<Order>(), Arg.Any<CancellationToken>());
     }
 
-    // ==========================================================================
-    // Write paths
-    // ==========================================================================
-
     [HumansFact]
     public async Task CreateOrderAsync_persists_open_order_with_now_timestamps_and_audits()
     {
@@ -507,7 +530,7 @@ public class ServiceTests
         captured.UpdatedAt.Should().Be(_clock.GetCurrentInstant());
 
         await _audit.Received(1).LogAsync(
-            AuditAction.StoreOrderCreated, AuditEntityTypes.Order, orderId,
+            StoreAuditActions.StoreOrderCreated, AuditEntityTypes.Order, orderId,
             Arg.Any<string>(), actor,
             Arg.Any<Guid?>(), Arg.Any<string?>());
     }
@@ -520,7 +543,7 @@ public class ServiceTests
         result.ErrorKey.Should().Be("Store_CampSeasonMissing");
         result.CreatedId.Should().BeNull();
         await _repo.DidNotReceive().AddOrderAsync(Arg.Any<Order>(), Arg.Any<CancellationToken>());
-        await _audit.DidNotReceiveWithAnyArgs().LogAsync(default, default!, default, default!, default(Guid));
+        await _audit.DidNotReceiveWithAnyArgs().LogAsync(null!, default!, default, default!, default(Guid));
     }
 
     [HumansTheory]
@@ -588,7 +611,7 @@ public class ServiceTests
         result.Succeeded.Should().BeFalse();
         result.ErrorKey.Should().Be(expectedKey);
         await _repo.DidNotReceive().AddLineAsync(Arg.Any<OrderLine>(), Arg.Any<CancellationToken>());
-        await _audit.DidNotReceiveWithAnyArgs().LogAsync(default, default!, default, default!, default(Guid));
+        await _audit.DidNotReceiveWithAnyArgs().LogAsync(null!, default!, default, default!, default(Guid));
         logger.ReceivedCalls().Should().ContainSingle(call => call.GetMethodInfo().Name == "Log"
             && (LogLevel)call.GetArguments()[0]! == LogLevel.Warning && call.GetArguments()[3] == null);
     }
@@ -612,7 +635,7 @@ public class ServiceTests
             Arg.Is<OrderLine>(l => l.OrderId == orderId && l.ProductId == product.Id),
             Arg.Any<CancellationToken>());
         await _audit.Received(1).LogAsync(
-            AuditAction.StoreLineAdded, AuditEntityTypes.OrderLine, Arg.Any<Guid>(),
+            StoreAuditActions.StoreLineAdded, AuditEntityTypes.OrderLine, Arg.Any<Guid>(),
             Arg.Is<string>(d => d.Contains("past order deadline")), actor,
             Arg.Any<Guid?>(), Arg.Any<string?>());
     }
@@ -644,7 +667,7 @@ public class ServiceTests
         captured.AddedAt.Should().Be(_clock.GetCurrentInstant());
 
         await _audit.Received(1).LogAsync(
-            AuditAction.StoreLineAdded, AuditEntityTypes.OrderLine, captured.Id,
+            StoreAuditActions.StoreLineAdded, AuditEntityTypes.OrderLine, captured.Id,
             Arg.Any<string>(), actor,
             Arg.Any<Guid?>(), Arg.Any<string?>());
     }
@@ -739,7 +762,7 @@ public class ServiceTests
         result.ErrorKey.Should().Be("Store_ProductYearMismatch");
         await _repo.DidNotReceive().AddLineAsync(Arg.Any<OrderLine>(), Arg.Any<CancellationToken>());
         await _repo.DidNotReceive().UpdateOrderAsync(Arg.Any<Order>(), Arg.Any<CancellationToken>());
-        await _audit.DidNotReceiveWithAnyArgs().LogAsync(default, default!, default, default!, default(Guid));
+        await _audit.DidNotReceiveWithAnyArgs().LogAsync(null!, default!, default, default!, default(Guid));
     }
 
     [HumansTheory]
@@ -845,7 +868,7 @@ public class ServiceTests
 
         await _repo.Received(1).RemoveLineAsync(lineId, Arg.Any<CancellationToken>());
         await _audit.Received(1).LogAsync(
-            AuditAction.StoreLineRemoved, AuditEntityTypes.OrderLine, lineId,
+            StoreAuditActions.StoreLineRemoved, AuditEntityTypes.OrderLine, lineId,
             Arg.Is<string>(d => d.Contains("past order deadline")), actor,
             Arg.Any<Guid?>(), Arg.Any<string?>());
     }
@@ -865,7 +888,7 @@ public class ServiceTests
 
         await _repo.Received(1).RemoveLineAsync(lineId, Arg.Any<CancellationToken>());
         await _audit.Received(1).LogAsync(
-            AuditAction.StoreLineRemoved, AuditEntityTypes.OrderLine, lineId,
+            StoreAuditActions.StoreLineRemoved, AuditEntityTypes.OrderLine, lineId,
             Arg.Any<string>(), actor,
             Arg.Any<Guid?>(), Arg.Any<string?>());
     }
@@ -944,7 +967,7 @@ public class ServiceTests
 
         await _repo.Received(1).UpdateOrderAsync(order, Arg.Any<CancellationToken>());
         await _audit.Received(1).LogAsync(
-            AuditAction.StoreCounterpartyEdited, AuditEntityTypes.Order, orderId,
+            StoreAuditActions.StoreCounterpartyEdited, AuditEntityTypes.Order, orderId,
             Arg.Any<string>(), actor,
             Arg.Any<Guid?>(), Arg.Any<string?>());
     }
@@ -1045,10 +1068,6 @@ public class ServiceTests
         await _repo.Received(1).UpdateOrderAsync(order, Arg.Any<CancellationToken>());
     }
 
-    // ==========================================================================
-    // Catalog write paths
-    // ==========================================================================
-
     [HumansFact]
     public async Task CreateProductAsync_persists_product_with_now_timestamps_and_audits()
     {
@@ -1057,8 +1076,8 @@ public class ServiceTests
         await _repo.AddProductAsync(Arg.Do<Product>(p => captured = p), Arg.Any<CancellationToken>());
 
         var draft = new ProductDto(
-            Guid.Empty, 2026, "Tent", "Big tent", 50m, 21m, 100m,
-            new LocalDate(2026, 8, 1), IsActive: true);
+            Guid.Empty, 2026, "  Tent  ", "Big tent", 50m, 21m, 100m,
+            new LocalDate(2026, 8, 1), IsActive: true, HoldedRevenueAccountNum: 75900002);
 
         var result = await _service.CreateProductAsync(draft, actor, TestContext.Current.CancellationToken);
         result.Succeeded.Should().BeTrue();
@@ -1067,6 +1086,7 @@ public class ServiceTests
         var newId = captured!.Id;
         captured.Year.Should().Be(2026);
         captured.Name.Should().Be("Tent");
+        captured.HoldedRevenueAccountNum.Should().Be(75900002);
         captured.Description.Should().Be("Big tent");
         captured.UnitPriceEur.Should().Be(50m);
         captured.VatRatePercent.Should().Be(21m);
@@ -1077,7 +1097,7 @@ public class ServiceTests
         captured.UpdatedAt.Should().Be(_clock.GetCurrentInstant());
 
         await _audit.Received(1).LogAsync(
-            AuditAction.StoreProductCreated, AuditEntityTypes.Product, newId,
+            StoreAuditActions.StoreProductCreated, AuditEntityTypes.Product, newId,
             Arg.Any<string>(), actor,
             Arg.Any<Guid?>(), Arg.Any<string?>());
     }
@@ -1121,6 +1141,61 @@ public class ServiceTests
         await _repo.DidNotReceive().AddProductAsync(Arg.Any<Product>(), Arg.Any<CancellationToken>());
     }
 
+    [HumansTheory]
+    [InlineData(false, "price", "0.001")]
+    [InlineData(true, "price", "0.001")]
+    [InlineData(false, "vat", "21.005")]
+    [InlineData(true, "vat", "21.005")]
+    [InlineData(false, "deposit", "0.001")]
+    [InlineData(true, "deposit", "0.001")]
+    [InlineData(false, "price", "10000000000")]
+    [InlineData(true, "price", "10000000000")]
+    [InlineData(false, "vat", "1000")]
+    [InlineData(true, "vat", "1000")]
+    [InlineData(false, "deposit", "10000000000")]
+    [InlineData(true, "deposit", "10000000000")]
+    public async Task CatalogMoney_rejects_values_that_cannot_be_stored_exactly(bool editing, string field, string text)
+    {
+        var amount = decimal.Parse(text, CultureInfo.InvariantCulture);
+        var product = MakeProduct();
+        _repo.GetProductByIdAsync(product.Id, Arg.Any<CancellationToken>()).Returns(product);
+        var request = new ProductSaveRequest(editing ? product.Id : null, 2026, "Product", "",
+            field is "price" ? amount : 10m,
+            field is "vat" ? amount : 21m,
+            field is "deposit" ? amount : null,
+            "2026-08-01", true, null);
+
+        var result = await _service.SaveProductWithResultAsync(request, Guid.NewGuid(), TestContext.Current.CancellationToken);
+
+        result.Succeeded.Should().BeFalse();
+        result.ErrorMessage.Should().Contain("decimal places");
+        await _repo.DidNotReceive().AddProductAsync(Arg.Any<Product>(), Arg.Any<CancellationToken>());
+        await _repo.DidNotReceive().UpdateProductAsync(Arg.Any<Product>(), Arg.Any<CancellationToken>());
+        product.UnitPriceEur.Should().Be(10m);
+        product.VatRatePercent.Should().Be(21m);
+        product.DepositAmountEur.Should().BeNull();
+        _audit.ReceivedCalls().Should().BeEmpty();
+    }
+
+    [HumansTheory]
+    [InlineData("0", "0", null)]
+    [InlineData("0.0100", "21.0000", "0.0000")]
+    [InlineData("9999999999.99", "999.99", "9999999999.99")]
+    public async Task CatalogMoney_accepts_exact_storage_boundaries(string price, string vat, string? deposit)
+    {
+        var draft = new ProductDto(Guid.Empty, 2026, "Product", "",
+            decimal.Parse(price, CultureInfo.InvariantCulture), decimal.Parse(vat, CultureInfo.InvariantCulture),
+            deposit is null ? null : decimal.Parse(deposit, CultureInfo.InvariantCulture),
+            new LocalDate(2026, 8, 1), true);
+
+        var result = await _service.CreateProductAsync(draft, Guid.NewGuid(), TestContext.Current.CancellationToken);
+
+        result.Succeeded.Should().BeTrue();
+        await _repo.Received(1).AddProductAsync(Arg.Is<Product>(p =>
+            p.UnitPriceEur == draft.UnitPriceEur && p.VatRatePercent == draft.VatRatePercent
+            && p.DepositAmountEur == draft.DepositAmountEur), Arg.Any<CancellationToken>());
+    }
+
     [HumansFact]
     public async Task UpdateProductAsync_mutates_fields_and_audits()
     {
@@ -1134,14 +1209,15 @@ public class ServiceTests
 
         var actor = Guid.NewGuid();
         var draft = new ProductDto(
-            existing.Id, 2026, "New", "New desc", 99m, 10m, 25m,
-            new LocalDate(2026, 9, 1), IsActive: true);
+            existing.Id, 2026, "  New  ", "New desc", 99m, 10m, 25m,
+            new LocalDate(2026, 9, 1), IsActive: true, HoldedRevenueAccountNum: 75900002);
 
         await _service.UpdateProductAsync(draft, actor, TestContext.Current.CancellationToken);
 
         captured.Should().NotBeNull();
         captured!.Id.Should().Be(existing.Id);
         captured.Name.Should().Be("New");
+        captured.HoldedRevenueAccountNum.Should().Be(75900002);
         captured.Description.Should().Be("New desc");
         captured.UnitPriceEur.Should().Be(99m);
         captured.VatRatePercent.Should().Be(10m);
@@ -1151,7 +1227,7 @@ public class ServiceTests
         captured.CreatedAt.Should().Be(Instant.FromUtc(2026, 1, 1, 0, 0));
 
         await _audit.Received(1).LogAsync(
-            AuditAction.StoreProductUpdated, AuditEntityTypes.Product, existing.Id,
+            StoreAuditActions.StoreProductUpdated, AuditEntityTypes.Product, existing.Id,
             Arg.Any<string>(), actor,
             Arg.Any<Guid?>(), Arg.Any<string?>());
     }
@@ -1164,7 +1240,7 @@ public class ServiceTests
 
         string? priceDescription = null;
         await _audit.LogAsync(
-            AuditAction.StoreProductPriceChanged, AuditEntityTypes.Product, existing.Id,
+            StoreAuditActions.StoreProductPriceChanged, AuditEntityTypes.Product, existing.Id,
             Arg.Do<string>(d => priceDescription = d), Arg.Any<Guid>(),
             Arg.Any<Guid?>(), Arg.Any<string?>());
 
@@ -1193,7 +1269,7 @@ public class ServiceTests
         await _service.UpdateProductAsync(draft, Guid.NewGuid(), TestContext.Current.CancellationToken);
 
         await _audit.DidNotReceive().LogAsync(
-            AuditAction.StoreProductPriceChanged, Arg.Any<string>(), Arg.Any<Guid>(),
+            StoreAuditActions.StoreProductPriceChanged, Arg.Any<string>(), Arg.Any<Guid>(),
             Arg.Any<string>(), Arg.Any<Guid>(), Arg.Any<Guid?>(), Arg.Any<string?>());
     }
 
@@ -1316,7 +1392,7 @@ public class ServiceTests
         captured.UpdatedAt.Should().Be(_clock.GetCurrentInstant());
 
         await _audit.Received(1).LogAsync(
-            AuditAction.StoreProductDeactivated, AuditEntityTypes.Product, existing.Id,
+            StoreAuditActions.StoreProductDeactivated, AuditEntityTypes.Product, existing.Id,
             Arg.Any<string>(), actor,
             Arg.Any<Guid?>(), Arg.Any<string?>());
     }
@@ -1347,13 +1423,13 @@ public class ServiceTests
         if (string.Equals(stage, "save", StringComparison.Ordinal))
             _repo.UpdateProductAsync(product, Arg.Any<CancellationToken>()).Returns(Task.FromException(failure));
         if (string.Equals(stage, "audit", StringComparison.Ordinal))
-            _audit.LogAsync(AuditAction.StoreProductDeactivated, AuditEntityTypes.Product, product.Id,
+            _audit.LogAsync(StoreAuditActions.StoreProductDeactivated, AuditEntityTypes.Product, product.Id,
                 Arg.Any<string>(), Arg.Any<Guid>(), Arg.Any<Guid?>(), Arg.Any<string?>())
                 .Returns(Task.FromException(failure));
         var actor = Guid.NewGuid();
         var users = Substitute.For<IUserService>();
         users.GetUserInfoAsync(actor, Arg.Any<CancellationToken>()).Returns(new UserInfo(
-            actor, "Tester", false, "en", null, _clock.GetCurrentInstant(), null, null, null, null, null,
+            actor, "Tester", false, "en", null, _clock.GetCurrentInstant(), null, null, null, null,
             null, null, null, null, null, [], [], [], null, []));
         var http = new DefaultHttpContext
         {
@@ -1464,10 +1540,6 @@ public class ServiceTests
         result.Should().BeEmpty();
     }
 
-    // ==========================================================================
-    // RecordStripePaymentAsync (Stripe webhook ingestion)
-    // ==========================================================================
-
     [HumansFact]
     public async Task CreateStripeCheckoutSessionAsync_builds_checkout_session_from_order()
     {
@@ -1551,6 +1623,44 @@ public class ServiceTests
 
         result.ErrorKey.Should().Be("Store_CheckoutUnconfigured");
         result.SessionUrl.Should().BeNull();
+    }
+
+    [HumansTheory]
+    [InlineData("0.001")]
+    [InlineData("1.005")]
+    [InlineData("9.999")]
+    public async Task CheckoutMoney_rejects_fractional_cents_before_calling_Stripe(string text)
+    {
+        _stripeService.IsStoreCheckoutConfigured.Returns(true);
+
+        var result = await _service.CreateStripeCheckoutSessionAsync(MakeOrderDto(balanceEur: 10m),
+            decimal.Parse(text, CultureInfo.InvariantCulture), "https://humans.test/order", TestContext.Current.CancellationToken);
+
+        result.ErrorKey.Should().Be("Store_PaymentPrecision");
+        result.SessionUrl.Should().BeNull();
+        await _stripeService.DidNotReceiveWithAnyArgs().CreateCheckoutSessionAsync(default, default,
+            default!, default!, default, default!);
+    }
+
+    [HumansTheory]
+    [InlineData("0.50")]
+    [InlineData("1.2300")]
+    [InlineData("10.00")]
+    public async Task CheckoutMoney_passes_exact_cent_amounts_to_Stripe(string text)
+    {
+        var amount = decimal.Parse(text, CultureInfo.InvariantCulture);
+        var order = MakeOrderDto(balanceEur: 10m);
+        _stripeService.IsStoreCheckoutConfigured.Returns(true);
+        _stripeService.CreateCheckoutSessionAsync(order.Id, amount, Arg.Any<string>(), Arg.Any<string>(),
+            Arg.Any<string?>(), Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns("https://stripe.test/session");
+
+        var result = await _service.CreateStripeCheckoutSessionAsync(order, amount,
+            "https://humans.test/order", TestContext.Current.CancellationToken);
+
+        result.ErrorKey.Should().BeNull();
+        result.SessionUrl.Should().Be("https://stripe.test/session");
+        await _stripeService.Received(1).CreateCheckoutSessionAsync(order.Id, amount,
+            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 
     [HumansTheory]
@@ -1684,7 +1794,7 @@ public class ServiceTests
             };
         };
         (await Assert.ThrowsAsync<InvalidOperationException>(action)).Should().BeSameAs(failure);
-        await _audit.DidNotReceiveWithAnyArgs().LogAsync(default, default!, default, default!, default(Guid));
+        await _audit.DidNotReceiveWithAnyArgs().LogAsync(null!, default!, default, default!, default(Guid));
     }
 
     [HumansTheory]
@@ -1753,8 +1863,51 @@ public class ServiceTests
                 p.RecordedByUserId == actor),
             Arg.Any<CancellationToken>());
         await _audit.Received(1).LogAsync(
-            AuditAction.StorePaymentRecorded, Arg.Any<string>(), Arg.Any<Guid>(), Arg.Any<string>(),
+            StoreAuditActions.StorePaymentRecorded, Arg.Any<string>(), Arg.Any<Guid>(), Arg.Any<string>(),
             actor, orderId, Arg.Any<string>());
+    }
+
+    [HumansTheory]
+    [InlineData(nameof(PaymentMethod.DepositReturn), "0.001")]
+    [InlineData(nameof(PaymentMethod.Refund), "0.001")]
+    [InlineData(nameof(PaymentMethod.DepositReturn), "10000000000")]
+    [InlineData(nameof(PaymentMethod.Refund), "10000000000")]
+    public async Task ManualPaymentMoney_rejects_values_that_cannot_be_stored_exactly(string methodName, string text)
+    {
+        var method = Enum.Parse<PaymentMethod>(methodName);
+        var order = MakeDepositOrder(Guid.NewGuid(), 9_999_999_999.99m);
+        order.Lines.Single().Qty = 2;
+        _repo.GetOrderWithLinesAndPaymentsAsync(order.Id, Arg.Any<CancellationToken>()).Returns(order);
+
+        var result = await _service.RecordAdminPaymentAsync(order.Id, method,
+            decimal.Parse(text, CultureInfo.InvariantCulture), "re_test", null, Guid.NewGuid(), TestContext.Current.CancellationToken);
+
+        result.Succeeded.Should().BeFalse();
+        result.Refusal.Should().Contain("decimal places");
+        await _repo.DidNotReceive().AddPaymentAsync(Arg.Any<Payment>(), Arg.Any<CancellationToken>());
+        _audit.ReceivedCalls().Should().BeEmpty();
+    }
+
+    [HumansTheory]
+    [InlineData(nameof(PaymentMethod.DepositReturn), "0.01")]
+    [InlineData(nameof(PaymentMethod.Refund), "0.01")]
+    [InlineData(nameof(PaymentMethod.DepositReturn), "0.0100")]
+    [InlineData(nameof(PaymentMethod.Refund), "0.0100")]
+    [InlineData(nameof(PaymentMethod.DepositReturn), "9999999999.99")]
+    [InlineData(nameof(PaymentMethod.Refund), "9999999999.99")]
+    public async Task ManualPaymentMoney_preserves_exact_amounts_and_signs(string methodName, string text)
+    {
+        var method = Enum.Parse<PaymentMethod>(methodName);
+        var amount = decimal.Parse(text, CultureInfo.InvariantCulture);
+        var order = MakeDepositOrder(Guid.NewGuid(), 9_999_999_999.99m);
+        _repo.GetOrderWithLinesAndPaymentsAsync(order.Id, Arg.Any<CancellationToken>()).Returns(order);
+
+        var result = await _service.RecordAdminPaymentAsync(order.Id, method,
+            amount, "re_test", null, Guid.NewGuid(), TestContext.Current.CancellationToken);
+
+        result.Succeeded.Should().BeTrue();
+        var expected = method == PaymentMethod.Refund ? -amount : amount;
+        await _repo.Received(1).AddPaymentAsync(Arg.Is<Payment>(p => p.AmountEur == expected), Arg.Any<CancellationToken>());
     }
 
     [HumansTheory]
@@ -1822,7 +1975,7 @@ public class ServiceTests
         await _repo.Received(1).SetPaymentMethodNameAsync(stripe.Id, PaymentMethod.Stripe, Arg.Any<CancellationToken>());
         await _repo.Received(1).SetPaymentMethodNameAsync(refund.Id, PaymentMethod.Refund, Arg.Any<CancellationToken>());
         await _audit.Received(2).LogAsync(
-            AuditAction.StorePaymentMethodBackfilled, Arg.Any<string>(), Arg.Any<Guid>(), Arg.Any<string>(),
+            StoreAuditActions.StorePaymentMethodBackfilled, Arg.Any<string>(), Arg.Any<Guid>(), Arg.Any<string>(),
             actor, Arg.Any<Guid?>(), Arg.Any<string>());
     }
 
@@ -1893,7 +2046,7 @@ public class ServiceTests
 
         await _repo.DidNotReceive().AddPaymentAsync(Arg.Any<Payment>(), Arg.Any<CancellationToken>());
         await _audit.DidNotReceive().LogAsync(
-            Arg.Any<AuditAction>(), Arg.Any<string>(), Arg.Any<Guid>(),
+            Arg.Any<AuditActionDefinition>(), Arg.Any<string>(), Arg.Any<Guid>(),
             Arg.Any<string>(), Arg.Any<string>(),
             Arg.Any<Guid?>(), Arg.Any<string?>());
     }
@@ -1908,7 +2061,7 @@ public class ServiceTests
         await _service.RecordStripePaymentAsync(orderId, "pi_x", 10m, ct: TestContext.Current.CancellationToken);
 
         await _audit.Received(1).LogAsync(
-            AuditAction.StorePaymentRecorded,
+            StoreAuditActions.StorePaymentRecorded,
             AuditEntityTypes.Payment,
             Arg.Any<Guid>(),
             Arg.Any<string>(),
@@ -2007,7 +2160,7 @@ public class ServiceTests
         payment.StripePaymentIntentId.Should().Be("pi_retry");
         payment.AmountEur.Should().Be(42.50m);
         payment.Status.Should().Be(paid ? PaymentStatus.Paid : PaymentStatus.Pending);
-        await _audit.Received(1).LogAsync(AuditAction.StorePaymentRecorded, AuditEntityTypes.Payment,
+        await _audit.Received(1).LogAsync(StoreAuditActions.StorePaymentRecorded, AuditEntityTypes.Payment,
             payment.Id, Arg.Any<string>(), "StripeWebhook", orderId, AuditEntityTypes.Order);
     }
 
@@ -2021,8 +2174,6 @@ public class ServiceTests
 
         await _repo.DidNotReceive().AddPaymentAsync(Arg.Any<Payment>(), Arg.Any<CancellationToken>());
     }
-
-    // ── async-payment state machine (nobodies-collective/Humans#638) ────────────
 
     [HumansFact]
     public async Task AsyncPaymentSucceeded_transitions_matching_pending_to_paid()
@@ -2047,7 +2198,7 @@ public class ServiceTests
 
         await _repo.Received(1).UpdatePaymentStatusAsync(pending.Id, PaymentStatus.Paid, Arg.Any<CancellationToken>());
         await _audit.Received(1).LogAsync(
-            AuditAction.StorePaymentSettled, AuditEntityTypes.Payment, pending.Id,
+            StoreAuditActions.StorePaymentSettled, AuditEntityTypes.Payment, pending.Id,
             Arg.Any<string>(), "StripeWebhook", orderId, AuditEntityTypes.Order);
     }
 
@@ -2106,7 +2257,7 @@ public class ServiceTests
         recorded.AmountEur.Should().Be(75m);
         await _repo.Received(1).AddPaymentAsync(Arg.Any<Payment>(), Arg.Any<CancellationToken>());
         await _repo.DidNotReceive().UpdatePaymentStatusAsync(Arg.Any<Guid>(), Arg.Any<PaymentStatus>(), Arg.Any<CancellationToken>());
-        await _audit.Received(1).LogAsync(AuditAction.StorePaymentRecorded, AuditEntityTypes.Payment,
+        await _audit.Received(1).LogAsync(StoreAuditActions.StorePaymentRecorded, AuditEntityTypes.Payment,
             recorded.Id, Arg.Is<string>(message => status != PaymentStatus.Failed || message.Contains("Failed")),
             "StripeWebhook", orderId, AuditEntityTypes.Order);
     }
@@ -2180,7 +2331,7 @@ public class ServiceTests
         rows.Should().ContainSingle();
         rows[0].Status.Should().Be(succeeded ? PaymentStatus.Paid : PaymentStatus.Failed);
         rows[0].AmountEur.Should().Be(75m);
-        await _audit.Received(1).LogAsync(AuditAction.StorePaymentRecorded, AuditEntityTypes.Payment,
+        await _audit.Received(1).LogAsync(StoreAuditActions.StorePaymentRecorded, AuditEntityTypes.Payment,
             Arg.Any<Guid>(), Arg.Any<string>(), "StripeWebhook", orderId, AuditEntityTypes.Order);
     }
 
@@ -2208,7 +2359,7 @@ public class ServiceTests
 
         await _repo.Received(1).UpdatePaymentStatusAsync(pending.Id, PaymentStatus.Failed, Arg.Any<CancellationToken>());
         await _audit.Received(1).LogAsync(
-            AuditAction.StorePaymentFailed, AuditEntityTypes.Payment, pending.Id,
+            StoreAuditActions.StorePaymentFailed, AuditEntityTypes.Payment, pending.Id,
             Arg.Any<string>(), "StripeWebhook", orderId, AuditEntityTypes.Order);
     }
 
@@ -2304,7 +2455,7 @@ public class ServiceTests
 
         await _repo.Received(1).DeletePaymentAsync(pending.Id, Arg.Any<CancellationToken>());
         await _audit.Received(1).LogAsync(
-            AuditAction.StorePaymentExpired, AuditEntityTypes.Payment, pending.Id,
+            StoreAuditActions.StorePaymentExpired, AuditEntityTypes.Payment, pending.Id,
             Arg.Any<string>(), "StripeWebhook", orderId, AuditEntityTypes.Order);
     }
 
@@ -2330,10 +2481,6 @@ public class ServiceTests
 
         await _repo.DidNotReceive().DeletePaymentAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>());
     }
-
-    // ==========================================================================
-    // Helpers
-    // ==========================================================================
 
     private static Product MakeProduct(
         string name = "Test product",

@@ -23,9 +23,8 @@ using Xunit;
 namespace Humans.Finance.Tests;
 
 /// <summary>
-/// The duplicate purchase documents the 2026-10-18 outbox race left in Holded: the matcher that
-/// finds them, the dry run on /Finance/HoldedDuplicates, the Apply that deletes them, and the
-/// nightly log line in the document sync. One rule, run from every entry point.
+/// The duplicate purchase documents the 2026-10-18 outbox race left in Holded: one rule, run from
+/// the matcher, the /Finance/HoldedDuplicates dry run, the Apply and the nightly sync log line.
 /// </summary>
 public class HoldedDuplicateTests
 {
@@ -100,7 +99,6 @@ public class HoldedDuplicateTests
             ContactId = contactId,
             ContactName = "Catherine Morgaine Ryan",
             Description = description,
-            Notes = null,
             Date = FixedNow,
             Subtotal = total,
             Tax = 0m,
@@ -111,8 +109,6 @@ public class HoldedDuplicateTests
 
     private static readonly IReadOnlyDictionary<Guid, IReadOnlySet<string>> NoExtraContacts =
         new Dictionary<Guid, IReadOnlySet<string>>();
-
-    // ---- the matcher ------------------------------------------------------------------------------
 
     [HumansFact]
     public void Matcher_OneLineTwoDocuments_FlagsTheOneTheLineDoesNotLinkTo()
@@ -191,8 +187,6 @@ public class HoldedDuplicateTests
 
         matches.Should().BeEmpty();
     }
-
-    // ---- the dry run --------------------------------------------------------------------------------
 
     [HumansFact]
     public async Task DryRun_ListsTheDuplicatePerMember_WithTotals()
@@ -348,8 +342,6 @@ public class HoldedDuplicateTests
         vm.Members.Should().BeEmpty();
     }
 
-    // ---- apply --------------------------------------------------------------------------------------
-
     [HumansFact]
     public async Task Apply_DeletesTheDocumentsThenTheOrphanContact_AuditsEachId_AndResyncs()
     {
@@ -384,12 +376,12 @@ public class HoldedDuplicateTests
         await _client.DidNotReceive().DeletePurchaseDocumentAsync("doc-a", Arg.Any<CancellationToken>());
         await _client.DidNotReceive().DeleteContactAsync("c1", Arg.Any<CancellationToken>());
 
-        await _audit.Received(1).LogAsync(AuditAction.HoldedDuplicateRemoved, "ExpenseLine", Arg.Any<Guid>(),
+        await _audit.Received(1).LogAsync(FinanceAuditActions.HoldedDuplicateRemoved, "ExpenseLine", Arg.Any<Guid>(),
             Arg.Is<string>(d => d.Contains("doc-b") && d.Contains("kept doc-a") && d.Contains("41000067")),
             Actor, UserId, nameof(User));
-        await _audit.Received(1).LogAsync(AuditAction.HoldedDuplicateRemoved, "ExpenseLine", Arg.Any<Guid>(),
+        await _audit.Received(1).LogAsync(FinanceAuditActions.HoldedDuplicateRemoved, "ExpenseLine", Arg.Any<Guid>(),
             Arg.Is<string>(d => d.Contains("doc-c")), Actor, UserId, nameof(User));
-        await _audit.Received(1).LogAsync(AuditAction.HoldedDuplicateRemoved, nameof(User), UserId,
+        await _audit.Received(1).LogAsync(FinanceAuditActions.HoldedDuplicateRemoved, nameof(User), UserId,
             Arg.Is<string>(d => d.Contains("contact c2") && d.Contains("kept c1")), Actor);
     }
 
@@ -409,7 +401,7 @@ public class HoldedDuplicateTests
         member.Failures.Should().ContainSingle().Which.Should().Contain("doc-b");
         await _client.DidNotReceive().DeletePurchaseDocumentAsync("doc-paid", Arg.Any<CancellationToken>());
         await _client.DidNotReceive().DeleteContactAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
-        await _audit.DidNotReceive().LogAsync(Arg.Any<AuditAction>(), Arg.Any<string>(), Arg.Any<Guid>(),
+        await _audit.DidNotReceive().LogAsync(Arg.Any<AuditActionDefinition>(), Arg.Any<string>(), Arg.Any<Guid>(),
             Arg.Any<string>(), Arg.Any<Guid>(), Arg.Any<Guid?>(), Arg.Any<string?>());
     }
 
@@ -450,7 +442,7 @@ public class HoldedDuplicateTests
         var result = await MakeService().RemoveHoldedDuplicatesAsync(Actor);
 
         result.Members.Single().DeletedDocIds.Should().Equal("doc-b2");
-        await _audit.Received(1).LogAsync(AuditAction.HoldedDuplicateRemoved, "ExpenseLine", line2.LineId,
+        await _audit.Received(1).LogAsync(FinanceAuditActions.HoldedDuplicateRemoved, "ExpenseLine", line2.LineId,
             Arg.Is<string>(d => d.Contains("doc-b2") && d.Contains("kept doc-b")), Actor, UserId, nameof(User));
     }
 
@@ -480,8 +472,6 @@ public class HoldedDuplicateTests
         await _holded.DidNotReceive().SyncLedgerAsync(Arg.Any<bool>(), Arg.Any<CancellationToken>());
     }
 
-    // ---- the nightly check ----------------------------------------------------------------------------
-
     [HumansTheory]
     [InlineData(true)]
     [InlineData(false)]
@@ -493,6 +483,12 @@ public class HoldedDuplicateTests
         _expenses.GetHoldedBookingsAsync(Arg.Any<CancellationToken>()).Returns([Booking("doc-a")]);
         _client.ListPurchaseDocumentsAsync(Arg.Any<CancellationToken>())
             .Returns(duplicates ? [Doc("doc-a"), Doc("doc-b")] : [Doc("doc-a")]);
+        // Notes already mirrored, so the sync's own notes fetch has nothing to read.
+        _repo.GetAllDocsAsync(Arg.Any<CancellationToken>()).Returns(
+        [
+            new HoldedExpenseDoc { HoldedDocId = "doc-a", Notes = "" },
+            new HoldedExpenseDoc { HoldedDocId = "doc-b", Notes = "" },
+        ]);
         var logger = new CapturingLogger<Service>();
 
         await MakeService(logger).SyncAsync(TestContext.Current.CancellationToken);

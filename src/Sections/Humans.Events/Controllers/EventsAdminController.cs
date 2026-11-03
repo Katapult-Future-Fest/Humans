@@ -1,3 +1,4 @@
+using Humans.Events.Contracts;
 using Humans.Events.Services;
 using Humans.Events.Domain;
 using Humans.Base.Controllers;
@@ -12,15 +13,14 @@ using Humans.Users.Contracts;
 
 namespace Humans.Events.Controllers;
 
-[Authorize(Policy = PolicyNames.EventsAdminOrAdmin)]
+[Authorize(Policy = EventsPolicies.Read)]
 [Route("Events/Admin")]
 [ServiceFilter(typeof(EventsFeatureFilter))]
 internal sealed class EventsAdminController(IEventManagement guide, ILogger<EventsAdminController> logger, IUserService userService)
     : HumansControllerBase(userService)
 {
-    // ─── Settings ────────────────────────────────────────────
-
     [HttpPost("Settings")]
+    [Authorize(Policy = EventsPolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> SaveSettings(GuideSettingsViewModel model)
     {
@@ -57,8 +57,6 @@ internal sealed class EventsAdminController(IEventManagement guide, ILogger<Even
         return Redirect("/Settings#event-guide");
     }
 
-    // ─── Event Categories ─────────────────────────────────────────
-
     [HttpGet("Categories")]
     public async Task<IActionResult> Categories(CancellationToken ct = default)
     {
@@ -81,6 +79,7 @@ internal sealed class EventsAdminController(IEventManagement guide, ILogger<Even
     }
 
     [HttpGet("Categories/Create")]
+    [Authorize(Policy = EventsPolicies.Manage)]
     public async Task<IActionResult> CreateCategory(CancellationToken ct = default)
     {
         return View("CategoryForm", new EventCategoryFormViewModel
@@ -90,6 +89,7 @@ internal sealed class EventsAdminController(IEventManagement guide, ILogger<Even
     }
 
     [HttpPost("Categories/Create")]
+    [Authorize(Policy = EventsPolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> CreateCategory(EventCategoryFormViewModel model)
     {
@@ -119,6 +119,7 @@ internal sealed class EventsAdminController(IEventManagement guide, ILogger<Even
     }
 
     [HttpGet("Categories/{id:guid}/Edit")]
+    [Authorize(Policy = EventsPolicies.Manage)]
     public async Task<IActionResult> EditCategory(Guid id, CancellationToken ct = default)
     {
         var category = await guide.GetCategoryAsync(id, ct);
@@ -136,6 +137,7 @@ internal sealed class EventsAdminController(IEventManagement guide, ILogger<Even
     }
 
     [HttpPost("Categories/{id:guid}/Edit")]
+    [Authorize(Policy = EventsPolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> EditCategory(Guid id, EventCategoryFormViewModel model)
     {
@@ -172,6 +174,7 @@ internal sealed class EventsAdminController(IEventManagement guide, ILogger<Even
     }
 
     [HttpPost("Categories/{id:guid}/Delete")]
+    [Authorize(Policy = EventsPolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> DeleteCategory(Guid id)
     {
@@ -189,6 +192,7 @@ internal sealed class EventsAdminController(IEventManagement guide, ILogger<Even
     }
 
     [HttpPost("Categories/{id:guid}/MoveUp")]
+    [Authorize(Policy = EventsPolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> MoveCategoryUp(Guid id)
     {
@@ -197,14 +201,13 @@ internal sealed class EventsAdminController(IEventManagement guide, ILogger<Even
     }
 
     [HttpPost("Categories/{id:guid}/MoveDown")]
+    [Authorize(Policy = EventsPolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> MoveCategoryDown(Guid id)
     {
         await guide.MoveCategoryAsync(id, +1);
         return RedirectToAction(nameof(Categories));
     }
-
-    // ─── Guide Shared Venues ──────────────────────────────────────
 
     [HttpGet("Venues")]
     public async Task<IActionResult> Venues(CancellationToken ct = default)
@@ -227,6 +230,7 @@ internal sealed class EventsAdminController(IEventManagement guide, ILogger<Even
     }
 
     [HttpGet("Venues/Create")]
+    [Authorize(Policy = EventsPolicies.Manage)]
     public async Task<IActionResult> CreateVenue(CancellationToken ct = default)
     {
         return View("VenueForm", new GuideVenueFormViewModel
@@ -236,6 +240,7 @@ internal sealed class EventsAdminController(IEventManagement guide, ILogger<Even
     }
 
     [HttpPost("Venues/Create")]
+    [Authorize(Policy = EventsPolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> CreateVenue(GuideVenueFormViewModel model)
     {
@@ -259,6 +264,7 @@ internal sealed class EventsAdminController(IEventManagement guide, ILogger<Even
     }
 
     [HttpGet("Venues/{id:guid}/Edit")]
+    [Authorize(Policy = EventsPolicies.Manage)]
     public async Task<IActionResult> EditVenue(Guid id, CancellationToken ct = default)
     {
         var venue = await guide.GetVenueAsync(id, ct);
@@ -276,6 +282,7 @@ internal sealed class EventsAdminController(IEventManagement guide, ILogger<Even
     }
 
     [HttpPost("Venues/{id:guid}/Edit")]
+    [Authorize(Policy = EventsPolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> EditVenue(Guid id, GuideVenueFormViewModel model)
     {
@@ -305,6 +312,7 @@ internal sealed class EventsAdminController(IEventManagement guide, ILogger<Even
     }
 
     [HttpPost("Venues/{id:guid}/Delete")]
+    [Authorize(Policy = EventsPolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> DeleteVenue(Guid id)
     {
@@ -322,6 +330,7 @@ internal sealed class EventsAdminController(IEventManagement guide, ILogger<Even
     }
 
     [HttpPost("Venues/{id:guid}/MoveUp")]
+    [Authorize(Policy = EventsPolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> MoveVenueUp(Guid id)
     {
@@ -330,14 +339,13 @@ internal sealed class EventsAdminController(IEventManagement guide, ILogger<Even
     }
 
     [HttpPost("Venues/{id:guid}/MoveDown")]
+    [Authorize(Policy = EventsPolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> MoveVenueDown(Guid id)
     {
         await guide.MoveVenueAsync(id, +1);
         return RedirectToAction(nameof(Venues));
     }
-
-    // ─── Helpers ──────────────────────────────────────────────────
 
     private async Task<List<EventSettingsOptionViewModel>> BuildEventSettingsOptionsAsync()
     {

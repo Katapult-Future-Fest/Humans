@@ -22,11 +22,6 @@ using NSubstitute;
 
 namespace Humans.GoogleIntegration.Tests;
 
-/// <summary>
-/// <see cref="WorkspaceIdentityService"/>: the read-time resolution that replaced Users'
-/// <c>EnsureGoogleInvariantAsync</c>, the writes, the <c>google.workspace-identities</c> copy, and
-/// the GDPR / merge hooks of <c>google_workspace_identities</c> (Users decomposition commit 15).
-/// </summary>
 public sealed class WorkspaceIdentityServiceTests
 {
     private static CancellationToken Ct => Xunit.TestContext.Current.CancellationToken;
@@ -72,10 +67,9 @@ public sealed class WorkspaceIdentityServiceTests
         return info;
     }
 
-    // ─── Resolution parity with today's IsGoogle invariant ──────────────────────
-    // For a member whose data satisfies the invariant EnsureGoogleInvariantAsync kept (exactly one
-    // verified IsGoogle row, the @nobodies.team one when there is one), the effective identity is
-    // that same address, with that row's status — before and after the copy.
+    // Resolution parity: for a member satisfying the old IsGoogle invariant (exactly one verified
+    // IsGoogle row, the @nobodies.team one when there is one), the effective identity is that same
+    // address with that row's status, before and after the copy.
 
     public static Xunit.TheoryData<string, string, LegacyGoogleEmailStatus> ParityCases => new()
     {
@@ -169,8 +163,6 @@ public sealed class WorkspaceIdentityServiceTests
             archivedId, new WorkspaceIdentity(info.Id, "alice@nobodies.team", GoogleEmailStatus.Unknown)));
     }
 
-    // ─── ClearIfAddress ──────────────────────────────────────────────────────────
-
     [HumansFact]
     public async Task ClearIfAddress_ThenLegacyFallback_DoesNotResurrectTheAddress()
     {
@@ -200,8 +192,6 @@ public sealed class WorkspaceIdentityServiceTests
         _repo.Rows[info.Id].Status.Should().Be(GoogleEmailStatus.Valid);
     }
 
-    // ─── Set ─────────────────────────────────────────────────────────────────────
-
     [HumansFact]
     public async Task Set_DesignatesAVerifiedAddress_AndAuditsTheChange()
     {
@@ -214,7 +204,7 @@ public sealed class WorkspaceIdentityServiceTests
         (await _sut.GetWorkspaceIdentityAsync(info.Id, Ct)).Should()
             .Be(new WorkspaceIdentity(info.Id, "alice@gmail.com", GoogleEmailStatus.Unknown));
         await _audit.Received(1).LogAsync(
-            AuditAction.UserEmailGoogleSet, nameof(User), info.Id,
+            GoogleIntegrationAuditActions.UserEmailGoogleSet, nameof(User), info.Id,
             "Set Google identity to alice@gmail.com (was alice@example.org)", actor,
             relatedEntityId: targetRowId, relatedEntityType: nameof(UserEmail));
     }
@@ -233,7 +223,7 @@ public sealed class WorkspaceIdentityServiceTests
         (await _sut.SetAsync(info.Id, "alice@example.org", info.Id, Ct)).Should().BeFalse();
 
         _repo.Rows.Should().BeEmpty();
-        await _audit.DidNotReceiveWithAnyArgs().LogAsync(default, default!, default, default!, default(Guid));
+        await _audit.DidNotReceiveWithAnyArgs().LogAsync(null!, default!, default, default!, default(Guid));
     }
 
     [HumansFact]
@@ -260,8 +250,6 @@ public sealed class WorkspaceIdentityServiceTests
 
         _repo.Rows[info.Id].Status.Should().Be(after);
     }
-
-    // ─── SetStatusFromSync ───────────────────────────────────────────────────────
 
     [HumansFact]
     public async Task SetStatusFromSync_WritesTheVerdictForTheCurrentIdentity()
@@ -332,8 +320,6 @@ public sealed class WorkspaceIdentityServiceTests
         (await _sut.GetDriveEmailsAsync(Ct)).Should().BeEmpty();
     }
 
-    // ─── google.workspace-identities ─────────────────────────────────────────────
-
     [HumansFact]
     public async Task Copy_TakesOnlyMembersWithLegacyState_AndIsIdempotent()
     {
@@ -358,15 +344,13 @@ public sealed class WorkspaceIdentityServiceTests
     {
         Seed(new Addr("a@example.org", Primary: true, Google: true));
         var services = new ServiceCollection().AddSingleton<IWorkspaceIdentityManagement>(_sut).BuildServiceProvider();
-        var migration = new SectionDataMigrations().Migrations().Should().ContainSingle().Subject;
+        var migration = ((ISectionDataMigrations)new Section()).Migrations().Should().ContainSingle().Subject;
 
         migration.Key.Should().Be("google.workspace-identities");
         (await migration.Status(services, Ct)).Pending.Should().Be(1);
         (await migration.Apply(services, Guid.NewGuid(), Ct)).Should().Be(1);
         (await migration.Status(services, Ct)).Pending.Should().Be(0);
     }
-
-    // ─── Merge, export, erasure ──────────────────────────────────────────────────
 
     [HumansFact]
     public async Task Merge_DeletesTheArchivedRow_AndKeepsTheSurvivors()
@@ -411,13 +395,11 @@ public sealed class WorkspaceIdentityServiceTests
         });
     }
 
-    // ─── Surfaces ────────────────────────────────────────────────────────────────
-
     [HumansFact]
-    public void Controller_SetRoutesAreAntiforgery_AndTheAdminRouteNeedsHumanAdminBoardOrAdmin()
+    public void Controller_SetRoutesAreAntiforgery_AndTheAdminRouteNeedsUsersManage()
     {
         var type = typeof(WorkspaceIdentityController);
-        type.GetCustomAttribute<AuthorizeAttribute>().Should().NotBeNull();
+        type.GetCustomAttribute<AuthorizeAttribute>(inherit: false).Should().NotBeNull();
 
         var set = type.GetMethod(nameof(WorkspaceIdentityController.Set))!;
         set.GetCustomAttribute<ValidateAntiForgeryTokenAttribute>().Should().NotBeNull();
@@ -427,7 +409,7 @@ public sealed class WorkspaceIdentityServiceTests
         var adminSet = type.GetMethod(nameof(WorkspaceIdentityController.AdminSet))!;
         adminSet.GetCustomAttribute<ValidateAntiForgeryTokenAttribute>().Should().NotBeNull();
         adminSet.GetCustomAttribute<HttpPostAttribute>()!.Template.Should().Be("Admin/{id:guid}/WorkspaceEmail");
-        adminSet.GetCustomAttribute<AuthorizeAttribute>()!.Policy.Should().Be(PolicyNames.HumanAdminBoardOrAdmin);
+        adminSet.GetCustomAttribute<AuthorizeAttribute>(inherit: false)!.Policy.Should().Be(UsersPolicies.Manage);
     }
 
     private WorkspaceIdentityController Controller(IWorkspaceIdentityManagement identities, Guid currentUserId)
@@ -500,7 +482,7 @@ public sealed class WorkspaceIdentityServiceTests
     [HumansFact]
     public void UserParts_ContributeTheCardsToTheAdminDetailSidebar()
     {
-        IUserPart contribution = new SectionUserParts();
+        IUserPart contribution = ((IUserPart)new Section());
 
         contribution.Parts().Should().ContainSingle().Which.Slot.Should().Be(UserPartSlots.AdminDetailSidebar);
     }

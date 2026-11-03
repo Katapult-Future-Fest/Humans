@@ -48,10 +48,6 @@ public class ServiceTeamOrdersTests
         _service = new Service(_repo, _audit, _campService, _teams, _clock, _shifts, _stripe, _holded, Options.Create(_storeOptions), NullLogger<Service>.Instance);
     }
 
-    // ==========================================================================
-    // CreateTeamOrderAsync
-    // ==========================================================================
-
     [HumansFact]
     public async Task CreateTeamOrderAsync_writes_order_with_team_id_and_active_year()
     {
@@ -124,10 +120,6 @@ public class ServiceTeamOrdersTests
         await _repo.DidNotReceive().AddOrderAsync(Arg.Any<Order>(), Arg.Any<CancellationToken>());
     }
 
-    // ==========================================================================
-    // Guard rails on billable-only methods
-    // ==========================================================================
-
     [HumansFact]
     public async Task UpdateCounterpartyAsync_refuses_team_order()
     {
@@ -167,10 +159,6 @@ public class ServiceTeamOrdersTests
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             _service.RecordStripePaymentAsync(orderId, "pi_x", 10m, ct: TestContext.Current.CancellationToken));
     }
-
-    // ==========================================================================
-    // Year backfill on legacy camp orders
-    // ==========================================================================
 
     [HumansFact]
     public async Task AddLineAsync_backfills_Year_from_camp_season_when_order_year_is_zero()
@@ -214,7 +202,7 @@ public class ServiceTeamOrdersTests
             Arg.Is<Order>(o => o.Year == 2025),
             Arg.Any<CancellationToken>());
         await _audit.Received(1).LogAsync(
-            AuditAction.StoreOrderYearBackfilled,
+            StoreAuditActions.StoreOrderYearBackfilled,
             AuditEntityTypes.Order,
             orderId,
             Arg.Any<string>(),
@@ -222,10 +210,6 @@ public class ServiceTeamOrdersTests
             Arg.Any<Guid?>(),
             Arg.Any<string?>());
     }
-
-    // ==========================================================================
-    // Index data — team coordinators see their departments
-    // ==========================================================================
 
     [HumansFact]
     public async Task GetIndexDataAsync_lists_coordinated_departments_alongside_led_camps()
@@ -302,10 +286,6 @@ public class ServiceTeamOrdersTests
             c.CounterpartyType == OrderCounterpartyType.Team && c.CounterpartyId == otherDeptId);
     }
 
-    // ==========================================================================
-    // Summary — team orders merge into cross-tab
-    // ==========================================================================
-
     [HumansFact]
     public async Task GetStoreSummaryAsync_merges_team_orders_into_by_counterparty_and_cross_tab()
     {
@@ -350,10 +330,6 @@ public class ServiceTeamOrdersTests
             && r.TotalQty == 7);
     }
 
-    // ==========================================================================
-    // Helpers
-    // ==========================================================================
-
     private static TeamInfo MakeDepartment(
         Guid teamId,
         string name,
@@ -378,10 +354,6 @@ public class ServiceTeamOrdersTests
             ManagementRoleHolderUserIds: new HashSet<Guid> { coordinatorUserId });
     }
 
-    // ==========================================================================
-    // DeleteOrderAsync
-    // ==========================================================================
-
     [HumansFact]
     public async Task DeleteOrderAsync_removes_zero_balance_order_and_audits()
     {
@@ -394,7 +366,7 @@ public class ServiceTeamOrdersTests
 
         await _repo.Received(1).DeleteOrderAsync(orderId, Arg.Any<CancellationToken>());
         await _audit.Received(1).LogAsync(
-            AuditAction.StoreOrderDeleted, AuditEntityTypes.Order, orderId,
+            StoreAuditActions.StoreOrderDeleted, AuditEntityTypes.Order, orderId,
             Arg.Any<string>(), actor,
             Arg.Any<Guid?>(), Arg.Any<string?>());
     }
@@ -520,10 +492,6 @@ public class ServiceTeamOrdersTests
         refusal.Succeeded.Should().BeFalse();
         refusal.Refusal.Should().NotBeNullOrEmpty();
     }
-
-    // ==========================================================================
-    // CreateOrderAsync uniqueness (camp side — one order per camp-season-year)
-    // ==========================================================================
 
     [HumansFact]
     public async Task CreateOrderAsync_refuses_when_camp_season_already_has_order_for_year()

@@ -1,58 +1,46 @@
-using Humans.Base.Interfaces;
-using Humans.Base.Interfaces.Caching;
 using Humans.Auth.Authorization;
 using Humans.Auth.Contracts;
 using Humans.Auth.Data;
 using Humans.Auth.Services;
-using Humans.Gdpr.Contracts;
+using Humans.Auth.ViewComponents;
+using Humans.Base.Authorization;
+using Humans.Base.Constants;
+using Humans.Base.Extensions;
 using Humans.Base.Hosting;
+using Humans.Base.Interfaces;
+using Humans.Base.Interfaces.Caching;
 using Humans.Email.Contracts;
+using Humans.Gdpr.Contracts;
+using Humans.Users.Contracts;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.Extensions.Configuration;
+using Humans.Notifications.Contracts;
 using Microsoft.Extensions.DependencyInjection;
-using Humans.Users.Contracts;
+using Humans.AuditLog.Contracts;
 
 namespace Humans.Auth;
 
-/// <summary>
-/// Auth's DI entry point, at the project root by convention. Discovered by Shell —
-/// nothing names it, so it needs no section prefix.
-/// </summary>
-/// <remarks>
-/// <para>
-/// What is registered here is the role-assignment half of the section: the
-/// <c>role_assignments</c> repository, the service that owns its invariants, the
-/// caching decorator over the row set, the full-Admin destructive-action guard, and the
-/// resource-based handler that gates who may assign which role.
-/// </para>
-/// <para>
-/// The sign-in half is registered here too: <c>MagicLinkService</c> plus its two
-/// collaborators (<c>MagicLinkUrlBuilder</c>, <c>MagicLinkRateLimiter</c>).
-/// </para>
-/// <para>
-/// <c>AccountController</c> and <c>Views/Account/*</c> stay in Shell: every action they
-/// expose writes Users'/Profiles' tables through those sections' services, and their
-/// <c>Login_*</c>/<c>MagicLink*</c>/<c>GateLogin_*</c> resource keys stay in
-/// <c>SharedResource</c> with them. The section's own <c>AuthResource</c> set at
-/// the project root holds only the magic-link email copy.
-/// </para>
-/// </remarks>
-public sealed class Section : ISection
+public sealed class Section :
+    ISection,
+    ISectionAdminNav,
+    ISectionDataMigrations,
+    ISectionRoles,
+    IUserPart
 {
     public void Register(IServiceCollection services, IConfiguration configuration)
     {
+        services.AddSingleton<IAuditActionContributor, AuthAuditActions>();
+        services.AddSingleton<INotificationSourceContributor, AuthNotificationSources>();
         services.AddSectionDbContext<AuthDbContext>(sentinelTable: "role_assignments");
 
-        // Singleton + IDbContextFactory so the repository owns context lifetime while
-        // AuthDbContext itself stays Scoped.
+        // Composed from every section's ISectionRoles (registered by discovery); throws on a duplicate name.
+        services.AddSingleton(sp => new RoleCatalog(sp.GetServices<ISectionRoles>()));
+
         services.AddSingleton<IRoleAssignmentRepository, RoleAssignmentRepository>();
         services.AddScoped<IAdminAuthorizationService, AdminAuthorizationService>();
 
-        // Inner RoleAssignmentService registered keyed under
-        // CachingRoleAssignmentService.InnerServiceKey; the unkeyed concrete forwards to the
-        // keyed registration via cast so IUserDataContributor and IUserMerge reach the
-        // undecorated inner through that one registration, rather than each getting a private
-        // RoleAssignmentService.
+        // IUserDataContributor and IUserMerge reach the undecorated inner through the unkeyed concrete, which
+        // forwards to this keyed registration, so there is only one inner instance.
         services.AddKeyedScoped<IRoleAssignmentManagement, RoleAssignmentService>(
             CachingRoleAssignmentService.InnerServiceKey);
         services.AddScoped<RoleAssignmentService>(sp =>
@@ -72,21 +60,57 @@ public sealed class Section : ISection
             sp.GetRequiredService<CachingRoleAssignmentService>());
         services.AddHostedService(sp => sp.GetRequiredService<CachingRoleAssignmentService>());
 
-        // Resource-based handler registers here; its policy is a shared platform policy that
-        // stays in Shell's AuthorizationPolicyExtensions.
         services.AddSingleton<IAuthorizationHandler, RoleAssignmentAuthorizationHandler>();
 
         services.AddScoped<IMagicLinkUrlBuilder, MagicLinkUrlBuilder>();
         services.AddScoped<IMagicLinkRateLimiter, MagicLinkRateLimiter>();
         services.AddScoped<IMagicLinkService, MagicLinkService>();
 
-        // Auth owns its email copy and its gallery samples; Email keeps the mechanics
-        // (memory/architecture/email-templates-live-in-sender.md).
         services.AddScoped<AuthEmails>();
         services.AddScoped<IEmailPreviewContributor, AuthEmailPreviews>();
 
-        // Gauge-refresh loop for active role-assignment counts.
         services.AddSingleton<AuthMetricsService>();
         services.AddHostedService(sp => sp.GetRequiredService<AuthMetricsService>());
     }
+
+    IEnumerable<AdminNavGroup> ISectionAdminNav.Groups() =>
+    [
+        new("Users", [
+            new("Roles", "RoleAssignments", "Roles", null, null, "fa-solid fa-id-badge", UsersPolicies.Read, Weight: 10)
+        ])
+    ];
+
+    internal const string RoleRenamesKey = "auth.role-renames";
+
+    IEnumerable<DataMigration> ISectionDataMigrations.Migrations() =>
+    [
+        new(RoleRenamesKey, "Auth",
+            "Rewrite role assignments stored under a former role name (HumanAdmin, CampAdmin, TicketAdmin, NoInfoAdmin, VolunteerCoordinator, EETeamAdmin) to the current name",
+            "RoleDefinition.FormerNames on each renamed role and the former-name reads in RoleAssignmentService",
+            StatusAsync, ApplyAsync),
+    ];
+
+    private static async Task<DataMigrationStatus> StatusAsync(IServiceProvider sp, CancellationToken ct) =>
+        new(["User", "Stored role", "Current role", "Valid to"],
+            [.. (await sp.GetRequiredService<RoleAssignmentService>().GetRowsUnderFormerNamesAsync(ct))
+                .Select(r => (IReadOnlyList<string>)
+                [
+                    r.UserId.ToString(), r.StoredName, r.CurrentName, r.ValidTo.ToIso8601() ?? "open",
+                ])]);
+
+    private static Task<int> ApplyAsync(IServiceProvider sp, Guid actorUserId, CancellationToken ct) =>
+        sp.GetRequiredService<RoleAssignmentService>().RewriteFormerNamesAsync(ct);
+
+    IReadOnlyList<RoleDefinition> ISectionRoles.Roles { get; } =
+    [
+        new(RoleNames.Board, "Board",
+            "Elected stewards of the collective. They guide strategy, approve tier applications, and make the big decisions so the rest of us can focus on making things happen.",
+            "fa-solid fa-crown"),
+        new(RoleNames.Admin, "Admin",
+            "The ones who keep the lights on. Full system access, all the keys, all the responsibility. When something breaks at 3am, these are the humans who fix it.",
+            "fa-solid fa-gear"),
+    ];
+
+    IEnumerable<UserPart> IUserPart.Parts() =>
+        [new(UserPartSlots.AdminDetail, typeof(RoleAssignmentsCardViewComponent), Weight: 50)];
 }

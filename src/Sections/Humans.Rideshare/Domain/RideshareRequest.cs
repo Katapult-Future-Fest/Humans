@@ -2,20 +2,24 @@ using NodaTime;
 
 namespace Humans.Rideshare.Domain;
 
-/// <summary>One rider's need: a pickup point and a desired date, with party size and cargo.</summary>
 internal sealed class RideshareRequest
 {
     public Guid Id { get; init; }
 
-    /// <summary>The rider. Bare cross-section reference — no FK, no navigation.</summary>
     public Guid UserId { get; set; }
 
-    /// <summary>The burn year the request belongs to (the active year at creation).</summary>
+    /// <summary>The year of the event at creation.</summary>
     public int Year { get; set; }
+
+    /// <summary>
+    /// The event this row belongs to. Null on rows from before events were tracked, until the
+    /// <c>rideshare.event-ids</c> data migration stamps them; until then they belong to the event that run would pick.
+    /// </summary>
+    public Guid? EventSettingsId { get; set; }
 
     public RideshareDirection Direction { get; set; }
 
-    /// <summary>Coarse, city-level pickup point, e.g. "Lyon, France".</summary>
+    /// <summary>Coarse, city-level, e.g. "Lyon, France".</summary>
     public string PickupPlaceLabel { get; set; } = string.Empty;
 
     public double PickupLatitude { get; set; }

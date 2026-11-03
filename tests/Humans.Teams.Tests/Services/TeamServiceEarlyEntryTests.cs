@@ -23,13 +23,8 @@ using TeamService = Humans.Teams.Services.TeamService;
 namespace Humans.Teams.Tests.Services;
 
 /// <summary>
-/// Logic of the Teams early-entry surface on <see cref="TeamService"/>:
-/// the <c>IEarlyEntryProvider</c> feed, CRUD with team-enabled validation +
-/// audit + cache eviction, the merge fold, the GDPR export slice, and
-/// right-to-erasure. The repository is an NSubstitute mock — the EE remove /
-/// reassign / delete-for-user repo methods use <c>ExecuteDelete/Update</c>,
-/// which the InMemory provider the DB-backed harness uses cannot run, so these
-/// tests assert the service's repo/invalidator/audit interactions directly.
+/// The repository is a substitute: its remove/reassign/delete-for-user methods use
+/// <c>ExecuteDelete/Update</c>, which the InMemory provider cannot run.
 /// </summary>
 public sealed class TeamServiceEarlyEntryTests
 {
@@ -114,10 +109,6 @@ public sealed class TeamServiceEarlyEntryTests
         CreatedByUserId = Guid.NewGuid(),
     };
 
-    // ==========================================================================
-    // GetEarlyEntriesAsync (IEarlyEntryProvider feed)
-    // ==========================================================================
-
     [HumansFact]
     public async Task GetEarlyEntriesAsync_ProjectsTeamNameLabel_FromEnabledTeams()
     {
@@ -148,10 +139,6 @@ public sealed class TeamServiceEarlyEntryTests
         entries.Should().BeEmpty();
     }
 
-    // ==========================================================================
-    // GetEarlyEntryGrantsForTeamAsync (management read model)
-    // ==========================================================================
-
     [HumansFact]
     public async Task GetEarlyEntryGrantsForTeamAsync_ProjectsToReadModel()
     {
@@ -168,10 +155,6 @@ public sealed class TeamServiceEarlyEntryTests
         row.EntryDate.Should().Be(new LocalDate(2026, 7, 4));
         row.ProjectName.Should().Be("Lanterns");
     }
-
-    // ==========================================================================
-    // AddEarlyEntryGrantAsync
-    // ==========================================================================
 
     [HumansFact]
     public async Task AddEarlyEntryGrantAsync_TeamEnabled_AddsAndAudits()
@@ -195,7 +178,7 @@ public sealed class TeamServiceEarlyEntryTests
                 g.CreatedAt == _clock.GetCurrentInstant()),
             Arg.Any<CancellationToken>());
         await _audit.Received(1).LogAsync(
-            AuditAction.EarlyEntryGranted, nameof(TeamEarlyEntryGrant), Arg.Any<Guid>(),
+            TeamsAuditActions.EarlyEntryGranted, nameof(TeamEarlyEntryGrant), Arg.Any<Guid>(),
             Arg.Any<string>(), actor, Arg.Any<Guid?>(), Arg.Any<string?>());
     }
 
@@ -238,10 +221,6 @@ public sealed class TeamServiceEarlyEntryTests
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*not found*");
     }
 
-    // ==========================================================================
-    // EditEarlyEntryGrantAsync
-    // ==========================================================================
-
     [HumansFact]
     public async Task EditEarlyEntryGrantAsync_UpdatesFieldsAndAudits()
     {
@@ -258,7 +237,7 @@ public sealed class TeamServiceEarlyEntryTests
         grant.UpdatedAt.Should().Be(_clock.GetCurrentInstant());
         await _repo.Received(1).UpdateEarlyEntryGrantAsync(grant, Arg.Any<CancellationToken>());
         await _audit.Received(1).LogAsync(
-            AuditAction.EarlyEntryUpdated, nameof(TeamEarlyEntryGrant), grant.Id,
+            TeamsAuditActions.EarlyEntryUpdated, nameof(TeamEarlyEntryGrant), grant.Id,
             Arg.Any<string>(), actor, Arg.Any<Guid?>(), Arg.Any<string?>());
     }
 
@@ -286,13 +265,9 @@ public sealed class TeamServiceEarlyEntryTests
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*not found*");
         await _repo.DidNotReceive().UpdateEarlyEntryGrantAsync(Arg.Any<TeamEarlyEntryGrant>(), Arg.Any<CancellationToken>());
         await _audit.DidNotReceive().LogAsync(
-            Arg.Any<AuditAction>(), Arg.Any<string>(), Arg.Any<Guid>(),
+            Arg.Any<AuditActionDefinition>(), Arg.Any<string>(), Arg.Any<Guid>(),
             Arg.Any<string>(), Arg.Any<Guid>(), Arg.Any<Guid?>(), Arg.Any<string?>());
     }
-
-    // ==========================================================================
-    // RemoveEarlyEntryGrantAsync
-    // ==========================================================================
 
     [HumansFact]
     public async Task RemoveEarlyEntryGrantAsync_DeletesAndAudits()
@@ -307,7 +282,7 @@ public sealed class TeamServiceEarlyEntryTests
 
         await _repo.Received(1).RemoveEarlyEntryGrantAsync(grant.Id, Arg.Any<CancellationToken>());
         await _audit.Received(1).LogAsync(
-            AuditAction.EarlyEntryRevoked, nameof(TeamEarlyEntryGrant), grant.Id,
+            TeamsAuditActions.EarlyEntryRevoked, nameof(TeamEarlyEntryGrant), grant.Id,
             Arg.Any<string>(), actor, Arg.Any<Guid?>(), Arg.Any<string?>());
     }
 
@@ -321,7 +296,7 @@ public sealed class TeamServiceEarlyEntryTests
 
         await _repo.DidNotReceive().RemoveEarlyEntryGrantAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>());
         await _audit.DidNotReceive().LogAsync(
-            Arg.Any<AuditAction>(), Arg.Any<string>(), Arg.Any<Guid>(),
+            Arg.Any<AuditActionDefinition>(), Arg.Any<string>(), Arg.Any<Guid>(),
             Arg.Any<string>(), Arg.Any<Guid>(), Arg.Any<Guid?>(), Arg.Any<string?>());
     }
 
@@ -335,13 +310,9 @@ public sealed class TeamServiceEarlyEntryTests
 
         await _repo.DidNotReceive().RemoveEarlyEntryGrantAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>());
         await _audit.DidNotReceive().LogAsync(
-            Arg.Any<AuditAction>(), Arg.Any<string>(), Arg.Any<Guid>(),
+            Arg.Any<AuditActionDefinition>(), Arg.Any<string>(), Arg.Any<Guid>(),
             Arg.Any<string>(), Arg.Any<Guid>(), Arg.Any<Guid?>(), Arg.Any<string?>());
     }
-
-    // ==========================================================================
-    // EraseForUserAsync (right-to-erasure)
-    // ==========================================================================
 
     [HumansFact]
     public async Task EraseForUserAsync_EndsMembershipsDeletesRequestsAndGrants()
@@ -367,10 +338,6 @@ public sealed class TeamServiceEarlyEntryTests
 
         await _repo.DidNotReceive().RemoveEarlyEntryGrantsForUserAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>());
     }
-
-    // ==========================================================================
-    // ReassignAsync (merge fold)
-    // ==========================================================================
 
     [HumansFact]
     public async Task ReassignAsync_MovesRolesThroughAuthorizedRemoval_AndRetriesCoordinatorSync()
@@ -424,10 +391,6 @@ public sealed class TeamServiceEarlyEntryTests
         await _repo.Received(1).ReassignEarlyEntryGrantsAsync(source, target, Arg.Any<CancellationToken>());
     }
 
-    // ==========================================================================
-    // UpdateTeamAsync — EarlyEntryEnabled flag toggle
-    // ==========================================================================
-
     [HumansFact]
     public async Task UpdateTeamAsync_EnablingEarlyEntry_SetsFlag()
     {
@@ -441,10 +404,6 @@ public sealed class TeamServiceEarlyEntryTests
 
         team.EarlyEntryEnabled.Should().BeTrue();
     }
-
-    // ==========================================================================
-    // ContributeForUserAsync (GDPR export)
-    // ==========================================================================
 
     [HumansFact]
     public async Task ContributeForUserAsync_IncludesEarlyEntrySlice()
@@ -466,7 +425,6 @@ public sealed class TeamServiceEarlyEntryTests
         var items = eeSlice.Data.Should().BeAssignableTo<System.Collections.IEnumerable>().Subject;
         items.Cast<object>().Should().ContainSingle();
 
-        // Assert projected field values via JSON serialization (mirrors ExpenseReportServiceGdprTests pattern)
         var json = System.Text.Json.JsonSerializer.Serialize(eeSlice.Data);
         json.Should().Contain("\"TeamName\":\"Pyro\"");
         json.Should().Contain("\"ProjectName\":\"Big Burn\"");

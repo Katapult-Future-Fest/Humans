@@ -2,6 +2,7 @@ using System.Reflection;
 using System.Security.Claims;
 using Humans.Web.Extensions;
 using Humans.Backdoor.Contracts;
+using Humans.Base.Attributes;
 using Humans.Base.Constants;
 using Humans.Web.Authorization;
 using Humans.Web.Controllers;
@@ -19,46 +20,34 @@ using Humans.Users.Controllers;
 namespace Humans.Web.Tests.Authorization;
 
 /// <summary>
-/// Verifies <see cref="MembershipRequiredFilter"/> routes authenticated users by their stored
-/// <see cref="UserState"/>: only <see cref="UserState.Active"/> reaches a non-exempt controller;
-/// <see cref="UserState.Bare"/> (and unseeded null) go to the onboarding widget;
-/// <see cref="UserState.DeletePending"/> goes to the cancel-deletion screen; and the walled states
-/// go to the account-status page. Exempt controllers and anonymous requests pass straight through.
+/// Only <see cref="UserState.Active"/> reaches a non-exempt controller; Bare and unseeded go to onboarding,
+/// DeletePending to cancel-deletion, and the walled states to the account-status page.
 /// </summary>
 public class MembershipRequiredFilterTests
 {
 
-    // OnboardingWidgetController is internal to Humans.Onboarding since that section's G5,
-    // so it cannot be named by typeof here. Resolved by reflection through the discovered
-    // section assemblies, throwing on a miss so a rename cannot quietly drop the row.
+    // Section controllers are internal, so they are resolved by name; a miss throws rather than dropping a row.
     private static readonly Type OnboardingWidgetControllerType =
         SectionDiscoveryExtensions.SectionAssemblies()
             .Select(a => a.GetType("Humans.Onboarding.Controllers.OnboardingWidgetController", throwOnError: false))
             .FirstOrDefault(t => t is not null)
         ?? throw new InvalidOperationException(
             "Humans.Onboarding.Controllers.OnboardingWidgetController not found in any section assembly.");
-    // MemberOutboxController is internal to Humans.Email and serves /Email/Outbox.
     private static readonly Type MemberOutboxControllerType =
         SectionDiscoveryExtensions.SectionAssemblies()
             .Select(a => a.GetType("Humans.Email.Controllers.MemberOutboxController", throwOnError: false))
             .FirstOrDefault(t => t is not null)
         ?? throw new InvalidOperationException(
             "Humans.Email.Controllers.MemberOutboxController not found in any section assembly.");
-    // CommunicationPreferencesController is internal to Humans.Email and serves
-    // /Email/CommunicationPreferences (Users decomposition commit 14).
     private static readonly Type CommunicationPreferencesControllerType =
         SectionDiscoveryExtensions.SectionAssemblies()
             .Select(a => a.GetType("Humans.Email.Controllers.CommunicationPreferencesController", throwOnError: false))
             .FirstOrDefault(t => t is not null)
         ?? throw new InvalidOperationException(
             "Humans.Email.Controllers.CommunicationPreferencesController not found in any section assembly.");
-    // MemberDataController and UserController are internal to Humans.Gdpr: the member's own
-    // export/deletion-request actions and the account-status wall / pending-deletion landing.
     private static readonly Type MemberDataControllerType = GdprControllerType("MemberDataController");
     private static readonly Type UserControllerType = GdprControllerType("UserController");
-    // MyDataController is internal to Humans.Consent: the My Data page shell at /Consent/MyData.
     private static readonly Type MyDataControllerType = SectionControllerType("Humans.Consent", "MyDataController");
-    // CantinaProfileController is internal to Humans.Cantina: the dietary form at /Cantina/Dietary.
     private static readonly Type CantinaProfileControllerType = SectionControllerType("Humans.Cantina", "CantinaProfileController");
     private static readonly Type TicketParticipationControllerType = SectionControllerType("Humans.Tickets", "TicketParticipationController");
     private static readonly Type WorkspaceIdentityControllerType = SectionControllerType("Humans.GoogleIntegration", "WorkspaceIdentityController");
@@ -158,8 +147,7 @@ public class MembershipRequiredFilterTests
     [InlineData(UserState.DeletePending)]
     public async Task Non_active_users_retain_profile_and_email_self_service(UserState state)
     {
-        // Resolve the actual extracted actions; their controller identity is what the global
-        // filter sees, whichever section's URL serves them.
+        // The global filter sees the controller identity, whichever section's URL serves the action.
         foreach (var (type, action) in new[]
         {
             (typeof(ProfileController), nameof(ProfileController.Index)),
@@ -204,8 +192,8 @@ public class MembershipRequiredFilterTests
     [InlineData(UserState.Merged, true)]
     public async Task Terminal_accounts_cannot_use_recovery_exemptions(UserState state, bool hasNames)
     {
-        // Exercise both filters in their registered order. Anonymization clears names;
-        // it must never send a tombstone back through the editable onboarding form.
+        // Both filters in registered order: anonymization clears names, and must never send a tombstone back
+        // through the onboarding form.
         foreach (var type in new[]
         {
             typeof(ProfileController), typeof(ProfileEmailsController),
@@ -280,7 +268,7 @@ public class MembershipRequiredFilterTests
         Assert.NotEmpty(actions);
 
         foreach (var method in actions)
-            foreach (var role in new[] { null, RoleNames.Admin, RoleNames.HumanAdmin, RoleNames.Board })
+            foreach (var role in new[] { null, RoleNames.Admin, UsersRoles.UsersAdmin, RoleNames.Board })
             {
                 var (result, nextCalled) = await RunAsync(
                     method.DeclaringType!.Name[..^"Controller".Length], method.Name, state,
@@ -330,6 +318,40 @@ public class MembershipRequiredFilterTests
         Assert.Null(result);
     }
 
+    /// <summary>An action's own allowance wins over its controller's, in both directions.</summary>
+    [HumansTheory]
+    [InlineData(UserState.Bare, typeof(AllowedController), nameof(AllowedController.Plain), true)]
+    [InlineData(UserState.Deleted, typeof(AllowedController), nameof(AllowedController.Plain), false)]
+    [InlineData(UserState.Deleted, typeof(AllowedController), nameof(AllowedController.Wall), true)]
+    [InlineData(UserState.Bare, typeof(GatedController), nameof(GatedController.Plain), false)]
+    [InlineData(UserState.Bare, typeof(GatedController), nameof(GatedController.Allowed), true)]
+    public async Task Attribute_on_the_action_or_its_controller_opens_the_gate(
+        UserState state, Type type, string action, bool expectPass)
+    {
+        var (result, nextCalled) = await RunAsync(
+            "Stub", action, state, controllerType: type, actionMethod: type.GetMethod(action)!);
+
+        Assert.Equal(expectPass, nextCalled);
+        Assert.Equal(expectPass, result is null);
+    }
+
+    [AllowBeforeActiveMembership]
+    private sealed class AllowedController : Controller
+    {
+        public IActionResult Plain() => Ok();
+
+        [AllowBeforeActiveMembership(Terminal = true)]
+        public IActionResult Wall() => Ok();
+    }
+
+    private sealed class GatedController : Controller
+    {
+        public IActionResult Plain() => Ok();
+
+        [AllowBeforeActiveMembership]
+        public IActionResult Allowed() => Ok();
+    }
+
     private static async Task<(IActionResult? Result, bool NextCalled)> RunAsync(
         string controllerName,
         string actionName,
@@ -338,10 +360,11 @@ public class MembershipRequiredFilterTests
         string? role = null,
         string authenticationType = "test",
         MethodInfo? actionMethod = null,
-        bool? nameGateHasNames = null)
+        bool? nameGateHasNames = null,
+        Type? controllerType = null)
     {
         var sut = new MembershipRequiredFilter();
-        var ctx = BuildExecutingContext(controllerName, actionName, authenticated, state, role, authenticationType, actionMethod);
+        var ctx = BuildExecutingContext(controllerName, actionName, authenticated, state, role, authenticationType, actionMethod, controllerType);
         var nextCalled = false;
 
         Task<ActionExecutedContext> ExecuteActionAsync()
@@ -375,9 +398,8 @@ public class MembershipRequiredFilterTests
     }
 
     /// <summary>
-    /// A Backdoor API key never passes through claims transformation, so its principal carries no
-    /// state claim. The gate must let it through rather than redirect a JSON client to the
-    /// onboarding page (nobodies-collective/Humans#1128).
+    /// A Backdoor API key skips claims transformation, so it carries no state claim; the gate must not redirect a
+    /// JSON client to onboarding.
     /// </summary>
     [HumansFact]
     public async Task Backdoor_key_principal_reaches_a_non_exempt_controller_without_a_state_claim()
@@ -403,7 +425,8 @@ public class MembershipRequiredFilterTests
         UserState? state,
         string? role,
         string authenticationType,
-        MethodInfo? actionMethod)
+        MethodInfo? actionMethod,
+        Type? explicitControllerType = null)
     {
         ClaimsIdentity identity;
         if (authenticated)
@@ -429,19 +452,18 @@ public class MembershipRequiredFilterTests
             User = new ClaimsPrincipal(identity),
         };
 
-        // Use a real controller type so the action descriptor resolves a valid
-        // ControllerTypeInfo — required for the AllowAnonymous reflection check.
-        var controllerType = controllerName switch
+        // The real controller type: the gate reads [AllowAnonymous] and [AllowBeforeActiveMembership] off it.
+        var controllerType = explicitControllerType ?? controllerName switch
         {
-            "OnboardingWidget" => OnboardingWidgetControllerType,
             "Profile" => typeof(ProfileController),
             "ProfileEmails" => typeof(ProfileEmailsController),
             "ProfileView" => typeof(ProfileViewController),
             "Account" => typeof(AccountController),
             "Language" => typeof(LanguageController),
-            "User" => UserControllerType,
-            "MemberData" => MemberDataControllerType,
-            _ => typeof(HomeController),
+            "Home" => typeof(HomeController),
+            _ => SectionDiscoveryExtensions.SectionAssemblies()
+                .SelectMany(a => a.GetTypes())
+                .Single(t => string.Equals(t.Name, controllerName + "Controller", StringComparison.Ordinal)),
         };
         var actionDescriptor = new ControllerActionDescriptor
         {
@@ -459,8 +481,7 @@ public class MembershipRequiredFilterTests
             new RouteData(),
             actionDescriptor);
 
-        // Provide a fake controller instance — the filter only reads its
-        // ControllerContext.ActionDescriptor.ControllerName.
+        // The filter only reads ControllerContext.ActionDescriptor.ControllerName.
         var stubController = new StubController
         {
             ControllerContext = new ControllerContext(actionContext),

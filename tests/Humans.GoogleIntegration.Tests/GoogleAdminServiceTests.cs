@@ -14,15 +14,6 @@ using Humans.GoogleIntegration.Services;
 
 namespace Humans.GoogleIntegration.Tests;
 
-/// <summary>
-/// Unit tests for the migrated Google Integration
-/// <see cref="GoogleAdminService"/>. After the §15 migration the service has
-/// no DbContext dependency — cross-section data access goes through
-/// <see cref="IUserService"/>, <see cref="IUserEmailService"/>,
-/// <see cref="ITeamService"/>, and <see cref="ITeamResourceManagement"/>. These
-/// tests pin down both the Google Workspace orchestration contract and the
-/// owning-service delegation boundary.
-/// </summary>
 public class GoogleAdminServiceTests
 {
     private readonly IGoogleWorkspaceUserService _workspaceUserService;
@@ -48,6 +39,8 @@ public class GoogleAdminServiceTests
         _userService = Substitute.For<IUserService>();
         _workspaceIdentities = WorkspaceIdentityFakes.ResolvingThrough(_userService);
         _userEmailService = Substitute.For<IUserEmailService>();
+        _userEmailService.AddVerifiedEmailAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(new UserEmailAddResult(Guid.NewGuid(), true, false));
         _auditLogService = Substitute.For<IAuditLogService>();
 
         teamResourceService.GetActiveResourceCountsByTeamAsync(Arg.Any<CancellationToken>())
@@ -76,8 +69,6 @@ public class GoogleAdminServiceTests
             _auditLogService,
             _logger);
     }
-
-    // --- GetWorkspaceAccountListAsync ---
 
     [HumansTheory]
     [Xunit.InlineData(false)]
@@ -224,8 +215,6 @@ public class GoogleAdminServiceTests
         result.TotalAccounts.Should().Be(0);
     }
 
-    // --- ProvisionStandaloneAccountAsync ---
-
     [HumansFact]
     public async Task ProvisionStandaloneAccountAsync_RejectsInvalidUsernameBeforeWorkspaceReadsOrWrites()
     {
@@ -264,7 +253,7 @@ public class GoogleAdminServiceTests
             Xunit.TestContext.Current.CancellationToken);
 
         await _auditLogService.Received(1).LogAsync(
-            Arg.Any<AuditAction>(),
+            Arg.Any<AuditActionDefinition>(),
             Arg.Any<string>(), Arg.Any<Guid>(),
             Arg.Any<string>(), _actorUserId,
             Arg.Any<Guid?>(), Arg.Any<string?>());
@@ -320,7 +309,7 @@ public class GoogleAdminServiceTests
             Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(),
             Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
         await _auditLogService.DidNotReceive().LogAsync(
-            Arg.Any<AuditAction>(),
+            Arg.Any<AuditActionDefinition>(),
             Arg.Any<string>(), Arg.Any<Guid>(),
             Arg.Any<string>(), Arg.Any<Guid>(),
             Arg.Any<Guid?>(), Arg.Any<string?>());
@@ -389,8 +378,6 @@ public class GoogleAdminServiceTests
             Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
     }
 
-    // --- SuspendAccountAsync ---
-
     [HumansFact]
     public async Task SuspendAccountAsync_SuspendsAndAudits()
     {
@@ -405,7 +392,7 @@ public class GoogleAdminServiceTests
 
         // Admin-initiated suspend: the readable address belongs in the audit row.
         await _auditLogService.Received(1).LogAsync(
-            AuditAction.WorkspaceAccountSuspended,
+            GoogleIntegrationAuditActions.WorkspaceAccountSuspended,
             Arg.Any<string>(), Arg.Any<Guid>(),
             Arg.Is<string>(s => s.Contains("test@nobodies.team")), _actorUserId,
             Arg.Any<Guid?>(), Arg.Any<string?>());
@@ -425,7 +412,7 @@ public class GoogleAdminServiceTests
             .SuspendAccountAsync("erased@nobodies.team", Arg.Any<CancellationToken>());
 
         await _auditLogService.Received(1).LogAsync(
-            AuditAction.WorkspaceAccountSuspended,
+            GoogleIntegrationAuditActions.WorkspaceAccountSuspended,
             Arg.Any<string>(), Arg.Any<Guid>(),
             Arg.Is<string>(s => !s.Contains("erased@nobodies.team")), _actorUserId,
             Arg.Any<Guid?>(), Arg.Any<string?>());
@@ -444,8 +431,6 @@ public class GoogleAdminServiceTests
         result.ErrorMessage.Should().Contain("Failed to suspend");
     }
 
-    // --- ReactivateAccountAsync ---
-
     [HumansFact]
     public async Task ReactivateAccountAsync_ReactivatesAndAudits()
     {
@@ -458,8 +443,6 @@ public class GoogleAdminServiceTests
         await _workspaceUserService.Received(1)
             .ReactivateAccountAsync("test@nobodies.team", Arg.Any<CancellationToken>());
     }
-
-    // --- ResetPasswordAsync ---
 
     [HumansFact]
     public async Task ResetPasswordAsync_ResetsAndReturnsNewPassword()
@@ -494,7 +477,7 @@ public class GoogleAdminServiceTests
         // needs the new temporary password back. Otherwise they retry the
         // reset, lock the human out further, and we own the confusion.
         _auditLogService.LogAsync(
-                AuditAction.WorkspaceAccountPasswordReset,
+                GoogleIntegrationAuditActions.WorkspaceAccountPasswordReset,
                 Arg.Any<string>(), Arg.Any<Guid>(),
                 Arg.Any<string>(), Arg.Any<Guid>(),
                 Arg.Any<Guid?>(), Arg.Any<string?>())
@@ -542,14 +525,12 @@ public class GoogleAdminServiceTests
         await _service.ResetPasswordAsync("ben.tree@nobodies.team", _actorUserId, Xunit.TestContext.Current.CancellationToken);
 
         await _auditLogService.Received(1).LogAsync(
-            AuditAction.WorkspaceAccountPasswordReset,
+            GoogleIntegrationAuditActions.WorkspaceAccountPasswordReset,
             "WorkspaceAccount", linkedUserId,
             Arg.Is<string>(s => s.Contains("ben.tree@nobodies.team")),
             _actorUserId,
             Arg.Any<Guid?>(), Arg.Any<string?>());
     }
-
-    // --- GenerateBackupCodesAsync (tested via ResetPasswordAndGenerate2FaAsync) ---
 
     [HumansFact]
     public async Task GenerateBackupCodesAsync_ReturnsCodesAndAuditsOnSuccess()
@@ -569,7 +550,7 @@ public class GoogleAdminServiceTests
         result.BackupCode.Should().Be("aaaa-1111");
 
         await _auditLogService.Received(1).LogAsync(
-            AuditAction.WorkspaceAccountBackupCodesGenerated,
+            GoogleIntegrationAuditActions.WorkspaceAccountBackupCodesGenerated,
             "WorkspaceAccount", Guid.Empty,
             Arg.Is<string>(s => s.Contains("alice@nobodies.team") && s.Contains("3 code")),
             _actorUserId,
@@ -594,7 +575,7 @@ public class GoogleAdminServiceTests
         result.Message.Should().Contain("none were returned");
 
         await _auditLogService.DidNotReceive().LogAsync(
-            AuditAction.WorkspaceAccountBackupCodesGenerated,
+            GoogleIntegrationAuditActions.WorkspaceAccountBackupCodesGenerated,
             Arg.Any<string>(), Arg.Any<Guid>(),
             Arg.Any<string>(), Arg.Any<Guid>(),
             Arg.Any<Guid?>(), Arg.Any<string?>());
@@ -616,7 +597,7 @@ public class GoogleAdminServiceTests
         result.Message.Should().Contain("Backup-code generation failed");
 
         await _auditLogService.DidNotReceive().LogAsync(
-            AuditAction.WorkspaceAccountBackupCodesGenerated,
+            GoogleIntegrationAuditActions.WorkspaceAccountBackupCodesGenerated,
             Arg.Any<string>(), Arg.Any<Guid>(),
             Arg.Any<string>(), Arg.Any<Guid>(),
             Arg.Any<Guid?>(), Arg.Any<string?>());
@@ -635,7 +616,7 @@ public class GoogleAdminServiceTests
         // Only fail the backup-codes audit; let the password-reset audit succeed
         // so the combined method reaches the backup-code path.
         _auditLogService.LogAsync(
-                AuditAction.WorkspaceAccountBackupCodesGenerated,
+                GoogleIntegrationAuditActions.WorkspaceAccountBackupCodesGenerated,
                 Arg.Any<string>(), Arg.Any<Guid>(),
                 Arg.Any<string>(), Arg.Any<Guid>(),
                 Arg.Any<Guid?>(), Arg.Any<string?>())
@@ -647,8 +628,6 @@ public class GoogleAdminServiceTests
         result.Success.Should().BeTrue();
         result.BackupCode.Should().Be("aaaa-1111");
     }
-
-    // --- ResetPasswordAndGenerate2FaAsync ---
 
     [HumansFact]
     public async Task ResetPasswordAndGenerate2FaAsync_ReturnsBothCredentialsOnSuccess()
@@ -672,12 +651,12 @@ public class GoogleAdminServiceTests
 
         // Two audit entries — one for the password reset, one for the codes generation.
         await _auditLogService.Received(1).LogAsync(
-            AuditAction.WorkspaceAccountPasswordReset,
+            GoogleIntegrationAuditActions.WorkspaceAccountPasswordReset,
             "WorkspaceAccount", Guid.Empty,
             Arg.Any<string>(), _actorUserId,
             Arg.Any<Guid?>(), Arg.Any<string?>());
         await _auditLogService.Received(1).LogAsync(
-            AuditAction.WorkspaceAccountBackupCodesGenerated,
+            GoogleIntegrationAuditActions.WorkspaceAccountBackupCodesGenerated,
             "WorkspaceAccount", Guid.Empty,
             Arg.Any<string>(), _actorUserId,
             Arg.Any<Guid?>(), Arg.Any<string?>());
@@ -752,7 +731,7 @@ public class GoogleAdminServiceTests
 
         // Refusal is audited so the attempt shows up in the trail.
         await _auditLogService.Received(1).LogAsync(
-            AuditAction.WorkspaceAccountResetBlockedFor2Sv,
+            GoogleIntegrationAuditActions.WorkspaceAccountResetBlockedFor2Sv,
             "WorkspaceAccount", Guid.Empty,
             Arg.Is<string>(s => s.Contains("alice@nobodies.team")),
             _actorUserId,
@@ -772,7 +751,7 @@ public class GoogleAdminServiceTests
                 CreationTime: DateTime.UtcNow, LastLoginTime: null,
                 IsEnrolledIn2Sv: true));
         _auditLogService.LogAsync(
-                AuditAction.WorkspaceAccountResetBlockedFor2Sv,
+                GoogleIntegrationAuditActions.WorkspaceAccountResetBlockedFor2Sv,
                 Arg.Any<string>(), Arg.Any<Guid>(),
                 Arg.Any<string>(), Arg.Any<Guid>(),
                 Arg.Any<Guid?>(), Arg.Any<string?>())
@@ -819,8 +798,6 @@ public class GoogleAdminServiceTests
         await _workspaceUserService.DidNotReceiveWithAnyArgs().ResetPasswordAsync(null!, null!, Arg.Any<CancellationToken>());
     }
 
-    // --- LinkAccountAsync ---
-
     [HumansFact]
     public async Task LinkAccountAsync_LinksEmailAndResyncs()
     {
@@ -843,7 +820,7 @@ public class GoogleAdminServiceTests
         await _teamServiceWrite.Received(1)
             .EnqueueGoogleResyncForUserTeamsAsync(userId, Arg.Any<CancellationToken>());
         await _auditLogService.Received(1).LogAsync(
-            AuditAction.WorkspaceAccountLinked,
+            GoogleIntegrationAuditActions.WorkspaceAccountLinked,
             "WorkspaceAccount", userId,
             Arg.Any<string>(), _actorUserId,
             Arg.Any<Guid?>(), Arg.Any<string?>());
@@ -881,8 +858,6 @@ public class GoogleAdminServiceTests
         await _userEmailService.DidNotReceive()
             .AddVerifiedEmailAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
-
-    // --- LinkGroupToTeamAsync ---
 
     [HumansFact]
     public async Task LinkGroupToTeamAsync_LinksGroupAndSaves()
@@ -936,8 +911,6 @@ public class GoogleAdminServiceTests
         await _teamServiceWrite.Received(1).SetGoogleGroupPrefixAsync(
             teamId, "old-prefix", Arg.Any<CancellationToken>());
     }
-
-    // --- GetActiveTeamsAsync ---
 
     [HumansFact]
     public async Task GetActiveTeamsAsync_ReturnsOnlyActiveTeamsOrdered()

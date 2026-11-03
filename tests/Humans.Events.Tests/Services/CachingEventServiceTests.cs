@@ -14,9 +14,8 @@ using Xunit;
 namespace Humans.Events.Tests.Services;
 
 /// <summary>
-/// Covers <see cref="CachingEventService.SearchAsync"/> — Events' scored search hit
-/// (nobodies-collective/Humans#1062). Served entirely from the approved-event cache warmed
-/// off the substitute inner <see cref="IEventManagement"/>; no DB involved.
+/// <see cref="CachingEventService.SearchAsync"/> is served entirely from the approved-event cache
+/// warmed off the substitute inner <see cref="IEventManagement"/>; no DB involved.
 /// </summary>
 public sealed class CachingEventServiceTests
 {
@@ -40,6 +39,26 @@ public sealed class CachingEventServiceTests
         _service = new CachingEventService(
             provider.GetRequiredService<IServiceScopeFactory>(),
             NullLogger<CachingEventService>.Instance);
+    }
+
+    [HumansTheory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Resubmission_OnlyEvictsApprovedEvent_WhenSaved(bool refused)
+    {
+        var approved = Approved("Existing event");
+        SeedApproved(approved);
+        var ct = TestContext.Current.CancellationToken;
+        await _service.GetApprovedEventsAsync(null, null, null, null, [], ct);
+        var expected = new EventSaveResult(refused ? "Events_CategoryUnavailable" : null);
+        _inner.UpdateAndResubmitAsync(approved.Id, Arg.Any<EventEdit>(), ct).Returns(expected);
+
+        var result = await _service.UpdateAndResubmitAsync(approved.Id,
+            new EventEdit(Guid.NewGuid(), null, "Edited", "Description", default, 60, null, null, false, null, null), ct);
+
+        result.Should().BeSameAs(expected);
+        var remaining = await _service.GetApprovedEventsAsync(null, null, null, null, [], ct);
+        remaining.Count.Should().Be(refused ? 1 : 0);
     }
 
     private void SeedApproved(params ApprovedEventView[] events) =>

@@ -3,9 +3,6 @@ using Humans.Governance.Domain;
 
 namespace Humans.Governance.Data;
 
-/// <summary>
-/// The only non-test reader and writer of <c>governance_membership_tiers</c>.
-/// </summary>
 internal interface IMembershipTierRepository : IRepository
 {
     Task<MembershipTierRecord?> GetAsync(Guid userId, CancellationToken ct = default);
@@ -14,9 +11,6 @@ internal interface IMembershipTierRepository : IRepository
 
     /// <summary>Inserts or overwrites the member's row.</summary>
     Task UpsertAsync(MembershipTierRecord values, CancellationToken ct = default);
-
-    /// <summary>Inserts only when the member has no row; false when one exists.</summary>
-    Task<bool> TryInsertAsync(MembershipTierRecord values, CancellationToken ct = default);
 
     /// <summary>Sets <c>ExpiresAt</c> on the rows granted by <paramref name="applicationId"/>.</summary>
     Task UpdateExpiryForApplicationAsync(Guid applicationId, NodaTime.LocalDate? expiresAt, CancellationToken ct = default);

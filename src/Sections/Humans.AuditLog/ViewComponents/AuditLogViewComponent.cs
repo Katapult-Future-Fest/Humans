@@ -5,15 +5,9 @@ using NodaTime;
 namespace Humans.AuditLog.ViewComponents;
 
 /// <summary>
-/// <c>&lt;vc:audit-log&gt;</c> — renders audit history on any page. Public, and every
-/// consuming assembly must carry <c>@addTagHelper *, Humans.AuditLog</c> in its
-/// <c>_ViewImports.cshtml</c>: a <c>&lt;vc:&gt;</c> tag with no matching tag helper ships as
-/// inert literal markup with a green build and no runtime error.
+/// Every consuming assembly needs <c>@addTagHelper *, Humans.AuditLog</c>: without it the tag ships as inert
+/// markup with a green build.
 /// </summary>
-/// <remarks>
-/// A section that wants to <em>show</em> audit history emits this tag with a predicate; the
-/// AuditLog section owns the read and the render. Sections do not read audit themselves.
-/// </remarks>
 public class AuditLogViewComponent(IAuditViewerService auditViewer, ILogger<AuditLogViewComponent> logger)
     : ViewComponent
 {
@@ -36,16 +30,10 @@ public class AuditLogViewComponent(IAuditViewerService auditViewer, ILogger<Audi
         string emptyText = "No audit history.",
         bool showCard = true)
     {
-        IReadOnlyList<AuditAction>? actionList = null;
-        if (!string.IsNullOrWhiteSpace(actions))
-        {
-            actionList = actions
-                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                .Select(a => Enum.TryParse<AuditAction>(a, ignoreCase: true, out var parsed) ? (AuditAction?)parsed : null)
-                .Where(a => a.HasValue)
-                .Select(a => a!.Value)
-                .ToList();
-        }
+        // Names pass through as stored: an unknown name matches no row rather than widening the query.
+        IReadOnlyList<string>? actionList = string.IsNullOrWhiteSpace(actions)
+            ? null
+            : actions.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
         var model = new AuditLogComponentViewModel
         {
@@ -84,7 +72,7 @@ public class AuditLogViewComponent(IAuditViewerService auditViewer, ILogger<Audi
         Guid? entityId,
         IReadOnlyList<Guid>? entityIds,
         Guid? userId,
-        IReadOnlyList<AuditAction>? actionList,
+        IReadOnlyList<string>? actionList,
         int limit,
         CancellationToken ct)
     {
@@ -110,15 +98,12 @@ public class AuditLogViewComponent(IAuditViewerService auditViewer, ILogger<Audi
     private static string ViewNameFor(string layout) => layout switch
     {
         "table" => "Table",
-        "activity" => "Activity",
         _ => "Default"
     };
 
     /// <summary>
-    /// Keyed header overrides for <c>layout="table"</c>, e.g. <c>when:Fecha,actor:Remitente</c>.
-    /// Keyed rather than positional so reordering <c>columns</c> can never silently mis-header
-    /// the table. The section ships no resource set, so a localized host page passes its own
-    /// strings in, as it already does for <c>title</c> and <c>emptyText</c>.
+    /// Keyed, not positional, so reordering <c>columns</c> can't mis-header the table. A localized host page passes
+    /// its own strings, as for <c>title</c>.
     /// </summary>
     private static IReadOnlyDictionary<string, string> ParseColumnLabels(string? columnLabels)
     {
@@ -141,7 +126,7 @@ public class AuditLogViewComponent(IAuditViewerService auditViewer, ILogger<Audi
         return labels;
     }
 
-    /// <summary>Parsed like <c>actions</c>: split on comma, trim, ignore unknown. Empty ⇒ all.</summary>
+    /// <summary>Split on comma, trim, ignore unknown. Empty ⇒ all.</summary>
     private static IReadOnlyList<string> SelectColumns(string? columns)
     {
         if (string.IsNullOrWhiteSpace(columns))
@@ -162,14 +147,12 @@ internal sealed class AuditLogComponentViewModel
     public bool ShowCard { get; set; } = true;
     public IReadOnlyList<AuditEvent> Events { get; set; } = [];
 
-    /// <summary>Columns to render for <c>layout="table"</c>, in canonical order.</summary>
     public IReadOnlyList<string> Columns { get; set; } = [];
 
     /// <summary>Header overrides keyed by canonical column name; a missing key renders the name.</summary>
     public IReadOnlyDictionary<string, string> ColumnLabels { get; set; } =
         new Dictionary<string, string>(StringComparer.Ordinal);
 
-    /// <summary>The header to render for <paramref name="column"/>.</summary>
     public string Header(string column) =>
         ColumnLabels.TryGetValue(column, out var label) ? label : column;
 }

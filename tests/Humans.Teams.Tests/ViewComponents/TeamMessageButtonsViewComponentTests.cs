@@ -31,14 +31,14 @@ public sealed class TeamMessageButtonsViewComponentTests
         _commPrefs.AcceptsFacilitatedMessagesAsync(_targetId, Arg.Any<CancellationToken>()).Returns(true);
         _users.GetUserInfoAsync(_targetId, Arg.Any<CancellationToken>()).Returns(new UserInfo(
             _targetId, "Target", false, "en", null, Instant.FromUnixTimeSeconds(0),
-            null, null, null, null, null, null, null,
+            null, null, null, null, null, null,
             null, null, null, [], [], [], null, []));
     }
 
     [HumansFact]
     public void Parts_ContributeTheButtonsToTheProfileSlot()
     {
-        IUserPart contribution = new SectionUserParts();
+        IUserPart contribution = ((IUserPart)new Section());
 
         contribution.Parts().Should().Contain(
             new UserPart(UserPartSlots.Profile, typeof(TeamMessageButtonsViewComponent), 200));

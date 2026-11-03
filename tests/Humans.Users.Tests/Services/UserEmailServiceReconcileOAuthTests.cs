@@ -13,10 +13,8 @@ using Humans.Users.Services;
 namespace Humans.Users.Tests.Services;
 
 /// <summary>
-/// Tests for <see cref="IUserEmailService.ReconcileOAuthIdentityAsync"/>.
-/// The reconcile method is the
-/// single OAuth-callback entry point that mutates <see cref="UserEmail"/>
-/// rows; it owns every audit row written for the OAuth path.
+/// The reconcile is the single OAuth-callback entry point that mutates <see cref="UserEmail"/>
+/// rows, and it writes every audit row for the OAuth path.
 /// </summary>
 public class UserEmailServiceReconcileOAuthTests
 {
@@ -78,8 +76,6 @@ public class UserEmailServiceReconcileOAuthTests
         return new UserEmailReconcilePlanResult(mutatedUserIds);
     }
 
-    // ─── NoChange ────────────────────────────────────────────────────────────
-
     [HumansFact]
     public async Task NoChange_TaggedRowAtClaimEmail_NoMutation_NoAudit()
     {
@@ -108,12 +104,10 @@ public class UserEmailServiceReconcileOAuthTests
             Arg.Any<UserEmail?>(), Arg.Any<UserEmail?>(),
             Arg.Any<CancellationToken>());
         await _auditLogService.DidNotReceive().LogAsync(
-            Arg.Any<AuditAction>(), Arg.Any<string>(), Arg.Any<Guid>(),
+            Arg.Any<AuditActionDefinition>(), Arg.Any<string>(), Arg.Any<Guid>(),
             Arg.Any<string>(), Arg.Any<Guid>(),
             Arg.Any<Guid?>(), Arg.Any<string?>());
     }
-
-    // ─── EmailRewritten ──────────────────────────────────────────────────────
 
     [HumansFact]
     public async Task EmailRewritten_TaggedRowAtDifferentEmail_NoSiblingHoldsClaim_RewritesInPlace()
@@ -152,13 +146,11 @@ public class UserEmailServiceReconcileOAuthTests
         // The renamed-away address stops being the Google identity.
         await _googleIdentity.Received(1).ClearIfAddressAsync(userId, "old@example.com", Arg.Any<CancellationToken>());
         await _auditLogService.Received(1).LogAsync(
-            AuditAction.GoogleEmailRenamed,
+            UsersAuditActions.GoogleEmailRenamed,
             Arg.Any<string>(), userId,
             Arg.Any<string>(), Arg.Any<Guid>(),
             Arg.Any<Guid?>(), Arg.Any<string?>());
     }
-
-    // ─── TagMoved (tagged-row + sibling-at-claim) ────────────────────────────
 
     [HumansFact]
     public async Task TagMoved_TaggedRowExistsAndSiblingHoldsClaim_UnionsFlagsForceVerifyDeletesOld()
@@ -219,7 +211,7 @@ public class UserEmailServiceReconcileOAuthTests
             rowToInsert: Arg.Is<UserEmail?>(r => r == null),
             Arg.Any<CancellationToken>());
         await _auditLogService.Received(1).LogAsync(
-            AuditAction.GoogleEmailRenamed,
+            UsersAuditActions.GoogleEmailRenamed,
             Arg.Any<string>(), userId,
             Arg.Any<string>(), Arg.Any<Guid>(),
             Arg.Any<Guid?>(), Arg.Any<string?>());
@@ -266,8 +258,6 @@ public class UserEmailServiceReconcileOAuthTests
             Arg.Any<CancellationToken>());
     }
 
-    // ─── NewRowCreated ───────────────────────────────────────────────────────
-
     [HumansFact]
     public async Task NewRowCreated_NoTaggedRow_NoSibling_NoCrossUser_InsertsVerifiedTaggedRow()
     {
@@ -297,13 +287,11 @@ public class UserEmailServiceReconcileOAuthTests
         result.AffectedRowId.Should().Be(planned.Id);
 
         await _auditLogService.Received(1).LogAsync(
-            AuditAction.UserEmailLinked,
+            UsersAuditActions.UserEmailLinked,
             Arg.Any<string>(), userId,
             Arg.Any<string>(), Arg.Any<Guid>(),
             Arg.Any<Guid?>(), Arg.Any<string?>());
     }
-
-    // ─── CrossUserDisplaced ──────────────────────────────────────────────────
 
     [HumansFact]
     public async Task CrossUserDisplaced_ClaimVerified_OtherUserHoldsClaim_DeletesOtherRowProceedsAndAudits()
@@ -359,12 +347,12 @@ public class UserEmailServiceReconcileOAuthTests
             Arg.Any<CancellationToken>());
         // Paired audit rows: collision on signing user + displacement on displaced user.
         await _auditLogService.Received(1).LogAsync(
-            AuditAction.OAuthRenameCollision,
+            UsersAuditActions.OAuthRenameCollision,
             Arg.Any<string>(), signingUserId,
             Arg.Any<string>(), Arg.Any<Guid>(),
             Arg.Any<Guid?>(), Arg.Any<string?>());
         await _auditLogService.Received(1).LogAsync(
-            AuditAction.UserEmailDisplacedByOAuthRename,
+            UsersAuditActions.UserEmailDisplacedByOAuthRename,
             Arg.Any<string>(), displacedUserId,
             Arg.Any<string>(), Arg.Any<Guid>(),
             Arg.Any<Guid?>(), Arg.Any<string?>());
@@ -400,7 +388,7 @@ public class UserEmailServiceReconcileOAuthTests
         result.Outcome.Should().Be(ReconcileOutcome.CrossUserDisplaced);
         result.DisplacedUserLeftWithoutVerifiedEmail.Should().BeTrue();
         await _auditLogService.Received(1).LogAsync(
-            AuditAction.UserEmailDisplacedByOAuthRename,
+            UsersAuditActions.UserEmailDisplacedByOAuthRename,
             Arg.Any<string>(), displacedUserId,
             // Audit description must explicitly state the empty-verified state.
             Arg.Is<string>(s => s.Contains("zero verified", StringComparison.OrdinalIgnoreCase)
@@ -408,8 +396,6 @@ public class UserEmailServiceReconcileOAuthTests
             Arg.Any<Guid>(),
             Arg.Any<Guid?>(), Arg.Any<string?>());
     }
-
-    // ─── CrossUserBlocked ────────────────────────────────────────────────────
 
     [HumansFact]
     public async Task CrossUserBlocked_ClaimNotVerified_OtherUserHoldsClaim_NoMutation_AuditedAttempt()
@@ -464,12 +450,12 @@ public class UserEmailServiceReconcileOAuthTests
         // The blocked attempt is audited on the signing user only — no audit
         // on the displaced user since nothing happened to them.
         await _auditLogService.Received(1).LogAsync(
-            AuditAction.OAuthRenameCollisionBlocked,
+            UsersAuditActions.OAuthRenameCollisionBlocked,
             Arg.Any<string>(), signingUserId,
             Arg.Any<string>(), Arg.Any<Guid>(),
             Arg.Any<Guid?>(), Arg.Any<string?>());
         await _auditLogService.DidNotReceive().LogAsync(
-            AuditAction.UserEmailDisplacedByOAuthRename,
+            UsersAuditActions.UserEmailDisplacedByOAuthRename,
             Arg.Any<string>(), Arg.Any<Guid>(),
             Arg.Any<string>(), Arg.Any<Guid>(),
             Arg.Any<Guid?>(), Arg.Any<string?>());

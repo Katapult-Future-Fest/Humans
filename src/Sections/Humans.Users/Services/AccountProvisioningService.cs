@@ -8,7 +8,7 @@ using NodaTime;
 
 namespace Humans.Users.Services;
 
-// Idempotent account provisioning for import jobs (ticket import, MailerLite). UserManager allowed per §2a exception.
+// Idempotent account provisioning for import jobs. UserManager allowed per the §2a exception.
 internal sealed class AccountProvisioningService(
     IUserRepository userRepository,
     IUserEmailService userEmailService,
@@ -40,7 +40,7 @@ internal sealed class AccountProvisioningService(
             if (!(await userEmailService.DeleteEmailAsync(userId, emailId, ct)).Succeeded)
                 throw new InvalidOperationException("The planned unverified email could not be removed.");
             var result = await FindOrCreateCoreAsync(email, displayName, source, ct, affectedUsers);
-            await auditLogService.LogAsync(AuditAction.UserEmailDeleted, nameof(UserEmail), emailId,
+            await auditLogService.LogAsync(UsersAuditActions.UserEmailDeleted, nameof(UserEmail), emailId,
                 $"Replaced unverified email {email} with verified import account {result.UserId} from {source}",
                 nameof(AccountProvisioningService), relatedEntityId: userId, relatedEntityType: nameof(User));
             transaction.Complete();
@@ -48,8 +48,8 @@ internal sealed class AccountProvisioningService(
         }
         finally
         {
-            // SaveChanges/decorators refresh during writes. Rebuild after transaction disposal,
-            // including on rollback, so no cached entry retains uncommitted row state.
+            // Rebuild after the transaction is disposed, including on rollback, so no cached
+            // entry keeps uncommitted row state.
             foreach (var affectedUser in affectedUsers)
                 await userInfoRefresher.RefreshAsync(affectedUser, CancellationToken.None);
         }
@@ -61,7 +61,6 @@ internal sealed class AccountProvisioningService(
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(email);
 
-        // 1. Look up across OAuth / verified / unverified — via service so orchestrator owns invariants (see #687).
         var matchingUserId = (await userEmailService.FindByAddressAsync(email, aliased: true, verifiedOnly: false, ct))
             .FirstOrDefault()?.UserId;
 
@@ -82,14 +81,13 @@ internal sealed class AccountProvisioningService(
 
                 affectedUsers?.Add(existingUser.Id);
 
-                // Layer ContactSource onto self-registered users.
                 if (existingUser.ContactSource is null)
                     await userRepository.SetContactSourceIfNullAsync(existingUser.Id, source, ct);
 
                 // User/email may have committed before profile creation failed. Retry the
                 // idempotent final step before reporting a successfully provisioned account.
                 if (await userService.EnsureStubProfileAsync(existingUser.Id, ct: ct))
-                    await auditLogService.LogAsync(AuditAction.StubProfileBackfilled, nameof(User), existingUser.Id,
+                    await auditLogService.LogAsync(UsersAuditActions.StubProfileBackfilled, nameof(User), existingUser.Id,
                         $"Completed missing profile provisioning from {source}.", nameof(AccountProvisioningService));
 
                 return new AccountProvisioningResult(existingUser.Id, Created: false);
@@ -125,17 +123,15 @@ internal sealed class AccountProvisioningService(
                     throw new InvalidOperationException($"Failed to create account for {email}: {errors}");
                 }
 
-                // see nobodies-collective/Humans#687
                 await userEmailService.AddProvisionedEmailAsync(newUser.Id, email, ct);
 
-                // Stub Profile invariant; UserService owns UserInfo storage/cache.
-                // Import path seeds no names; the empty stub is filled in during onboarding.
+                // The import seeds no names; onboarding fills the stub.
                 await userService.EnsureStubProfileAsync(newUser.Id, ct: ct);
                 transaction.Complete();
             }
 
             await auditLogService.LogAsync(
-                AuditAction.ContactCreated,
+                UsersAuditActions.ContactCreated,
                 nameof(User), newUser.Id,
                 $"Account pre-created from {source} — {email}",
                 nameof(AccountProvisioningService));
@@ -193,7 +189,7 @@ internal sealed class AccountProvisioningService(
 
             if (await userService.EnsureStubProfileAsync(
                 existingUser.Id, burnerName, firstName, lastName, ct))
-                await auditLogService.LogAsync(AuditAction.StubProfileBackfilled, nameof(User), existingUser.Id,
+                await auditLogService.LogAsync(UsersAuditActions.StubProfileBackfilled, nameof(User), existingUser.Id,
                     "Completed missing profile after interrupted magic-link signup.", existingUser.Id);
             await userService.RecordLoginAsync(existingUser.Id, ct);
             return new MagicLinkSignupCompletionResult(
@@ -224,7 +220,9 @@ internal sealed class AccountProvisioningService(
 
         try
         {
-            await userEmailService.AddVerifiedEmailAsync(user.Id, email, ct);
+            var emailAddition = await userEmailService.AddVerifiedEmailAsync(user.Id, email, ct);
+            if (emailAddition.ErrorKey is not null)
+                throw new InvalidOperationException("Could not add the verified email address.");
         }
         catch (Exception ex)
         {

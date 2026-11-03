@@ -26,10 +26,7 @@ using Humans.Tickets.Services.Dtos;
 namespace Humans.Tickets.Tests.Services;
 
 /// <summary>
-/// Pure unit tests for the manual-transfer <see cref="TicketTransferService"/>:
-/// no vendor calls; approve = "mark successful", reject = "cancel with reason";
-/// request emails sender + team, decisions email sender + receiver. All deps are
-/// NSubstitute substitutes.
+/// Manual transfers make no vendor calls: approve = "mark successful", reject = "cancel with reason".
 /// </summary>
 public sealed class TicketTransferServiceTests
 {
@@ -81,8 +78,6 @@ public sealed class TicketTransferServiceTests
 
     }
 
-    // ── GetConfirmationAsync ────────────────────────────────────────────────────
-
     [HumansFact]
     public async Task GetConfirmation_ReturnsSummary_ForValidPair()
     {
@@ -124,7 +119,7 @@ public sealed class TicketTransferServiceTests
     public async Task GetConfirmation_Null_WhenCheckedIn()
     {
         // A gate scan keeps Status = Valid but records CheckedInAt — a used ticket
-        // must not be transferable. nobodies-collective/Humans#736.
+        // must not be transferable.
         StubAttendee(TicketAttendeeStatus.Valid, _senderId, checkedInAt: _now);
         var confirm = await _service.GetConfirmationAsync(_attendeeId, _receiverId, _senderId, Xunit.TestContext.Current.CancellationToken);
         confirm.Should().BeNull();
@@ -161,8 +156,6 @@ public sealed class TicketTransferServiceTests
         _auditLog.ReceivedCalls().Should().BeEmpty();
     }
 
-    // ── CreateRequestAsync ──────────────────────────────────────────────────────
-
     [HumansTheory]
     [Xunit.InlineData("es", "Solicitud de transferencia de entrada")]
     [Xunit.InlineData("", "Ticket transfer requested")]
@@ -188,7 +181,7 @@ public sealed class TicketTransferServiceTests
                 && r.ReceiverEmail == "alice@example.com"),
             Arg.Any<CancellationToken>());
         await _auditLog.Received(1).LogAsync(
-            AuditAction.TicketTransferRequested, Arg.Any<string>(), Arg.Any<Guid>(),
+            TicketsAuditActions.TicketTransferRequested, Arg.Any<string>(), Arg.Any<Guid>(),
             Arg.Any<string>(), _senderId, _receiverId, Arg.Any<string>());
         // The builder is sealed with no interface, so the sent message is the assertion surface.
         await _emailService.Received(1).SendAsync(
@@ -222,7 +215,7 @@ public sealed class TicketTransferServiceTests
                 Arg.Is<TicketTransferRequest>(r => r.Id == row.Id && r.Status == TicketTransferStatus.Pending),
                 Arg.Any<CancellationToken>());
             await _auditLog.Received(1).LogAsync(
-                AuditAction.TicketTransferRequested, Arg.Any<string>(), row.Id,
+                TicketsAuditActions.TicketTransferRequested, Arg.Any<string>(), row.Id,
                 Arg.Any<string>(), _senderId, _receiverId, Arg.Any<string>());
         }
         else
@@ -358,8 +351,8 @@ public sealed class TicketTransferServiceTests
     [HumansFact]
     public async Task CreateRequest_Refuses_WhenCheckedIn()
     {
-        // Status stays Valid after a gate scan (nobodies-collective/Humans#736);
-        // the CheckedInAt guard must still block the transfer of a used ticket.
+        // Status stays Valid after a gate scan; the CheckedInAt guard must still block the
+        // transfer of a used ticket.
         StubAttendee(TicketAttendeeStatus.Valid, _senderId, checkedInAt: _now);
         var act = () => _service.CreateRequestAsync(
             new TicketTransferRequestDto(_attendeeId, _receiverId, "x"), _senderId, Xunit.TestContext.Current.CancellationToken);
@@ -415,7 +408,7 @@ public sealed class TicketTransferServiceTests
         results.Should().ContainSingle(result => string.Equals(
             result.RefusalKey, "Tickets_TicketTransfer_AlreadyPending", StringComparison.Ordinal));
         _auditLog.ReceivedCalls().Should().ContainSingle(call =>
-            call.GetArguments().OfType<AuditAction>().Contains(AuditAction.TicketTransferRequested));
+            call.GetArguments().OfType<AuditActionDefinition>().Contains(TicketsAuditActions.TicketTransferRequested));
     }
 
     private sealed class PauseFirstTransferSave : SaveChangesInterceptor
@@ -439,8 +432,6 @@ public sealed class TicketTransferServiceTests
         }
     }
 
-    // ── CancelAsync ─────────────────────────────────────────────────────────────
-
     [HumansFact]
     public async Task Cancel_SetsCancelled_ForSender()
     {
@@ -451,7 +442,7 @@ public sealed class TicketTransferServiceTests
 
         req.Status.Should().Be(TicketTransferStatus.Cancelled);
         await _auditLog.Received(1).LogAsync(
-            AuditAction.TicketTransferCancelled, Arg.Any<string>(), req.Id, Arg.Any<string>(), _senderId);
+            TicketsAuditActions.TicketTransferCancelled, Arg.Any<string>(), req.Id, Arg.Any<string>(), _senderId);
     }
 
     [HumansFact]
@@ -481,8 +472,6 @@ public sealed class TicketTransferServiceTests
         req.Status.Should().Be(TicketTransferStatus.Pending);
     }
 
-    // ── ApproveAsync (mark successful) ──────────────────────────────────────────
-
     [HumansFact]
     public async Task Approve_MarksApproved_NoVendor_EmailsBothParties()
     {
@@ -495,7 +484,7 @@ public sealed class TicketTransferServiceTests
         req.Status.Should().Be(TicketTransferStatus.Approved);
         req.DecidedByUserId.Should().Be(_adminId);
         await _auditLog.Received(1).LogAsync(
-            AuditAction.TicketTransferApproved, Arg.Any<string>(), req.Id, Arg.Any<string>(),
+            TicketsAuditActions.TicketTransferApproved, Arg.Any<string>(), req.Id, Arg.Any<string>(),
             _adminId, _senderId, Arg.Any<string>());
         // Sender + Receiver each get a "successful" decision email.
         await _emailService.Received(2).SendAsync(
@@ -559,8 +548,6 @@ public sealed class TicketTransferServiceTests
                 && m.Subject == "Ticket transfer complete"),
             Arg.Any<CancellationToken>());
     }
-
-    // ── ProcessTransferAsync (automated void+reissue) ───────────────────────────
 
     [HumansTheory]
     [Xunit.InlineData(TicketAttendeeStatus.Valid, true, false)]
@@ -656,7 +643,7 @@ public sealed class TicketTransferServiceTests
         req.VendorResult.Should().Be(TicketTransferVendorResult.Failed);
         // Audited under the dedicated auto-failed action, NOT TicketTransferApproved.
         await _auditLog.Received(1).LogAsync(
-            AuditAction.TicketTransferAutoFailed, Arg.Any<string>(), req.Id, Arg.Any<string>(),
+            TicketsAuditActions.TicketTransferAutoFailed, Arg.Any<string>(), req.Id, Arg.Any<string>(),
             _adminId, _senderId, Arg.Any<string>());
         await _ticketRepo.DidNotReceive().UpsertAttendeesAsync(
             Arg.Any<IReadOnlyList<TicketAttendee>>(), Arg.Any<CancellationToken>());
@@ -727,8 +714,6 @@ public sealed class TicketTransferServiceTests
             Arg.Any<CancellationToken>());
     }
 
-    // ── RetryReissueAsync (one-click recovery from a partial void) ──────────────
-
     [HumansFact]
     public async Task RetryReissue_FromHold_IssuesNewTicket_MarksApproved()
     {
@@ -768,10 +753,8 @@ public sealed class TicketTransferServiceTests
     }
 
     /// <summary>
-    /// nobodies-collective/Humans#950 — RetryReissueAsync only runs once the void
-    /// has already committed at TicketTailor, so it is entirely post-commit. An
-    /// aborted admin request must not cancel the reissue and strand the held seat.
-    /// Mirrors the <c>commitCt</c> detach in <c>WriteToVendorAsync</c>.
+    /// RetryReissueAsync runs only after the void committed at TicketTailor, so an aborted admin
+    /// request must not cancel the reissue and strand the held seat.
     /// </summary>
     [HumansFact]
     public async Task RetryReissue_AbortedRequest_StillIssuesAgainstTheHold()
@@ -904,8 +887,6 @@ public sealed class TicketTransferServiceTests
         req.VendorMessage.Should().Contain(expectedDetail);
     }
 
-    // ── RejectAsync (cancel with reason) ────────────────────────────────────────
-
     [HumansFact]
     public async Task Reject_RequiresReason()
     {
@@ -929,7 +910,7 @@ public sealed class TicketTransferServiceTests
         req.Status.Should().Be(TicketTransferStatus.Rejected);
         req.AdminNotes.Should().Be("duplicate request");
         await _auditLog.Received(1).LogAsync(
-            AuditAction.TicketTransferRejected, Arg.Any<string>(), req.Id, Arg.Any<string>(),
+            TicketsAuditActions.TicketTransferRejected, Arg.Any<string>(), req.Id, Arg.Any<string>(),
             _adminId, _senderId, Arg.Any<string>());
         await _emailService.Received(2).SendAsync(
             Arg.Is<EmailMessage>(m => m.TemplateName == "ticket_transfer_cancelled"
@@ -1047,8 +1028,6 @@ public sealed class TicketTransferServiceTests
         await _vendor.Received(1).IssueTicketAsync(Arg.Any<IssueTicketRequest>(), Arg.Any<CancellationToken>());
     }
 
-    // ── helpers ─────────────────────────────────────────────────────────────────
-
     [HumansTheory]
     [Xunit.InlineData("process", "guard")]
     [Xunit.InlineData("retry", "guard")]
@@ -1126,6 +1105,65 @@ public sealed class TicketTransferServiceTests
             _clock,
             NullLogger<TicketTransferService>.Instance);
 
+    [HumansTheory]
+    [Xunit.InlineData("create", 1001)]
+    [Xunit.InlineData("approve", 1001)]
+    [Xunit.InlineData("process", 1001)]
+    [Xunit.InlineData("retry", 1001)]
+    [Xunit.InlineData("reject", 1001)]
+    [Xunit.InlineData("create", 1000)]
+    [Xunit.InlineData("approve", 1000)]
+    [Xunit.InlineData("process", 1000)]
+    [Xunit.InlineData("retry", 1000)]
+    [Xunit.InlineData("reject", 1000)]
+    public async Task TransferText_RespectsStoredLength_BeforeAnyWrite(string action, int length)
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var text = new string('x', length);
+        var request = MakePending(Guid.NewGuid());
+        if (string.Equals(action, "retry", StringComparison.Ordinal))
+        {
+            request.VendorResult = TicketTransferVendorResult.VoidSucceededIssueFailed;
+            request.VendorHoldId = "hold_123";
+        }
+        _transferRepo.GetByIdAsync(request.Id, Arg.Any<CancellationToken>()).Returns(request);
+        StubAttendee(TicketAttendeeStatus.Valid, _senderId);
+        _vendor.VoidIssuedTicketAsync("tkt_original", true, Arg.Any<CancellationToken>())
+            .Returns(new VoidIssuedTicketResult("tkt_original", "hold_123"));
+        _vendor.IssueTicketAsync(Arg.Any<IssueTicketRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new VendorTicketDto("tt_new", null, "Alice Smith", "alice@example.com", "Full Week", 0m, "valid"));
+
+        var result = action switch
+        {
+            "create" => await _service.CreateRequestAsync(new(_attendeeId, _receiverId, text), _senderId, ct),
+            "approve" => await _service.ApproveAsync(request.Id, _adminId, text, ct),
+            "process" => await _service.ProcessTransferAsync(request.Id, _adminId, text, ct),
+            "retry" => await _service.RetryReissueAsync(request.Id, _adminId, text, ct),
+            "reject" => await _service.RejectAsync(request.Id, _adminId, text, ct),
+            _ => throw new ArgumentOutOfRangeException(nameof(action)),
+        };
+
+        result.Succeeded.Should().Be(length <= 1000);
+        if (length > 1000)
+        {
+            if (string.Equals(action, "create", StringComparison.Ordinal))
+                result.RefusalKey.Should().Be("Tickets_TicketTransfer_ReasonTooLong");
+            else
+                result.OperatorRefusal.Should().Contain("1,000");
+            request.Status.Should().Be(TicketTransferStatus.Pending);
+            request.AdminNotes.Should().BeNull();
+            _transferRepo.ReceivedCalls().Should().NotContain(call => string.Equals(call.GetMethodInfo().Name, "AddAsync", StringComparison.Ordinal) || string.Equals(call.GetMethodInfo().Name, "UpdateAsync", StringComparison.Ordinal));
+            _ticketRepo.ReceivedCalls().Should().NotContain(call => string.Equals(call.GetMethodInfo().Name, "UpsertAttendeesAsync", StringComparison.Ordinal));
+            _vendor.ReceivedCalls().Should().BeEmpty();
+            _auditLog.ReceivedCalls().Should().BeEmpty();
+            _emailService.ReceivedCalls().Should().BeEmpty();
+        }
+        else if (!string.Equals(action, "create", StringComparison.Ordinal))
+            request.AdminNotes.Should().Be(text);
+        else
+            await _transferRepo.Received(1).AddAsync(Arg.Is<TicketTransferRequest>(r => string.Equals(r.SenderReason, text, StringComparison.Ordinal)), ct);
+    }
+
     private void StubAttendee(
         TicketAttendeeStatus status, Guid attendeeMatchedUserId, Instant? checkedInAt = null)
     {
@@ -1155,8 +1193,7 @@ public sealed class TicketTransferServiceTests
         Guid id, Guid orderId, Guid attendeeMatchedUserId, TicketAttendeeStatus status,
         Instant? checkedInAt = null)
     {
-        // The buyer never owns the attendee (nobodies-collective/Humans#856).
-        // Ownership is determined by TicketAttendee.MatchedUserId only.
+        // Ownership is TicketAttendee.MatchedUserId only; the buyer never owns the attendee.
         var order = new TicketOrder
         {
             Id = orderId,

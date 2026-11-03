@@ -64,12 +64,8 @@ public class GateServiceTests
             CancellationToken cancellationToken = default) => throw failure;
     }
 
-    // The three ServiceTestHarness members this suite used — an in-memory GateDbContext,
-    // a factory over the same store, and a fixed clock. Owned here rather than shared:
-    // the harness is built around UsersDbContext and sharing it would grant a section
-    // test project InternalsVisibleTo on it.
-    // Field initialisers run in declaration order, and each test gets a fresh instance,
-    // so every test case gets its own store.
+    // Owned rather than the shared UsersDbContext-based harness, which would grant this project
+    // InternalsVisibleTo on it. Field initialisers run in declaration order; each test gets its own store.
     private readonly DbContextOptions<GateDbContext> _dbOptions =
         new DbContextOptionsBuilder<GateDbContext>()
             .UseInMemoryDatabase(Guid.NewGuid().ToString())
@@ -95,23 +91,22 @@ public class GateServiceTests
     private readonly IBackgroundJobClient _jobs = Substitute.For<IBackgroundJobClient>();
     private readonly GateVendorMirrorLedger _ledger = new(new MemoryCache(new MemoryCacheOptions()));
     private readonly IConfiguration _config = new ConfigurationBuilder().AddInMemoryCollection().Build();
+    private const string SupervisorPin = "2468";
     private readonly GateService _svc;
 
     public GateServiceTests()
     {
+        _config["Gate:SupervisorPin"] = SupervisorPin;
         GateDb = new GateDbContext(_dbOptions);
         GateDbFactory = new TestDbContextFactory<GateDbContext>(_dbOptions);
 
         _burn.GetActiveEventSettingsAsync(Arg.Any<CancellationToken>()).Returns((EventSettingsInfo?)null);
         _earlyEntry.GetForUserAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>())
             .Returns((EarlyEntryRosterRow?)null);
-        _svc = new GateService(new GateRepository(GateDbFactory), _tickets, _earlyEntry, _burn, _shifts, _roles, _users, _pinHasher, _auditLog, _jobs, _ledger, _config, NullLogger<GateService>.Instance, Clock);
+        _svc = new GateService(new GateRepository(GateDbFactory), _tickets, _earlyEntry, _burn, _shifts, _roles, _users, _pinHasher, _auditLog, _jobs, _ledger, new GatePinThrottle(new MemoryCache(new MemoryCacheOptions()), Clock), _config, NullLogger<GateService>.Instance, Clock);
 
-        // Baseline: an admin has set the cutoff in the past, so general entry is open.
-        // Seeded directly (sync) since the ctor can't await; GateDb shares the in-memory
-        // store with the repository's factory. Before-cutoff tests override this, and
-        // the unconfigured-cutoff case is tested explicitly. Without a configured
-        // cutoff every scan fails safe to AMBER.
+        // Baseline: a past cutoff, so general entry is open; without one every scan fails safe to
+        // AMBER. Seeded sync (the ctor can't await) into the store the repository's factory shares.
         GateDb.GateSettings.Add(new GateSettings
         {
             Id = 1,
@@ -121,16 +116,17 @@ public class GateServiceTests
         GateDb.SaveChanges();
     }
 
-    private void StubTicket(
+    private TicketOrderInfo StubTicket(
         TicketAttendeeStatus status = TicketAttendeeStatus.Valid,
         Guid? matchedUserId = null,
         string barcode = Barcode,
         Guid? attendeeId = null,
-        Instant? checkedInAt = null)
+        Instant? checkedInAt = null,
+        string vendorTicketId = "v1")
     {
         var attendee = new TicketAttendeeInfo(
             Id: attendeeId ?? Guid.NewGuid(),
-            VendorTicketId: "v1",
+            VendorTicketId: vendorTicketId,
             AttendeeName: "Jane Donovan",
             AttendeeEmail: "jane@example.com",
             TicketTypeName: "GA",
@@ -157,13 +153,82 @@ public class GateServiceTests
 
         _tickets.GetTicketOrdersAsync(Arg.Any<CancellationToken>())
             .Returns(new List<TicketOrderInfo> { order });
+        return order;
     }
 
-    private Task<GateDecisionResult> RecordAsync(bool idConfirmed, bool child = false, Guid? overrideBy = null) =>
+    private Task<GateDecisionResult> RecordAsync(bool idConfirmed, bool child = false, bool overrideEarly = false, string? pin = null) =>
         _svc.RecordDecisionAsync(
             new GateDecisionInput(Barcode, idConfirmed, child, LaneId: "L1", ClientScanAt: null, Note: null,
-                OverrideByUserId: overrideBy),
+                OverrideEarly: overrideEarly, SupervisorPin: pin),
             AgentId);
+
+    [HumansTheory]
+    [Xunit.InlineData(null, "2468", (int)GateOverrideFailure.NotConfigured)]
+    [Xunit.InlineData("", "2468", (int)GateOverrideFailure.NotConfigured)]
+    [Xunit.InlineData("2468", null, (int)GateOverrideFailure.InvalidPin)]
+    [Xunit.InlineData("2468", "", (int)GateOverrideFailure.InvalidPin)]
+    [Xunit.InlineData("2468", "0000", (int)GateOverrideFailure.InvalidPin)]
+    public async Task Override_InvalidOrUnconfiguredPin_RefusesBeforeAnyScanOrSideEffect(
+        string? configured, string? supplied, int failure)
+    {
+        _config["Gate:SupervisorPin"] = configured;
+        StubTicket(matchedUserId: GuestId);
+
+        var result = await RecordAsync(idConfirmed: true, overrideEarly: true, pin: supplied);
+
+        result.OverrideFailure.Should().Be((GateOverrideFailure)failure);
+        result.Verdict.Should().Be(GateVerdict.Unresolved);
+        GateDb.GateScanEvents.AsNoTracking().Should().BeEmpty();
+        await _tickets.DidNotReceive().GetTicketOrdersAsync(Arg.Any<CancellationToken>());
+        _jobs.DidNotReceive().Create(Arg.Any<Job>(), Arg.Any<IState>());
+        await _users.DidNotReceive().RecordParticipationAsync(
+            Arg.Any<Guid>(), Arg.Any<int>(), Arg.Any<ParticipationStatus>(), Arg.Any<Instant?>(), Arg.Any<CancellationToken>());
+    }
+
+    [HumansFact]
+    public async Task Override_ThrottleLocksOnlyOverrides_ForTheFullFifteenMinutes()
+    {
+        StubTicket();
+        for (var i = 0; i < 5; i++)
+            (await RecordAsync(false, overrideEarly: true, pin: "0000"))
+                .OverrideFailure.Should().Be(GateOverrideFailure.InvalidPin);
+
+        var locked = await RecordAsync(false, overrideEarly: true, pin: SupervisorPin);
+        locked.OverrideFailure.Should().Be(GateOverrideFailure.LockedOut);
+        locked.RetryAfterSeconds.Should().Be(900);
+        GateDb.GateScanEvents.AsNoTracking().Should().BeEmpty();
+
+        Clock.Advance(Duration.FromMinutes(14));
+        var stillLocked = await RecordAsync(false, child: true, pin: SupervisorPin);
+        stillLocked.OverrideFailure.Should().Be(GateOverrideFailure.LockedOut);
+        stillLocked.RetryAfterSeconds.Should().Be(60);
+
+        (await RecordAsync(false)).Verdict.Should().Be(GateVerdict.RejectedNameMismatch);
+        Clock.Advance(Duration.FromMinutes(1) + Duration.FromSeconds(1));
+        (await RecordAsync(false, child: true, pin: SupervisorPin))
+            .Verdict.Should().Be(GateVerdict.AdmittedChildWithAdult);
+        var admit = await GateDb.GateScanEvents.AsNoTracking().SingleAsync(s => s.AdmitDedupeKey != null,
+            Xunit.TestContext.Current.CancellationToken);
+        admit.OverrideByUserId.Should().Be(AgentId);
+    }
+
+    [HumansFact]
+    public async Task Override_CorrectPinClearsPreviousFailures_ButNeverOverridesInvalidTickets()
+    {
+        StubTicket(status: TicketAttendeeStatus.Void);
+        for (var i = 0; i < 4; i++)
+            await RecordAsync(false, overrideEarly: true, pin: "0000");
+
+        var validPin = await RecordAsync(true, overrideEarly: true, pin: SupervisorPin);
+        validPin.OverrideFailure.Should().BeNull();
+        validPin.Verdict.Should().Be(GateVerdict.RejectedInvalid);
+        for (var i = 0; i < 4; i++)
+            (await RecordAsync(false, overrideEarly: true, pin: "0000"))
+                .OverrideFailure.Should().Be(GateOverrideFailure.InvalidPin);
+        (await RecordAsync(true, overrideEarly: true, pin: SupervisorPin))
+            .OverrideFailure.Should().BeNull();
+        GateDb.GateScanEvents.AsNoTracking().Should().OnlyContain(s => s.OverrideByUserId == null);
+    }
 
     [HumansFact]
     public async Task Evaluate_UnknownBarcode_IsInvalid()
@@ -211,7 +276,7 @@ public class GateServiceTests
         var first = await RecordAsync(idConfirmed: true);
         first.Verdict.Should().Be(GateVerdict.Admitted);
 
-        var second = await RecordAsync(idConfirmed: true);
+        var second = await RecordAsync(idConfirmed: true, overrideEarly: true, pin: SupervisorPin);
         second.Verdict.Should().Be(GateVerdict.RejectedDuplicate);
         second.PreviousAdmitByUserId.Should().Be(AgentId);
     }
@@ -232,6 +297,26 @@ public class GateServiceTests
             Arg.Is<Job>(j => j.Type.Equals(typeof(GateVendorCheckInJob)) && string.Equals((string)j.Args[0], "v1", StringComparison.Ordinal)),
             Arg.Any<IState>());
         _ledger.WasSent("v1").Should().Be(mirrorEnabled);
+    }
+
+    [HumansFact]
+    public async Task RecordDecision_MirrorEnqueueFails_PreservesDurableAdmit()
+    {
+        StubTicket(matchedUserId: GuestId);
+        StubActiveEvent(year: 2026);
+        _config["Gate:VendorMirrorEnabled"] = "true";
+        _jobs.Create(Arg.Any<Job>(), Arg.Any<IState>())
+            .Throws(new InvalidOperationException("Job storage unavailable"));
+
+        var result = await RecordAsync(idConfirmed: true);
+
+        result.Verdict.Should().Be(GateVerdict.Admitted);
+        _ledger.WasSent("v1").Should().BeFalse();
+        await _users.Received(1).RecordParticipationAsync(
+            GuestId, 2026, ParticipationStatus.Attended,
+            Clock.GetCurrentInstant(), CancellationToken.None);
+        (await RecordAsync(idConfirmed: true)).Verdict.Should().Be(GateVerdict.RejectedDuplicate);
+        _jobs.Received(1).Create(Arg.Any<Job>(), Arg.Any<IState>());
     }
 
     [HumansFact]
@@ -263,9 +348,8 @@ public class GateServiceTests
     {
         StubTicket();
 
-        // The child-without-ID waiver is now a supervisor override — it admits only when an
-        // authorizing supervisor was recorded (the controller sets this after AuthorizeOverrideAsync).
-        (await RecordAsync(idConfirmed: false, child: true, overrideBy: Guid.NewGuid()))
+        // Child waivers verify the PIN even without an early-override flag.
+        (await RecordAsync(idConfirmed: false, child: true, pin: SupervisorPin))
             .Verdict.Should().Be(GateVerdict.AdmittedChildWithAdult);
     }
 
@@ -274,12 +358,10 @@ public class GateServiceTests
     {
         StubTicket();
 
-        // No authorizing supervisor → the waiver is not granted (a forged child flag can't admit).
-        (await RecordAsync(idConfirmed: false, child: true))
-            .Verdict.Should().Be(GateVerdict.RejectedNameMismatch);
+        var result = await RecordAsync(idConfirmed: false, child: true);
+        result.OverrideFailure.Should().Be(GateOverrideFailure.InvalidPin);
+        GateDb.GateScanEvents.AsNoTracking().Should().BeEmpty();
     }
-
-    // ── Attendance projection (admit → participation Attended) ──────────────
 
     private void StubActiveEvent(int year = 2026) =>
         _burn.GetActiveEventSettingsAsync(Arg.Any<CancellationToken>()).Returns(BurnFixtures.Burn(
@@ -363,8 +445,10 @@ public class GateServiceTests
 
         (await _svc.EvaluateAsync(Barcode)).Outcome.Should().Be(GatePreCheckOutcome.CutoffNotConfigured);
 
-        // Even with the agent confirming the ID, an unset cutoff escalates — no admit.
+        // Even a verified override cannot admit while the cutoff is unset.
         (await RecordAsync(idConfirmed: true)).Verdict.Should().Be(GateVerdict.Unresolved);
+        (await RecordAsync(idConfirmed: true, overrideEarly: true, pin: SupervisorPin))
+            .Verdict.Should().Be(GateVerdict.Unresolved);
     }
 
     [HumansFact]
@@ -399,7 +483,7 @@ public class GateServiceTests
         (await _svc.EvaluateAsync(Barcode)).Outcome.Should().Be(GatePreCheckOutcome.TooEarly);
 
         // A recorded supervisor override turns the too-early STOP into an attributable early admit.
-        (await RecordAsync(idConfirmed: false, overrideBy: Guid.NewGuid()))
+        (await RecordAsync(idConfirmed: false, overrideEarly: true, pin: SupervisorPin))
             .Verdict.Should().Be(GateVerdict.AdmittedEarlyOverride);
     }
 
@@ -452,7 +536,7 @@ public class GateServiceTests
             Clock.GetCurrentInstant().Plus(Duration.FromHours(6)), 16));
 
         // A recorded supervisor override admits an unconfirmed-EE scan, mirroring the too-early case.
-        (await RecordAsync(idConfirmed: false, overrideBy: Guid.NewGuid()))
+        (await RecordAsync(idConfirmed: false, overrideEarly: true, pin: SupervisorPin))
             .Verdict.Should().Be(GateVerdict.AdmittedEarlyOverride);
     }
 
@@ -502,6 +586,37 @@ public class GateServiceTests
     }
 
     [HumansFact]
+    public async Task Gdpr_ExportOmitsBarcodeAndOtherPeoplesIds()
+    {
+        var supervisor = AgentId;
+        StubTicket(matchedUserId: GuestId);
+        await RecordAsync(idConfirmed: true, overrideEarly: true, pin: SupervisorPin);
+
+        var json = System.Text.Json.JsonSerializer.Serialize(
+            (await _svc.ContributeForUserAsync(GuestId, default)).Single().Data);
+
+        json.Should().NotContain(Barcode)
+            .And.NotContain(AgentId.ToString())
+            .And.NotContain(supervisor.ToString());
+    }
+
+    [HumansFact]
+    public async Task RecordDecision_ClientScanAtNeverDecidesTheVerdict()
+    {
+        StubTicket(matchedUserId: GuestId);
+        await _svc.SaveSettingsAsync(new GateSettingsDto(
+            Clock.GetCurrentInstant().Plus(Duration.FromHours(6)), 16));
+
+        // A device clock claiming a post-cutoff scan cannot admit early: server time decides.
+        var r = await _svc.RecordDecisionAsync(
+            new GateDecisionInput(Barcode, IdConfirmed: true, ChildWithAdult: false, LaneId: "L1",
+                ClientScanAt: Clock.GetCurrentInstant().Plus(Duration.FromHours(12)), Note: null),
+            AgentId);
+
+        r.Verdict.Should().Be(GateVerdict.RejectedTooEarly);
+    }
+
+    [HumansFact]
     public async Task Merge_ReassignsScansToSurvivor()
     {
         StubTicket(matchedUserId: GuestId);
@@ -517,9 +632,9 @@ public class GateServiceTests
     [HumansFact]
     public async Task Gdpr_EraseClearsGuestAndOverrideLinksAndPin_ButKeepsScannerAttribution()
     {
-        var supervisor = Guid.NewGuid();
+        var supervisor = AgentId;
         StubTicket(matchedUserId: GuestId);
-        await RecordAsync(idConfirmed: true, overrideBy: supervisor);
+        await RecordAsync(idConfirmed: true, overrideEarly: true, pin: SupervisorPin);
         await _svc.SetOwnPinAsync(GuestId, "2580");
 
         // Erase the guest: admission links and their PIN row go.
@@ -541,7 +656,7 @@ public class GateServiceTests
     public async Task Merge_RepointsScannerAndOverride_AndCarriesThePinToAPinlessSurvivor()
     {
         StubTicket(matchedUserId: GuestId);
-        await RecordAsync(idConfirmed: true, overrideBy: AgentId);
+        await RecordAsync(idConfirmed: true, overrideEarly: true, pin: SupervisorPin);
         await _svc.AdminSetPinAsync(AgentId, "2580", Guid.NewGuid()); // AdminEnrolled = true
         var survivor = Guid.NewGuid();
 
@@ -582,7 +697,6 @@ public class GateServiceTests
         SliceCount(await _svc.ContributeForUserAsync(GuestId, default)).Should().Be(0);
     }
 
-    // ── Shift roster (claim-screen pre-fill) ─────────────────────────────────
     // Clock is fixed at 2026-03-01T12:00Z; in Europe/Madrid (CET, UTC+1 on that
     // date) that's 13:00 local, so a shift starting 13:00 local == now.
     private static UrgentShiftInfo ShiftAt(
@@ -631,7 +745,6 @@ public class GateServiceTests
         (await _svc.GetShiftRosterAsync(Guid.NewGuid())).Should().BeEmpty();
     }
 
-    // ── Personal device PINs ─────────────────────────────────────────────────
     [HumansFact]
     public async Task SetOwnPin_NonSupervisor_SetsAndVerifies()
     {
@@ -649,15 +762,15 @@ public class GateServiceTests
         var admin = Guid.NewGuid();
 
         await _svc.SetOwnPinAsync(user, "2580");                 // self-enrol: actor == the staffer
-        await _auditLog.Received(1).LogAsync(AuditAction.GateStaffPinSet, nameof(GateStaffPin), user,
+        await _auditLog.Received(1).LogAsync(GateAuditActions.GateStaffPinSet, nameof(GateStaffPin), user,
             Arg.Any<string>(), user);
 
         await _svc.AdminSetPinAsync(user, "1357", admin);        // admin set: actor == the admin
-        await _auditLog.Received(1).LogAsync(AuditAction.GateStaffPinSet, nameof(GateStaffPin), user,
+        await _auditLog.Received(1).LogAsync(GateAuditActions.GateStaffPinSet, nameof(GateStaffPin), user,
             Arg.Any<string>(), admin);
 
         await _svc.ClearPinAsync(user, admin);                   // admin reset: actor == the admin
-        await _auditLog.Received(1).LogAsync(AuditAction.GateStaffPinReset, nameof(GateStaffPin), user,
+        await _auditLog.Received(1).LogAsync(GateAuditActions.GateStaffPinReset, nameof(GateStaffPin), user,
             Arg.Any<string>(), admin);
     }
 
@@ -673,9 +786,9 @@ public class GateServiceTests
     public async Task SetOwnPin_Supervisor_SelfSetsClaimPin_ButItCannotOverride()
     {
         var sup = Guid.NewGuid();
-        _roles.HasActiveRoleAsync(sup, RoleNames.TicketAdmin, Arg.Any<CancellationToken>()).Returns(true);
+        _roles.HasActiveRoleAsync(sup, TicketsRoles.TicketsAdmin, Arg.Any<CancellationToken>()).Returns(true);
 
-        // A supervisor may now self-enrol a CLAIM PIN (attribution — everyone can)...
+        // A supervisor may self-enrol a CLAIM PIN (attribution — everyone can)...
         (await _svc.SetOwnPinAsync(sup, "2580")).Should().Be(GatePinSetResult.Ok);
         (await _svc.VerifyPinAsync(sup, "2580")).Should().BeTrue();          // can claim the scanner
         // ...but a self-set PIN never carries override authority (AdminEnrolled = false).
@@ -687,10 +800,20 @@ public class GateServiceTests
     }
 
     [HumansFact]
+    public async Task AuthorizeOverride_RefusesBoard()
+    {
+        var board = Guid.NewGuid();
+        _roles.HasActiveRoleAsync(board, RoleNames.Board, Arg.Any<CancellationToken>()).Returns(true);
+        await _svc.AdminSetPinAsync(board, "2580", Guid.NewGuid());
+
+        (await _svc.AuthorizeOverrideAsync(board, "2580")).Should().BeFalse("Board reads the gate and authorizes no override");
+    }
+
+    [HumansFact]
     public async Task AuthorizeOverride_RequiresEnrolledSupervisorAndCorrectPin()
     {
         var sup = Guid.NewGuid();
-        _roles.HasActiveRoleAsync(sup, RoleNames.Board, Arg.Any<CancellationToken>()).Returns(true);
+        _roles.HasActiveRoleAsync(sup, TicketsRoles.TicketsAdmin, Arg.Any<CancellationToken>()).Returns(true);
         await _svc.AdminSetPinAsync(sup, "2580", Guid.NewGuid());
 
         (await _svc.AuthorizeOverrideAsync(sup, "2580")).Should().BeTrue();
@@ -710,23 +833,108 @@ public class GateServiceTests
         (await _svc.AuthorizeOverrideAsync(selfSetSup, "2580")).Should().BeFalse();    // correct PIN + role, but not admin-enrolled
     }
 
-    [HumansFact]
-    public async Task GetEnrolledSupervisorIds_ReturnsOnlySupervisorsWithAnAdminEnrolledPin()
+    private async Task SeedBackfillAsync()
     {
-        Guid enrolled = Guid.NewGuid(), selfSetOnly = Guid.NewGuid();
-        _roles.GetActiveUserIdsInRoleAsync(RoleNames.Board, Arg.Any<CancellationToken>())
-            .Returns(new[] { enrolled });
-        _roles.GetActiveUserIdsInRoleAsync(RoleNames.Admin, Arg.Any<CancellationToken>())
-            .Returns(new[] { selfSetOnly });
-        _roles.GetActiveUserIdsInRoleAsync(RoleNames.TicketAdmin, Arg.Any<CancellationToken>())
-            .Returns(Array.Empty<Guid>());
-        await _svc.AdminSetPinAsync(enrolled, "2580", Guid.NewGuid());   // admin-enrolled → override-capable
-        await _svc.SetOwnPinAsync(selfSetOnly, "1357");                  // self-set claim PIN → NOT override-capable
+        var first = StubTicket(barcode: "TIX-A", vendorTicketId: "vt-A");
+        await _svc.RecordDecisionAsync(new GateDecisionInput("TIX-A", true, false, null, null, null), AgentId);
+        var second = StubTicket(barcode: "TIX-B", vendorTicketId: "vt-B");
+        await _svc.RecordDecisionAsync(new GateDecisionInput("TIX-B", true, false, null, null, null), AgentId);
+        _tickets.GetTicketOrdersAsync(Arg.Any<CancellationToken>()).Returns(new List<TicketOrderInfo> { first, second });
+        _jobs.ClearReceivedCalls();
+        _config["Gate:VendorMirrorEnabled"] = "true";
+    }
 
-        var ids = await _svc.GetEnrolledSupervisorIdsAsync();
+    private Job[] BackfillJobs() => _jobs.ReceivedCalls()
+        .Where(c => string.Equals(c.GetMethodInfo().Name, nameof(IBackgroundJobClient.Create), StringComparison.Ordinal))
+        .Select(c => (Job)c.GetArguments()[0]!).ToArray();
 
-        // Only the admin-enrolled supervisor is offered in the override picker.
-        ids.Should().ContainSingle().Which.Should().Be(enrolled);
+    [HumansFact]
+    public async Task VendorBackfill_TestThenBulk_ClaimsEachTicketOnce_WithOriginalAdmitTime()
+    {
+        await SeedBackfillAsync();
+        var admittedAt = Clock.GetCurrentInstant();
+        Clock.Advance(Duration.FromHours(1));
+
+        var one = await _svc.EnqueueVendorCheckInBackfillAsync("vt-A");
+        one.Enqueued.Should().ContainSingle().Which.VendorTicketId.Should().Be("vt-A");
+        _ledger.WasSent("vt-A").Should().BeTrue();
+        _ledger.WasSent("vt-B").Should().BeFalse();
+        var snapshot = await _svc.GetVendorCheckInBackfillAsync();
+        snapshot.Pending.Should().ContainSingle().Which.VendorTicketId.Should().Be("vt-B");
+        snapshot.SentAwaitingSync.Should().ContainSingle().Which.VendorTicketId.Should().Be("vt-A");
+        snapshot.MirrorEnabled.Should().BeTrue();
+
+        (await _svc.EnqueueVendorCheckInBackfillAsync("vt-A")).Enqueued.Should().BeEmpty();
+        (await _svc.EnqueueVendorCheckInBackfillAsync(null)).Enqueued
+            .Should().ContainSingle().Which.VendorTicketId.Should().Be("vt-B");
+        (await _svc.EnqueueVendorCheckInBackfillAsync(null)).Enqueued.Should().BeEmpty();
+        var jobs = BackfillJobs();
+        jobs.Select(j => (string)j.Args[0]).Should().Equal("vt-A", "vt-B");
+        foreach (var job in jobs)
+        {
+            job.Method.Name.Should().Be(nameof(GateVendorCheckInJob.ExecuteBackfillAsync));
+            job.Args[1].Should().Be(admittedAt.ToUnixTimeSeconds());
+            job.Args[2].Should().Be(CancellationToken.None);
+        }
+    }
+
+    [HumansTheory]
+    [Xunit.InlineData("")]
+    [Xunit.InlineData("unknown")]
+    public async Task VendorBackfill_UnknownTicket_EnqueuesNothing(string vendorTicketId)
+    {
+        await SeedBackfillAsync();
+
+        (await _svc.EnqueueVendorCheckInBackfillAsync(vendorTicketId)).Enqueued.Should().BeEmpty();
+
+        BackfillJobs().Should().BeEmpty();
+        _ledger.WasSent("vt-A").Should().BeFalse();
+        _ledger.WasSent("vt-B").Should().BeFalse();
+    }
+
+    [HumansFact]
+    public async Task VendorBackfill_Disabled_NeitherReadsNorClaimsNorEnqueues()
+    {
+        await SeedBackfillAsync();
+        _config["Gate:VendorMirrorEnabled"] = "false";
+        _tickets.ClearReceivedCalls();
+
+        foreach (var id in new string?[] { "vt-A", null })
+        {
+            var result = await _svc.EnqueueVendorCheckInBackfillAsync(id);
+            result.MirrorEnabled.Should().BeFalse();
+            result.Enqueued.Should().BeEmpty();
+        }
+
+        await _tickets.DidNotReceive().GetTicketOrdersAsync(Arg.Any<CancellationToken>());
+        BackfillJobs().Should().BeEmpty();
+        _ledger.WasSent("vt-A").Should().BeFalse();
+        _ledger.WasSent("vt-B").Should().BeFalse();
+    }
+
+    [HumansFact]
+    public async Task VendorBackfill_RechecksVendorStatusBeforeEnqueueing()
+    {
+        var attendeeId = Guid.NewGuid();
+        StubTicket(attendeeId: attendeeId);
+        await RecordAsync(idConfirmed: true);
+        (await _svc.GetVendorCheckInBackfillAsync()).Pending.Should().ContainSingle();
+        StubTicket(attendeeId: attendeeId, checkedInAt: Clock.GetCurrentInstant());
+        _config["Gate:VendorMirrorEnabled"] = "true";
+        _jobs.ClearReceivedCalls();
+
+        (await _svc.EnqueueVendorCheckInBackfillAsync("v1")).Enqueued.Should().BeEmpty();
+
+        BackfillJobs().Should().BeEmpty();
+        _ledger.WasSent("v1").Should().BeFalse();
+    }
+
+    [HumansFact]
+    public void VendorMirrorLedger_ClaimsAnIdExactlyOnce()
+    {
+        _ledger.TryMarkSent("vt-X").Should().BeTrue();
+        _ledger.TryMarkSent("vt-X").Should().BeFalse();
+        _ledger.WasSent("vt-X").Should().BeTrue();
     }
 
     [HumansFact]

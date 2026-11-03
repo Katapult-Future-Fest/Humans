@@ -21,16 +21,11 @@ using Humans.Users.Contracts;
 namespace Humans.Debug.Controllers;
 
 /// <summary>
-/// Developer / diagnostics pages. The whole section is admin-gated, so pages
-/// live at <c>/Debug/*</c> directly.
+/// Internal and still routed: Shell's <c>SectionControllerFeatureProvider</c> relaxes MVC's <c>IsPublic</c> check. Do
+/// not "fix" a 404 by making this public.
 /// </summary>
-/// <remarks>
-/// Internal, and routed anyway: Shell registers <c>SectionControllerFeatureProvider</c>, which
-/// relaxes MVC's <c>IsPublic</c> check for discovered section assemblies
-/// (memory/architecture/section-controllers-need-feature-provider.md — do not "fix" a 404 by
-/// making this public).
-/// </remarks>
-[Authorize(Policy = PolicyNames.AdminOnly)]
+// Board reads everything here; the three POSTs below stay Admin.
+[Authorize(Policy = PolicyNames.BoardOrAdmin)]
 [Route("Debug")]
 internal sealed class DebugController(
     IUserService userService,
@@ -45,10 +40,6 @@ internal sealed class DebugController(
     ISectionCatalog sectionCatalog,
     InMemoryLogSink logSink) : HumansControllerBase(userService)
 {
-    /// <summary>
-    /// What the composition root knows about every section: what it owns, depends on, and
-    /// implements. Where a hand-maintained section list that drifted off a rename becomes visible.
-    /// </summary>
     [HttpGet("Sections")]
     public IActionResult Sections() => View(sectionCatalog);
 
@@ -98,6 +89,7 @@ internal sealed class DebugController(
     public IActionResult Maintenance() => View();
 
     [HttpPost("Maintenance/ClearHangfireLocks")]
+    [Authorize(Policy = PolicyNames.AdminOnly)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> ClearHangfireLocks(CancellationToken ct)
     {
@@ -192,6 +184,7 @@ internal sealed class DebugController(
     }
 
     [HttpPost("DbStats/Reset")]
+    [Authorize(Policy = PolicyNames.AdminOnly)]
     [ValidateAntiForgeryToken]
     public IActionResult ResetDbStats()
     {
@@ -246,6 +239,7 @@ internal sealed class DebugController(
     }
 
     [HttpPost("CacheStats/Reset")]
+    [Authorize(Policy = PolicyNames.AdminOnly)]
     [ValidateAntiForgeryToken]
     public IActionResult ResetCacheStats()
     {
@@ -330,8 +324,10 @@ internal sealed class DebugController(
     public IActionResult FormatGallery() => View(FormatGalleryModelBuilder.Build());
 
     [HttpGet("Translations")]
-    public IActionResult Translations([FromServices] IStringLocalizer<SharedResource> localizer) =>
-        View(TranslationsGalleryModelBuilder.Build(localizer));
+    public IActionResult Translations(
+        [FromServices] IStringLocalizer<SharedResource> shared,
+        [FromServices] IStringLocalizerFactory localizerFactory) =>
+        View(TranslationsPageModelBuilder.Build(shared, localizerFactory, sectionCatalog));
 
     private static string StatusCategory(int statusCode) => statusCode switch
     {

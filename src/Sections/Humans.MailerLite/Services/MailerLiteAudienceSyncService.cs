@@ -7,11 +7,6 @@ using NodaTime;
 
 namespace Humans.MailerLite.Services;
 
-/// <summary>
-/// Orchestrates audience computation, ML state diffing, and the apply step.
-/// The section's sync state goes through
-/// <see cref="IMailerLiteRepository"/>.
-/// </summary>
 internal sealed class MailerLiteAudienceSyncService(
     IMailerLiteService ml,
     IUserEmailService emails,
@@ -202,7 +197,7 @@ internal sealed class MailerLiteAudienceSyncService(
         if (actorUserId is Guid actor)
         {
             await audit.LogAsync(
-                AuditAction.MailerLiteAudienceSyncCompleted,
+                MailerLiteAuditActions.MailerLiteAudienceSyncCompleted,
                 entityType: "MailerLiteAudience", entityId: state.Id,
                 description: description,
                 actorUserId: actor);
@@ -210,7 +205,7 @@ internal sealed class MailerLiteAudienceSyncService(
         else
         {
             await audit.LogAsync(
-                AuditAction.MailerLiteAudienceSyncCompleted,
+                MailerLiteAuditActions.MailerLiteAudienceSyncCompleted,
                 entityType: "MailerLiteAudience", entityId: state.Id,
                 description: description,
                 jobName: JobName);

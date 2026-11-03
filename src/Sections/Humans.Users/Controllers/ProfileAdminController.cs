@@ -23,8 +23,7 @@ internal sealed class ProfileAdminController(
     {
         var report = await emailProblems.ScanAsync(ct);
 
-        // Raw: the report names the rows that hold each address, tombstones included, and the
-        // page labels (and deletes by) exactly those rows.
+        // Raw: the report names the exact rows holding each address, tombstones included, and the page deletes by them.
         var allInvolvedUserIds = report.Problems
             .SelectMany(p => new[] { p.UserId, p.OtherUserId })
             .OfType<Guid>()
@@ -47,7 +46,7 @@ internal sealed class ProfileAdminController(
         if (deleted)
         {
             await audit.LogAsync(
-                AuditAction.OrphanUserEmailDeleted, nameof(UserEmail), emailId,
+                UsersAuditActions.OrphanUserEmailDeleted, nameof(UserEmail), emailId,
                 $"Orphan UserEmail row {emailId} deleted by EmailProblems action",
                 currentUser.Id);
             SetSuccess("Orphan email row deleted.");

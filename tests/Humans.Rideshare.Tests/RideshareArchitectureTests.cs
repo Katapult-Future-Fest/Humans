@@ -1,3 +1,4 @@
+using Humans.Rideshare.Contracts;
 using System.Reflection;
 using AwesomeAssertions;
 using Humans.Base.Authorization;
@@ -22,8 +23,6 @@ namespace Humans.Rideshare.Tests;
 /// </summary>
 public class RideshareArchitectureTests
 {
-    // ── Routes and policies ───────────────────────────────────────────────
-
     [HumansFact]
     public void RideshareRoutes_UseTheRideshareSlug()
     {
@@ -41,13 +40,11 @@ public class RideshareArchitectureTests
     }
 
     [HumansFact]
-    public void AdminSurface_RequiresRideshareAdminOrAdmin()
+    public void AdminSurface_RequiresRideshareRead()
     {
-        PolicyFor<RideshareAdminController>().Should().Be(PolicyNames.RideshareAdminOrAdmin,
-            because: "settings, season stats and the day roster are RideshareAdmin tooling; Admin is always a superset");
+        PolicyFor<RideshareAdminController>().Should().Be(RidesharePolicies.Read,
+            because: "settings, season stats and the day roster are RideshareAdmin tooling Board may read; saving needs Manage");
     }
-
-    // ── DI shape ──────────────────────────────────────────────────────────
 
     [HumansFact]
     public void Repository_IsASingletonOverTheContextFactory()
@@ -159,7 +156,7 @@ public class RideshareArchitectureTests
 
     private static string? PolicyFor<TController>()
     {
-        var authorize = typeof(TController).GetCustomAttribute<AuthorizeAttribute>();
+        var authorize = typeof(TController).GetCustomAttribute<AuthorizeAttribute>(inherit: false);
         authorize.Should().NotBeNull(because: $"{typeof(TController).Name} must not be reachable anonymously");
         return authorize.Policy;
     }

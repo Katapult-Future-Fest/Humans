@@ -6,7 +6,7 @@
   src/Sections/Humans.CityPlanning/Views/CityPlanning/Containers.cshtml
 -->
 <!-- freshness:flag-on-change
-  Container CRUD authorization (lead vs CampAdmin vs city-planning team), placement phase gating, and image storage path — review when Container services/entities/controllers/auth handlers change.
+  Container CRUD authorization (lead vs CampsAdmin vs city-planning team), placement phase gating, and image storage path — review when Container services/entities/controllers/auth handlers change.
 -->
 
 # Containers — Section Invariants
@@ -20,7 +20,7 @@ Physical shipping containers managed per-barrio or at org level, placed on the C
 - A **ContainerImage** is one photo in a container's gallery. A container holds **at most 5** images; they are year-agnostic like the container itself.
 - A **ContainerPlacement** is a per-year placement of a container on the city map. Composite primary key on `(ContainerId, Year)`. Placement-only metadata (notes, placement image) lives here, since it varies year over year.
 - **Container placement** is the act of positioning a container on the City Planning map for a specific year by upserting a `ContainerPlacement` row with a GeoJSON Feature in `LocationGeoJson`. Placement is gated by `CityPlanningSettings.IsContainerPlacementOpen` for non-admins.
-- **Container placement phase** is the toggle (`IsContainerPlacementOpen` on `CityPlanningSettings`) that controls whether barrio leads can place containers. Map Admins (CampAdmin role or city-planning team) are never gated.
+- **Container placement phase** is the toggle (`IsContainerPlacementOpen` on `CityPlanningSettings`) that controls whether barrio leads can place containers. Map Admins (CampsAdmin role or city-planning team) are never gated.
 
 ## Data Model
 
@@ -84,18 +84,19 @@ Physical shipping containers managed per-barrio or at org level, placed on the C
 |-------|--------------|
 | Any authenticated human | View containers on the map overview (`/CityPlanning/`) |
 | Camp lead (own camp) | Create, edit, delete containers for their camp any time; place / clear / annotate placements only while the placement phase is open |
-| CampAdmin role | All camp lead capabilities on every camp's containers. Placement phase toggle |
-| City-planning team member (team slug: `city-planning`) | Same as CampAdmin on containers |
+| CampsAdmin role | All camp lead capabilities on every camp's containers. Placement phase toggle |
+| City-planning team member (team slug: `city-planning`) | Same as CampsAdmin on containers |
 
 ## Invariants
 
-- A container belongs to its `CampId`; the owning camp's leads and Map Admins (CampAdmin or city-planning team) may manage it.
+- A container belongs to its `CampId`; the owning camp's leads and Map Admins (CampsAdmin or city-planning team) may manage it.
 - Placement writes (place / clear / annotate) for barrio leads are gated by `CityPlanningSettings.IsContainerPlacementOpen`; container CRUD is not phase-gated (`ContainerOperation.Manage` vs `.Place`). Map Admins are never gated.
 - `Container` is year-agnostic; `ContainerPlacement` carries the year. There is no `Year` column on `containers`.
 - `ContainerPlacement.LocationGeoJson` stores a GeoJSON Feature whose Polygon is the container footprint (20 ft container: 6 m × 2.4 m body plus a door triangle whose tip marks the door bearing — a 7-vertex ring built client-side with Turf.js, tip at vertex index 4) and whose `properties` must carry `center_lng`, `center_lat`, `rotation_degrees` (presence enforced by `Service.SavePlacementAsync`; `CityPlanningApiController` only maps the refusal to 422). Rotation deliberately lives inside the Feature — there is no separate rotation column — so the client rebuilds the drag/rotate handle state without re-deriving orientation from vertex geometry.
 - A container holds **at most 5 images**, counting the legacy column-backed one. `Service.ValidateImageCount` rejects anything over that on create and on update (removals in the same request free room first).
 - Every container create/edit POST carries `[RequestSizeLimit(55 MB)]` — 5 × 10 MB plus multipart overhead. Without it Kestrel's 30,000,000-byte default 413s a legitimate three-image upload before model binding, so the friendly per-image validation never runs. All four actions need it: both in `ContainerController` and both container actions in `CityPlanningController`.
 - Image storage uses the shared `IFileStorage`; gallery and placement images are saved by the same `SaveImageAsync` helper under `wwwroot/uploads/containers/{containerId}/{guid}.{ext}` — the kinds are distinguished by which row holds the key (`container_images.StoragePath`, the legacy `containers.ImageStoragePath`, or `ContainerPlacement.PlacementImageStoragePath`), not by a filename prefix.
+- Nonblank placement notes are limited to 5,000 characters by the service before any image upload/removal or metadata change. Oversized text returns the existing typed refusal shape with a six-culture message; exactly 5,000 characters are accepted, and whitespace-only text still clears the notes.
 - Uploaded image display names are reduced to their basename and limited to 256 characters before persistence; the original client path is never stored, and an overlong name is rejected before a database write.
 - **The gallery is one uniform list.** `ContainerDto.Images` is the legacy image (if any, as `Guid.Empty`) followed by `container_images` rows in `SortOrder`. Callers add, remove and render one list; nothing outside `Service.ToDto` and `Service.UpdateAsync` knows the legacy columns exist.
 - **DTOs are the display shape.** `ContainerDto` and `ContainerPlacementDto` are what the two host pages render; `ContainerPlacementDto.PlacementImageUrl` is a URL (leading `/`), not the storage key the entity holds, and `IsPlaced` / `HasPlacementInfo` are computed on the record. There is no view-model copy layer between the service and the card partials.
@@ -113,6 +114,7 @@ Physical shipping containers managed per-barrio or at org level, placed on the C
 
 ## Triggers
 
+- Camp container create/edit/delete actions pass request cancellation through the initial current-user lookup, before camp lookup, authorization or mutation begins.
 - Images uploaded during Create/Edit append to the gallery. An upload past the five-image cap rejects the whole write. Uploads are staged before any database write. Creation saves the container and gallery rows together; editing commits metadata, gallery additions/removals and legacy-image clearing together in one repository save. A failed upload leaves the existing container/gallery unchanged and creates no new container. A later upload failure cleans previously staged files without caller cancellation; cleanup faults are logged, all files are attempted, and the original upload failure is preserved. No pre-existing file is removed on upload or metadata failure.
 - Ticking an image's "Remove" checkbox deletes its file from disk and its `container_images` row — or, for `Guid.Empty`, nulls the three legacy columns on `containers`. File cleanup follows the committed write and audit, attempts every distinct path without request cancellation, and logs failures without reversing the successful edit.
 - Container deletion commits the container/gallery/placement removal and writes its audit before attempting gallery and legacy file cleanup. A failed database deletion leaves all files intact. Update and deletion share one post-commit cleanup implementation: every distinct image path is attempted independently without request cancellation; unexpected failures are logged as errors and do not reverse the committed change.
@@ -123,6 +125,7 @@ Physical shipping containers managed per-barrio or at org level, placed on the C
 
 ## Cross-Section Dependencies
 
+- **Audit actions:** declared on `ContainersAuditActions` (`src/Sections/Humans.Containers/ContainersAuditActions.cs`), one `AuditActionDefinition` each, written through `IAuditLogService`: `ContainerCreated`, `ContainerUpdated`, `ContainerDeleted`, `ContainerPlacementSaved`, `ContainerPlacementCleared`, `ContainerPlacementNotesUpdated`.
 - **Camps:** `ICampService` — `GetCampBySlugAsync`, `GetCampsForYearAsync` — camp lookups and lead verification for authorization (lead status derived via LINQ over `GetCampsForYearAsync` + `Season.IsLead`). `Container.CampId` is a bare Guid pointing at `camps.Id`.
 - **City Planning:** `ICityPlanningService` — `GetSettingsAsync` (placement phase gate), `IsCityPlanningTeamMemberAsync` (Map Admin check). The container API endpoints (prefix `api/city-planning`: `GET containers/{year}`, `GET containers/{year}/export.geojson`, `PUT containers/{id}/placement/{year}`, `PUT containers/{id}/placement/{year}/notes`, `DELETE containers/{id}/placement/{year}`) are hosted in `CityPlanningApiController` because the placement editing experience is a City Planning concern.
 - **Audit Log:** `IAuditLogService.LogAsync` on every write, under the literal entity types in `Services/AuditEntityTypes.cs`.

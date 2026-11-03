@@ -9,6 +9,7 @@ using Humans.Shifts.Contracts;
 using Humans.Teams.Contracts;
 using Humans.Shifts.Controllers;
 using Humans.Shifts.Models;
+using Humans.Shifts.Services.Dtos;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.ModelBinding;
@@ -26,11 +27,8 @@ using Humans.Users.Contracts;
 namespace Humans.Shifts.Tests.Controllers;
 
 /// <summary>
-/// The knobs form moved to /Settings#shifts (peterdrier/Humans#1634). The old
-/// <c>GET /Shifts/Settings</c> page is retired outright, with no redirect kept, since
-/// redirecting a legacy URL is tech debt here. <c>POST /Shifts/Settings</c> stays (the
-/// tab posts to it) and now redirects back to the tab (post-redirect-get, not a
-/// legacy-URL redirect).
+/// <c>GET /Shifts/Settings</c> is retired with no redirect (legacy-URL redirects are debt);
+/// <c>POST /Shifts/Settings</c> stays and redirects back to the /Settings#shifts tab.
 /// </summary>
 public sealed class ShiftsControllerSettingsTests
 {
@@ -95,6 +93,8 @@ public sealed class ShiftsControllerSettingsTests
     [Xunit.InlineData("IsShiftBrowsingOpen", false)]
     [Xunit.InlineData("GlobalVolunteerCap", false)]
     [Xunit.InlineData("ReminderLeadTimeHours", false)]
+    [Xunit.InlineData("FirstCrewStartOffset", false)]
+    [Xunit.InlineData("FinishingWeekendStartOffset", false)]
     [Xunit.InlineData("", false)]
     [Xunit.InlineData("", true)]
     public async Task Settings_require_posted_browsing_cap_and_reminder_choices(string omitted, bool clear)
@@ -109,7 +109,11 @@ public sealed class ShiftsControllerSettingsTests
         {
             ["IsShiftBrowsingOpen"] = clear ? "false" : "true",
             ["GlobalVolunteerCap"] = clear ? "" : "50",
-            ["ReminderLeadTimeHours"] = clear ? "0" : "12"
+            ["ReminderLeadTimeHours"] = clear ? "0" : "12",
+            ["FirstCrewStartOffset"] = "-28",
+            ["SetupWeekStartOffset"] = "-20",
+            ["PreEventWeekStartOffset"] = "-10",
+            ["FinishingWeekendStartOffset"] = "-3"
         };
         if (omitted.Length > 0) fields.Remove(omitted);
         var metadata = services.GetRequiredService<IModelMetadataProvider>().GetMetadataForType(typeof(EventSettingsViewModel));
@@ -132,12 +136,13 @@ public sealed class ShiftsControllerSettingsTests
             _shiftMgmt.ReceivedCalls().Should().BeEmpty();
             _burnSettings.ReceivedCalls().Should().BeEmpty();
             controller.ModelState[omitted]!.Errors.Should().ContainSingle();
-            controller.TempData[TempDataKeys.ErrorMessage].Should().Be("Invalid event settings.");
+            controller.TempData[TempDataKeys.ErrorMessage].Should().BeOfType<string>().Which.Should().NotBeNullOrWhiteSpace();
         }
         else
         {
             controller.ModelState.IsValid.Should().BeTrue();
-            await _shiftMgmt.Received(1).SaveKnobsAsync(ActiveEvent.Id, !clear, clear ? null : 50, clear ? 0 : 12);
+            await _shiftMgmt.Received(1).SaveKnobsAsync(ActiveEvent.Id, !clear, clear ? null : 50, clear ? 0 : 12,
+                new BuildSubPeriodStarts(-28, -20, -10, -3), Arg.Any<Guid>());
         }
     }
 
@@ -156,7 +161,7 @@ public sealed class ShiftsControllerSettingsTests
         var result = await ctrl.Settings(model);
 
         result.Should().BeOfType<RedirectResult>().Which.Url.Should().Be("/Settings#shifts");
-        await _shiftMgmt.Received(1).SaveKnobsAsync(ActiveEvent.Id, true, 50, 12);
+        await _shiftMgmt.Received(1).SaveKnobsAsync(ActiveEvent.Id, true, 50, 12, new BuildSubPeriodStarts(-25, -16, -9, -4), Arg.Any<Guid>());
     }
 
     [HumansFact]
@@ -170,20 +175,21 @@ public sealed class ShiftsControllerSettingsTests
 
         result.Should().BeOfType<RedirectResult>().Which.Url.Should().Be("/Settings#shifts");
         await _shiftMgmt.DidNotReceive().SaveKnobsAsync(
-            Arg.Any<Guid>(), Arg.Any<bool>(), Arg.Any<int?>(), Arg.Any<int>());
+            Arg.Any<Guid>(), Arg.Any<bool>(), Arg.Any<int?>(), Arg.Any<int>(), Arg.Any<BuildSubPeriodStarts>(), Arg.Any<Guid>());
     }
 
     [HumansFact]
     public async Task Settings_Post_InvalidModel_RedirectsWithoutSaving()
     {
         var ctrl = BuildSut();
-        ctrl.ModelState.AddModelError("ReminderLeadTimeHours", "Invalid.");
+        ctrl.ModelState.AddModelError("ReminderLeadTimeHours", "Reminder lead time is invalid.");
         var model = new EventSettingsViewModel();
 
         var result = await ctrl.Settings(model);
 
         result.Should().BeOfType<RedirectResult>().Which.Url.Should().Be("/Settings#shifts");
+        ctrl.TempData[TempDataKeys.ErrorMessage].Should().Be("Reminder lead time is invalid.");
         await _shiftMgmt.DidNotReceive().SaveKnobsAsync(
-            Arg.Any<Guid>(), Arg.Any<bool>(), Arg.Any<int?>(), Arg.Any<int>());
+            Arg.Any<Guid>(), Arg.Any<bool>(), Arg.Any<int?>(), Arg.Any<int>(), Arg.Any<BuildSubPeriodStarts>(), Arg.Any<Guid>());
     }
 }

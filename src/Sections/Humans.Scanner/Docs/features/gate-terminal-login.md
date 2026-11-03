@@ -54,7 +54,7 @@ cannot be opened by the kiosk account.
   the names and Active state saved through the profile service. Established-account
   password rotation does not repeat provisioning.
 - **Credential:** the Identity `PasswordHash` on the row itself — no extra storage,
-  no schema change. Set/rotate at `/Tickets/Admin/Gate` (policy `TicketAdminOrAdmin`)
+  no schema change. Set/rotate at `/Tickets/Admin/Gate` (policy `TicketsPolicies.Manage`)
   via reset-token replace, so a new password that fails the Identity policy leaves the
   old password untouched. A successful rotation bumps the security stamp, which kills
   existing gate sessions at the next security-stamp validation sweep (≤30 min).
@@ -82,18 +82,18 @@ cannot be opened by the kiosk account.
   password, ask the ticket team), and that the account itself is NOT locked and
   admins can verify/change the password under Tickets → Gate terminal.
 - **Authorization:** `ScannerController`, `TicketsOnsiteAdminController` and the Gate
-  section's read routes share the `ScannerAccess` policy — TicketAdmin/Board/Admin
+  section's read routes share the `ScannerAccess` policy — TicketsAdmin/Board/Admin
   roles OR `NameIdentifier == SystemUserIds.GateTerminal`. Policy-wise this also admits
   the gate terminal to `/Tickets/Admin/Onsite` (the who's-onsite roster) and `/Scanner/*`,
   but the kiosk route-restriction middleware bounces the gate account to `/Gate` for
-  both — human TicketAdmin/Board/Admin sessions reach those routes via the same
+  both — human TicketsAdmin/Board/Admin sessions reach those routes via the same
   policy. Deliberately NOT a `RoleNames` constant: role
-  constants flow into the role-assignment UI and dev personas via the test-enforced
-  `RoleNames.All`. The Gate section's *write* actions sit behind a second policy,
-  `GateAdmit` — same principals today (TicketAdmin/Board/Admin or the gate account by
+  constants flow into the role-assignment UI and dev personas via the
+  role catalog. The Gate section's *write* actions sit behind a second policy,
+  `GateAdmit` — same principals today (TicketsAdmin/Board/Admin or the gate account by
   id), kept separate so the gate's admission writes never ride on the read-only
   `ScannerAccess` gate.
-- **Audit:** every password set/rotate writes `AuditAction.GateTerminalPasswordSet`
+- **Audit:** every password set/rotate writes `TicketsAuditActions.GateTerminalPasswordSet`
   with the acting admin as actor. Gate sign-ins stamp `LastLoginAt` (surfaced on the
   admin card).
 

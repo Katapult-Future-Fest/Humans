@@ -10,6 +10,7 @@ using Humans.Base.Enums;
 using NodaTime;
 using NodaTime.Testing;
 using NSubstitute;
+using Humans.Email.Contracts;
 
 namespace Humans.Email.Tests.Services;
 
@@ -47,7 +48,7 @@ public sealed class EmailOutboxServiceTests
                 committed = true;
                 return "recipient@example.org";
             });
-        var action = discard ? AuditAction.EmailOutboxDiscarded : AuditAction.EmailOutboxRetried;
+        var action = discard ? EmailAuditActions.EmailOutboxDiscarded : EmailAuditActions.EmailOutboxRetried;
         _audit.LogAsync(action, nameof(EmailOutboxMessage), id, Arg.Any<string>(), _actorId)
             .Returns(_ => { committed.Should().BeTrue(); return Task.CompletedTask; });
 
@@ -69,7 +70,7 @@ public sealed class EmailOutboxServiceTests
         var committed = false;
         _settingsStore.SetValueAsync(SettingKeys.IsEmailSendingPaused, paused ? "true" : "false",
             Arg.Any<CancellationToken>()).Returns(_ => { committed = true; return Task.CompletedTask; });
-        var action = paused ? AuditAction.EmailSendingPaused : AuditAction.EmailSendingResumed;
+        var action = paused ? EmailAuditActions.EmailSendingPaused : EmailAuditActions.EmailSendingResumed;
         _audit.LogAsync(action, "EmailSending", Guid.Empty, Arg.Any<string>(), _actorId)
             .Returns(_ => { committed.Should().BeTrue(); return Task.CompletedTask; });
 
@@ -237,10 +238,6 @@ public sealed class EmailOutboxServiceTests
         await _repo.Received(1).DeleteForUserAsync(userId, Arg.Any<CancellationToken>());
     }
 
-    // ==========================================================================
-    // Daily send counts (#1195)
-    // ==========================================================================
-
     [HumansFact]
     public async Task GetDailySendCountsAsync_AggregatesAcrossTemplatesPerDay()
     {
@@ -346,7 +343,7 @@ public sealed class EmailOutboxServiceTests
     [HumansFact]
     public async Task PreviewDailySendCountBackfillAsync_NeverBackfillsFailedCount()
     {
-        // Per issue #1195: a failed message's actual failure day isn't recoverable
+        // A failed message's actual failure day isn't recoverable
         // from the outbox's final-state-only rows, so a backfilled row carries only
         // the deliveries — FailedCount stays 0 and the failure day is left for the
         // live processor. The row below is the tempting case: RetryCount says it
@@ -394,7 +391,7 @@ public sealed class EmailOutboxServiceTests
         _repo.GetDailySendCountKeysAsync(Arg.Any<CancellationToken>())
             .Returns(new HashSet<(LocalDate, string)> { (day, "welcome") });
 
-        var added = await _service.BackfillDailySendCountsAsync(Xunit.TestContext.Current.CancellationToken);
+        var added = await _service.BackfillDailySendCountsAsync(_actorId, Xunit.TestContext.Current.CancellationToken);
 
         added.Should().Be(0);
         await _repo.DidNotReceive().AddDailySendCountsAsync(
@@ -410,13 +407,15 @@ public sealed class EmailOutboxServiceTests
         _repo.GetDailySendCountKeysAsync(Arg.Any<CancellationToken>())
             .Returns(new HashSet<(LocalDate, string)>());
 
-        var added = await _service.BackfillDailySendCountsAsync(Xunit.TestContext.Current.CancellationToken);
+        var added = await _service.BackfillDailySendCountsAsync(_actorId, Xunit.TestContext.Current.CancellationToken);
 
         added.Should().Be(1);
         await _repo.Received(1).AddDailySendCountsAsync(
             Arg.Is<IReadOnlyList<EmailDailySendCount>>(rows =>
                 rows.Count == 1 && rows[0].Date == day && rows[0].TemplateName == "welcome" && rows[0].SentCount == 1),
             Arg.Any<CancellationToken>());
+        await _audit.Received(1).LogAsync(EmailAuditActions.EmailDailySendCountsBackfilled, nameof(EmailDailySendCount),
+            Guid.Empty, Arg.Any<string>(), _actorId);
     }
 
     private static EmailOutboxMessage BuildOutboxMessage(Instant createdAt, EmailOutboxStatus status, string templateName) => new()

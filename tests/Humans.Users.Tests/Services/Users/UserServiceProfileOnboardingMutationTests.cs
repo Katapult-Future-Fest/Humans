@@ -40,6 +40,62 @@ public sealed class UserServiceProfileOnboardingMutationTests : ServiceTestHarne
     }
 
     [HumansTheory]
+    [InlineData("invalid", "Validation_EmailAddress")]
+    [InlineData("overlong", "Validation_EmailAddress")]
+    [InlineData("duplicate", "Users_Profile_EmailAlreadyAdded")]
+    [InlineData("missing", "Users_EmailUpdate_AccountUnavailable")]
+    public async Task AddUserEmailAsync_ExpectedRefusal_DoesNotAddRow(string kind, string errorKey)
+    {
+        var userId = Guid.NewGuid();
+        var repository = Substitute.For<IUserRepository>();
+        if (!string.Equals(kind, "missing", StringComparison.Ordinal))
+            repository.GetByIdAsync(userId, Arg.Any<CancellationToken>()).Returns(new User { Id = userId });
+        repository.GetUserEmailsByAddressAsync(Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
+            .Returns(string.Equals(kind, "duplicate", StringComparison.Ordinal)
+                ? [new UserEmail { Id = Guid.NewGuid(), UserId = userId, Email = "held@example.com" }]
+                : []);
+        var service = new UserService(repository, _communicationPreferenceRepository,
+            AdminAuthorization, _fileStorage, Clock, NullLogger<UserService>.Instance, AuditLog);
+
+        var email = kind switch
+        {
+            "invalid" => "invalid",
+            "overlong" => new string('a', 245) + "@example.com",
+            _ => "held@example.com"
+        };
+        var result = await service.AddUserEmailAsync(userId,
+            new UserEmailAddCommand(email, IsVerified: true),
+            TestContext.Current.CancellationToken);
+
+        result.ErrorKey.Should().Be(errorKey);
+        result.Added.Should().BeFalse();
+        result.EmailId.Should().Be(Guid.Empty);
+        await repository.DidNotReceive().AddUserEmailAsync(Arg.Any<UserEmail>(), Arg.Any<CancellationToken>());
+        AuditLog.ReceivedCalls().Should().BeEmpty();
+    }
+
+    [HumansTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AddUserEmailAsync_StoredLengthLimit_AcceptsTrimmedBoundary(bool padded)
+    {
+        var userId = Guid.NewGuid();
+        SeedUser(userId);
+        await Db.SaveChangesAsync(TestContext.Current.CancellationToken);
+        var email = new string('a', 244) + "@example.com";
+
+        var result = await _service.AddUserEmailAsync(userId,
+            new UserEmailAddCommand(padded ? $"  {email}  " : email, IsVerified: true),
+            TestContext.Current.CancellationToken);
+
+        result.Added.Should().BeTrue();
+        result.ErrorKey.Should().BeNull();
+        var row = await Db.UserEmails.AsNoTracking().SingleAsync(e => e.Id == result.EmailId,
+            TestContext.Current.CancellationToken);
+        row.Email.Should().Be(email).And.HaveLength(256);
+    }
+
+    [HumansTheory]
     [InlineData("unverified-primary")]
     [InlineData("missing-primary")]
     [InlineData("missing-visibility")]
@@ -358,9 +414,6 @@ public sealed class UserServiceProfileOnboardingMutationTests : ServiceTestHarne
         remaining.Should().BeEmpty();
     }
 
-    // The consent-check and rejection annotations moved to Consent (consent_reviews, Users
-    // decomposition commit 12; covered by Humans.Consent.Tests). Users keeps the state transitions.
-
     [HumansFact]
     public async Task SetRejectedAsync_SetsRejectedState()
     {
@@ -377,7 +430,7 @@ public sealed class UserServiceProfileOnboardingMutationTests : ServiceTestHarne
     [HumansFact]
     public async Task SetRejectedAsync_StateSurvivesALaterUnsuspend()
     {
-        // The rejection is no longer a profile column, so the classifier must carry it forward
+        // Rejection is not a profile column, so the classifier must carry it forward
         // from users.State on every later transition.
         var userId = Guid.NewGuid();
         await SeedUserWithProfileAsync(userId);
@@ -392,7 +445,7 @@ public sealed class UserServiceProfileOnboardingMutationTests : ServiceTestHarne
     [HumansFact]
     public async Task LegacyRejectedProfile_WithNonRejectedState_StillReadsAndClassifiesRejected()
     {
-        // A profile rejected before commit 12 (profiles.RejectedAt set) whose users.State never
+        // A legacy rejected profile (profiles.RejectedAt set) whose users.State never
         // recorded Rejected: it reads as rejected, and the next transition stores Rejected.
         var userId = Guid.NewGuid();
         var profileId = await SeedUserWithProfileAsync(userId);
@@ -564,7 +617,7 @@ public sealed class UserServiceProfileOnboardingMutationTests : ServiceTestHarne
         await Db.SaveChangesAsync(TestContext.Current.CancellationToken);
 
         var actorId = Guid.NewGuid();
-        AuditLog.LogAsync(AuditAction.StubProfileBackfilled, nameof(User), userId,
+        AuditLog.LogAsync(UsersAuditActions.StubProfileBackfilled, nameof(User), userId,
             Arg.Any<string>(), actorId).Returns(async _ =>
             {
                 (await Db.Profiles.AsNoTracking().AnyAsync(p => p.UserId == userId,
@@ -576,7 +629,7 @@ public sealed class UserServiceProfileOnboardingMutationTests : ServiceTestHarne
         profile.BurnerName.Should().BeEmpty();
         var user = await Db.Users.AsNoTracking().SingleAsync(u => u.Id == userId, TestContext.Current.CancellationToken);
         user.State.Should().Be(UserState.Bare);
-        await AuditLog.Received(1).LogAsync(AuditAction.StubProfileBackfilled, nameof(User), userId,
+        await AuditLog.Received(1).LogAsync(UsersAuditActions.StubProfileBackfilled, nameof(User), userId,
             Arg.Any<string>(), actorId);
         (await _service.EnsureStubProfileAsync(userId, ct: TestContext.Current.CancellationToken, actorUserId: actorId))
             .Should().BeFalse();
@@ -678,18 +731,23 @@ public sealed class UserServiceProfileOnboardingMutationTests : ServiceTestHarne
         }
         await Db.SaveChangesAsync(TestContext.Current.CancellationToken);
 
-        Func<Task> act = async () =>
+        if (reconcile)
         {
-            if (reconcile)
-                await _service.ApplyUserEmailReconcilePlanAsync(userId, new UserEmailReconcilePlanCommand(null, null, null,
+            Func<Task> act = () => _service.ApplyUserEmailReconcilePlanAsync(userId,
+                new UserEmailReconcilePlanCommand(null, null, null,
                     new UserEmail { Id = Guid.NewGuid(), UserId = userId, Email = "recreated@example.com", IsVerified = verified }),
-                    TestContext.Current.CancellationToken);
-            else
-                await _service.AddUserEmailAsync(userId, new UserEmailAddCommand("recreated@example.com", IsVerified: verified),
-                    TestContext.Current.CancellationToken);
-        };
+                TestContext.Current.CancellationToken);
+            await act.Should().ThrowAsync<InvalidOperationException>();
+        }
+        else
+        {
+            var result = await _service.AddUserEmailAsync(userId,
+                new UserEmailAddCommand("recreated@example.com", IsVerified: verified),
+                TestContext.Current.CancellationToken);
+            result.ErrorKey.Should().Be("Users_EmailUpdate_AccountUnavailable");
+            result.Added.Should().BeFalse();
+        }
 
-        await act.Should().ThrowAsync<InvalidOperationException>();
         (await Db.UserEmails.CountAsync(TestContext.Current.CancellationToken)).Should().Be(0);
         AuditLog.ReceivedCalls().Should().BeEmpty();
     }
@@ -879,7 +937,7 @@ public sealed class UserServiceProfileOnboardingMutationTests : ServiceTestHarne
     }
 
     [HumansFact]
-    public async Task AnonymizeProfileForDeletionAsync_ClearsProfileAndReturnsPreviousPictureMetadata()
+    public async Task AnonymizeProfileForDeletionAsync_ClearsProfilePicture()
     {
         var userId = Guid.NewGuid();
         var profileId = await SeedUserWithProfileAsync(userId);
@@ -891,8 +949,6 @@ public sealed class UserServiceProfileOnboardingMutationTests : ServiceTestHarne
         var result = await _service.AnonymizeProfileForDeletionAsync(userId, TestContext.Current.CancellationToken);
 
         result.Anonymized.Should().BeTrue();
-        result.ProfileId.Should().Be(profileId);
-        result.PreviousProfilePictureKey.Should().Be("uploads/profile-pictures/versioned.png");
 
         var fresh = await Db.Profiles.AsNoTracking().SingleAsync(p => p.UserId == userId, TestContext.Current.CancellationToken);
         fresh.ProfilePictureContentType.Should().BeNull();

@@ -11,7 +11,6 @@ using NodaTime;
 
 namespace Humans.Rideshare.Controllers;
 
-/// <summary>The board's GeoJSON feed for MapLibre. Mirrors <c>CityPlanningApiController</c>.</summary>
 [ApiController]
 [Authorize(Policy = PolicyNames.AppAccess)]
 [Route("api/rideshare")]
@@ -28,7 +27,7 @@ internal sealed class RideshareApiController(
         var (error, user) = await ResolveCurrentUserOrUnauthorizedAsync(ct);
         if (error is not null) return error;
 
-        var snapshot = await rideshare.GetSnapshotAsync(await rideshare.GetActiveYearAsync(ct), ct);
+        var snapshot = await rideshare.GetSnapshotAsync(await rideshare.GetActiveEventIdAsync(ct), ct);
         var dir = direction ?? RideshareDirection.Inbound;
         var day = RideshareDates.Parse(date) ?? BoardViewModel.DefaultDate(snapshot.Settings, dir, RideshareDates.Today(clock));
 

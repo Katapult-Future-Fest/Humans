@@ -16,7 +16,7 @@
 
 ## Business Context
 
-Nobodies Collective sells event tickets through external vendors (currently TicketTailor). Discount codes are distributed to humans via the campaign system. This feature creates a dedicated Tickets section giving the ticketing team (TicketAdmin role) a dashboard with sales data, revenue metrics, attendee tracking, and operational tools.
+Nobodies Collective sells event tickets through external vendors (currently TicketTailor). Discount codes are distributed to humans via the campaign system. This feature creates a dedicated Tickets section giving the ticketing team (TicketsAdmin role) a dashboard with sales data, revenue metrics, attendee tracking, and operational tools.
 
 ## Data Model
 
@@ -58,7 +58,7 @@ Tickets priced above 315 EUR (the VIP threshold, `TicketConstants.VipThresholdEu
 
 ## Authorization
 
-| Action | TicketAdmin | Admin | Board |
+| Action | TicketsAdmin | Admin | Board |
 |--------|:-----------:|:-----:|:-----:|
 | View dashboard/orders/attendees/codes | Yes | Yes | Yes |
 | Trigger sync, CSV exports, generate codes | Yes | Yes | No |
@@ -73,9 +73,9 @@ Tickets priced above 315 EUR (the VIP threshold, `TicketConstants.VipThresholdEu
 | `/Tickets/Codes` | Discount code redemption tracking tied to campaigns |
 | `/Tickets/WhoHasntBought` | Active humans without ticket purchases |
 | `/Tickets/SalesAggregates` | Weekly (Mon–Sun), quarterly (Spanish tax Q1–Q4) and monthly accountant aggregates, plus by-ticket-type and by-discount-campaign breakdowns, with real VAT/donation data |
-| `/Tickets/Sync`, `/Tickets/FullResync` | POST: incremental sync (`TicketAdminOrAdmin`) / full re-sync (`AdminOnly`) |
-| `/Tickets/Export/Attendees`, `/Tickets/Export/Orders` | CSV exports (`TicketAdminOrAdmin`) |
-| `/Tickets/Export/AccountantReport` | Monthly accountant recap CSV (`TicketAdminOrAdmin`) |
+| `/Tickets/Sync`, `/Tickets/FullResync` | POST: incremental sync (`TicketsPolicies.Manage`) / full re-sync (`AdminOnly`) |
+| `/Tickets/Export/Attendees`, `/Tickets/Export/Orders` | CSV exports (`TicketsPolicies.Manage`) |
+| `/Tickets/Export/AccountantReport` | Monthly accountant recap CSV (`TicketsPolicies.Manage`) |
 | `/Tickets/Export/Donations` | Donor list CSV, audited (`AdminOnly`) |
 | `/Tickets/Participation/Backfill` | CSV participation backfill (`AdminOnly`) — [event-participation.md](event-participation.md) |
 | `/Tickets/Transfers`, `/Tickets/Admin/Transfers` | Member transfer wizard and admin queue — [ticket-transfer.md](ticket-transfer.md) |

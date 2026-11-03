@@ -13,8 +13,8 @@ using Humans.Users.Contracts;
 
 namespace Humans.Shifts.Controllers;
 
-// Wider policy for page entry; privileged sub-panels gated by ShiftDashboardAccess in views.
-[Authorize(Policy = PolicyNames.ShiftDepartmentManager)]
+// The wider policy for entry; views gate the privileged sub-panels on ShiftsPolicies.Read.
+[Authorize(Policy = ShiftsPolicies.DepartmentRead)]
 [Route("Shifts/Dashboard")]
 internal sealed class ShiftDashboardController(
     IBurnSettingsService burnSettings,
@@ -40,9 +40,10 @@ internal sealed class ShiftDashboardController(
         string? endDate,
         TrendWindow? trendWindow,
         ShiftPeriod? period,
-        BuildSubPeriod? subPeriod)
+        BuildSubPeriod? subPeriod,
+        CancellationToken ct = default)
     {
-        var es = await burnSettings.GetActiveAsync();
+        var es = await burnSettings.GetActiveAsync(ct);
         if (es is null)
         {
             SetError("No active event settings configured.");
@@ -65,23 +66,23 @@ internal sealed class ShiftDashboardController(
             activeEnd,
             trendWindow ?? TrendWindow.Last30Days,
             period,
-            subPeriod));
+            subPeriod), ct);
 
         return View(model);
     }
 
-    [Authorize(Policy = PolicyNames.ShiftDashboardAccess)]
+    [Authorize(Policy = ShiftsPolicies.Read)]
     [HttpGet("PostEventStats")]
-    public async Task<IActionResult> PostEventStats()
+    public async Task<IActionResult> PostEventStats(CancellationToken ct = default)
     {
-        var es = await burnSettings.GetActiveAsync();
+        var es = await burnSettings.GetActiveAsync(ct);
         if (es is null)
         {
             SetError("No active event settings configured.");
             return RedirectToAction("Index", "Home");
         }
 
-        var stats = await shiftMgmt.GetPostEventStatsAsync(es.Id);
+        var stats = await shiftMgmt.GetPostEventStatsAsync(es.Id, ct);
         if (stats is null)
         {
             SetError("Could not load post-event statistics.");
@@ -98,17 +99,16 @@ internal sealed class ShiftDashboardController(
         return View(ordered);
     }
 
-    // Auth: narrow policy overrides controller-level wider one (subteam managers can't reach directly).
-    [Authorize(Policy = PolicyNames.ShiftDashboardAccess)]
+    // Narrower than the controller's policy: subteam managers can't reach it.
+    [Authorize(Policy = ShiftsPolicies.Manage)]
     [HttpGet("SearchVolunteers")]
-    public async Task<IActionResult> SearchVolunteers(Guid shiftId, string? query)
+    public async Task<IActionResult> SearchVolunteers(Guid shiftId, string? query, CancellationToken ct = default)
     {
         try
         {
             var result = await volunteerSearchBuilder.BuildForShiftAsync(
-                await shiftMgmt.GetShiftByIdAsync(shiftId),
-                query,
-                ShiftRoleChecks.CanViewMedical(User));
+                await shiftMgmt.GetShiftByIdAsync(shiftId, ct),
+                query, ct);
             return result.Status switch
             {
                 VolunteerSearchBuildStatus.EmptyQuery => Json(Array.Empty<VolunteerSearchResult>()),
@@ -117,6 +117,10 @@ internal sealed class ShiftDashboardController(
                 _ => throw new InvalidOperationException($"Unexpected volunteer search status '{result.Status}'.")
             };
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
             logger.LogError(ex, "Volunteer search failed for shift {ShiftId}, query '{Query}'", shiftId, query);
@@ -124,8 +128,8 @@ internal sealed class ShiftDashboardController(
         }
     }
 
-    // Auth: narrow policy overrides controller-level wider one — only ShiftDashboardAccess can assign.
-    [Authorize(Policy = PolicyNames.ShiftDashboardAccess)]
+    // Narrower than the controller's policy: subteam managers and Board can't assign.
+    [Authorize(Policy = ShiftsPolicies.Manage)]
     [HttpPost("Voluntell")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Voluntell(Guid shiftId, Guid userId)

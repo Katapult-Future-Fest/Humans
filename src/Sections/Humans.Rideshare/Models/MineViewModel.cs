@@ -12,9 +12,8 @@ internal sealed record MineOfferRow(TripView Trip, IReadOnlyList<MineInterestRow
 
 internal sealed record MineRequestRow(RequestView Request, IReadOnlyList<MineInterestRow> Received);
 
-/// <summary>My offers (with interests received), my requests (with drivers who can take me), interests I sent.</summary>
 internal sealed record MineViewModel(
-    int Year,
+    string EventName,
     IReadOnlyList<MineOfferRow> Offers,
     IReadOnlyList<MineRequestRow> Requests,
     IReadOnlyList<MineInterestRow> Sent)
@@ -58,6 +57,6 @@ internal sealed record MineViewModel(
             })
             .ToList();
 
-        return new MineViewModel(snapshot.Year, offers, requests, sent);
+        return new MineViewModel(snapshot.EventName, offers, requests, sent);
     }
 }

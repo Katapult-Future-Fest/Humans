@@ -7,13 +7,7 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace Humans.Tickets.ViewComponents;
 
-/// <summary>
-/// The "Onsite since {time}" chip (nobodies-collective/Humans#736), contributed to
-/// <c>UserPartSlots.Profile</c>. Shown for the active event year once the member is Attended with
-/// a gate check-in. Audience: the member on their own profile (<see cref="ProfileCardViewMode.Self"/>),
-/// or a viewer passing <see cref="PolicyNames.TicketAdminBoardOrAdmin"/>, the policy gating
-/// <c>/Tickets/Admin/Onsite</c>. Nothing for anyone else.
-/// </summary>
+/// <summary>Only for the member on their own profile or a viewer passing <see cref="TicketsPolicies.Read"/>.</summary>
 public sealed class OnsiteChipViewComponent(
     ITicketService tickets,
     ISettingsService settingsService,
@@ -22,7 +16,7 @@ public sealed class OnsiteChipViewComponent(
     public async Task<IViewComponentResult> InvokeAsync(Guid userId, ProfileCardViewMode viewMode)
     {
         if (viewMode != ProfileCardViewMode.Self
-            && !(await authorization.AuthorizeAsync(UserClaimsPrincipal, PolicyNames.TicketAdminBoardOrAdmin)).Succeeded)
+            && !(await authorization.AuthorizeAsync(UserClaimsPrincipal, TicketsPolicies.Read)).Succeeded)
             return Content(string.Empty);
 
         var ct = HttpContext.RequestAborted;

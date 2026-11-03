@@ -12,6 +12,12 @@ internal sealed class CampSeason
     public Camp Camp { get; set; } = null!;
 
     public int Year { get; init; }
+
+    /// <summary>
+    /// Settings' event row this season belongs to, stamped on creation. Null only on seasons older than the column,
+    /// until the <c>camps.event-ids</c> data migration assigns them.
+    /// </summary>
+    public Guid? EventSettingsId { get; set; }
     public string Name { get; set; } = string.Empty;
     public LocalDate? NameLockDate { get; set; }
     public Instant? NameLockedAt { get; set; }
@@ -36,27 +42,19 @@ internal sealed class CampSeason
 
     public AdultPlayspacePolicy AdultPlayspace { get; set; }
 
-    // Placement
     public int MemberCount { get; set; }
     public SpaceSize? SpaceRequirement { get; set; }
     public SoundZone? SoundZone { get; set; }
     public ElectricalGrid? ElectricalGrid { get; set; }
 
-    // Review
     public Guid? ReviewedByUserId { get; set; }
     public string? ReviewNotes { get; set; }
     public Instant? ResolvedAt { get; set; }
 
-    /// <summary>
-    /// Number of Early Entry slots this season's camp may grant to its members.
-    /// CampAdmin-managed. 0 = no EE this season. See docs/sections/Camps.md.
-    /// </summary>
+    /// <summary>CampAdmin-managed. 0 = no Early Entry this season.</summary>
     public int EeSlotCount { get; set; }
 
-    /// <summary>
-    /// Reverse navigation: all <see cref="CampMember"/> rows for this season.
-    /// Populated only when explicitly Included (e.g. in the admin read path).
-    /// </summary>
+    /// <summary>Populated only when explicitly Included.</summary>
     public ICollection<CampMember> Members { get; set; } = new List<CampMember>();
 
     public Instant CreatedAt { get; init; }

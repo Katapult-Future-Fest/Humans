@@ -255,8 +255,8 @@ public class TicketControllerTests
     [HumansFact]
     public void Class_admits_TicketAdmin_Board_and_Admin()
     {
-        typeof(TicketController).GetCustomAttribute<AuthorizeAttribute>()!.Policy
-            .Should().Be(PolicyNames.TicketAdminBoardOrAdmin);
+        typeof(TicketController).GetCustomAttribute<AuthorizeAttribute>(inherit: false)!.Policy
+            .Should().Be(TicketsPolicies.Read);
     }
 
     [HumansFact]
@@ -266,15 +266,15 @@ public class TicketControllerTests
             .Single(m => string.Equals(m.Name, nameof(TicketController.ExportDonations), StringComparison.Ordinal));
 
         action.GetCustomAttribute<HttpGetAttribute>()!.Template.Should().Be("Export/Donations");
-        action.GetCustomAttribute<AuthorizeAttribute>()!.Policy.Should().Be(PolicyNames.AdminOnly,
+        action.GetCustomAttribute<AuthorizeAttribute>(inherit: false)!.Policy.Should().Be(PolicyNames.AdminOnly,
             because: "the class policy admits Board and TicketAdmin; the donor list carries buyer PII and is admin-only");
     }
 
     [HumansTheory]
-    [InlineData(nameof(TicketController.Sync), PolicyNames.TicketAdminOrAdmin)]
-    [InlineData(nameof(TicketController.ExportAttendees), PolicyNames.TicketAdminOrAdmin)]
-    [InlineData(nameof(TicketController.ExportOrders), PolicyNames.TicketAdminOrAdmin)]
-    [InlineData(nameof(TicketController.ExportAccountantReport), PolicyNames.TicketAdminOrAdmin)]
+    [InlineData(nameof(TicketController.Sync), TicketsPolicies.Manage)]
+    [InlineData(nameof(TicketController.ExportAttendees), TicketsPolicies.Manage)]
+    [InlineData(nameof(TicketController.ExportOrders), TicketsPolicies.Manage)]
+    [InlineData(nameof(TicketController.ExportAccountantReport), TicketsPolicies.Manage)]
     [InlineData(nameof(TicketController.FullResync), PolicyNames.AdminOnly)]
     [InlineData(nameof(TicketController.ParticipationBackfill), PolicyNames.AdminOnly)]
     public void Action_narrows_the_class_policy_so_Board_is_denied(string actionName, string policy)
@@ -284,13 +284,16 @@ public class TicketControllerTests
             .ToList();
 
         actions.Should().NotBeEmpty();
-        actions.Should().AllSatisfy(a => a.GetCustomAttribute<AuthorizeAttribute>()!.Policy.Should().Be(policy));
+        actions.Should().AllSatisfy(a => a.GetCustomAttribute<AuthorizeAttribute>(inherit: false)!.Policy.Should().Be(policy));
     }
 
     [HumansFact]
-    public void TransferAdmin_class_admits_TicketAdmin_and_Admin_only()
+    public void TransferAdmin_class_reads_and_decisions_manage()
     {
-        typeof(TicketTransferAdminController).GetCustomAttribute<AuthorizeAttribute>()!.Policy
-            .Should().Be(PolicyNames.TicketAdminOrAdmin);
+        typeof(TicketTransferAdminController).GetCustomAttribute<AuthorizeAttribute>(inherit: false)!.Policy
+            .Should().Be(TicketsPolicies.Read);
+        typeof(TicketTransferAdminController).GetMethod(nameof(TicketTransferAdminController.Decide))!
+            .GetCustomAttribute<AuthorizeAttribute>(inherit: false)!.Policy
+            .Should().Be(TicketsPolicies.Manage);
     }
 }

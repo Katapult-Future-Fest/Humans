@@ -14,7 +14,7 @@ The association hands individual people entitlements: a cheaper ticket, early en
 
 ## User Stories
 
-**As Board or Admin, I create a program** (name, what it entitles, year, optional default expiry, issuer) and name its managers.
+**As Board or Admin, I create a program** (name, what it entitles, event, optional default expiry, issuer) and name its managers.
 - The issuer is either its managers by hand, or a source section by source key.
 - At most one open program per source key; a second is refused.
 - A closed program takes no new grants; its existing grants stay.
@@ -34,7 +34,7 @@ The association hands individual people entitlements: a cheaper ticket, early en
 - On issue, resend and revoke I get an email in my language and an in-app notice; a failure in one channel does not stop the other or the write.
 - My profile's "My grants" card lists my active grants and those that ended this year or later. Nobody else sees it.
 
-**As HumanAdmin, Board or Admin, I see a person's grants** on their admin detail page, in every state.
+**As UsersAdmin, Board or Admin, I see a person's grants** on their admin detail page, in every state.
 
 ## Data Model
 

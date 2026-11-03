@@ -1,43 +1,20 @@
 namespace Humans.Base.Authorization;
 
 /// <summary>
-/// Canonical authorization policy names. Each name corresponds to a registered ASP.NET Core
-/// authorization policy. Use these constants in [Authorize(Policy = ...)] attributes,
-/// authorize-policy TagHelper attributes, and IAuthorizationService calls.
+/// The authorization policies no one section owns: the two system-wide roles, app access, the admin shell, and the
+/// composites that span sections. A section's own policies live on its <c>&lt;Section&gt;Policies</c> class in its
+/// Contracts (<c>TeamsPolicies.Read</c>, <c>TeamsPolicies.Manage</c>).
 /// </summary>
 public static class PolicyNames
 {
     public const string AdminOnly = nameof(AdminOnly);
     public const string BoardOrAdmin = nameof(BoardOrAdmin);
-    public const string HumanAdminBoardOrAdmin = nameof(HumanAdminBoardOrAdmin);
-    public const string HumanAdminOrAdmin = nameof(HumanAdminOrAdmin);
-    public const string TeamsAdminBoardOrAdmin = nameof(TeamsAdminBoardOrAdmin);
 
-    /// <summary>
-    /// TeamsAdmin or Admin — deliberately narrower than <see cref="TeamsAdminBoardOrAdmin"/>
-    /// (Board is not included) for gates where Board access would dead-end the viewer
-    /// (e.g. the Team page's "Open store" link, which Board members can't otherwise use).
-    /// </summary>
-    public const string TeamsAdminOrAdmin = nameof(TeamsAdminOrAdmin);
-    public const string CampAdminOrAdmin = nameof(CampAdminOrAdmin);
-    public const string TicketAdminBoardOrAdmin = nameof(TicketAdminBoardOrAdmin);
-    public const string TicketAdminOrAdmin = nameof(TicketAdminOrAdmin);
-    public const string FinanceAdminOrAdmin = nameof(FinanceAdminOrAdmin);
-    public const string EventsAdminOrAdmin = nameof(EventsAdminOrAdmin);
-    public const string CantinaAdminOrAdmin = nameof(CantinaAdminOrAdmin);
-    public const string RideshareAdminOrAdmin = nameof(RideshareAdminOrAdmin);
-    public const string StoreCatalogAdmin = nameof(StoreCatalogAdmin);
     public const string ReviewQueueAccess = nameof(ReviewQueueAccess);
     public const string ConsentCoordinatorBoardOrAdmin = nameof(ConsentCoordinatorBoardOrAdmin);
-    public const string ShiftDashboardAccess = nameof(ShiftDashboardAccess);
-    public const string VolunteerTrackingWrite = nameof(VolunteerTrackingWrite);
-    public const string ShiftDepartmentManager = nameof(ShiftDepartmentManager);
-    public const string PrivilegedSignupApprover = nameof(PrivilegedSignupApprover);
-    public const string VolunteerManager = nameof(VolunteerManager);
-    public const string MedicalDataViewer = nameof(MedicalDataViewer);
 
     /// <summary>
-    /// Scanner tools (/Scanner/*): TicketAdmin, Board, or Admin — plus the shared
+    /// Scanner tools (/Scanner/*): TicketsAdmin, Board, or Admin — plus the shared
     /// gate-terminal account (matched by its well-known id, not a role, so it never
     /// shows up in role-assignment UI). Composite assertion policy.
     /// </summary>
@@ -45,27 +22,14 @@ public static class PolicyNames
 
     /// <summary>
     /// Gate <em>write</em> actions (/Gate/Decision, /Gate/Claim POST): records a
-    /// durable admission or claims the scanning session. Deliberately distinct
-    /// from the read-only <see cref="ScannerAccess"/> so the gate's write surface
-    /// never rides on the Scanner read gate. Same principals today (TicketAdmin,
-    /// Board, Admin, or the shared gate-terminal account) but kept separate so the
-    /// two can diverge without re-opening the read path. Composite assertion policy.
+    /// durable admission or claims the scanning session. TicketsAdmin, Admin, or the
+    /// shared gate-terminal account; Board reads the gate through
+    /// <see cref="ScannerAccess"/> and admits no one. Composite assertion policy.
     /// </summary>
     public const string GateAdmit = nameof(GateAdmit);
 
-    /// <summary>
-    /// Can use the app: <c>UserState == Active</c> (entered legal name).
-    /// The single nav-visibility gate replaces the former
-    /// IsActiveMember / ActiveMemberOrShiftAccess split (there is no separate shift access).
-    /// </summary>
+    /// <summary>Can use the app: <c>UserState == Active</c>. The single nav-visibility gate.</summary>
     public const string AppAccess = nameof(AppAccess);
-
-    /// <summary>
-    /// HumanAdmin who is NOT also Admin or Board. Used for the nav "Humans" link
-    /// that only shows when the user has HumanAdmin but not the broader Board/Admin access.
-    /// Composite policy requiring a custom authorization handler.
-    /// </summary>
-    public const string HumanAdminOnly = nameof(HumanAdminOnly);
 
     /// <summary>
     /// Board member (standalone). Used rarely — most Board gates also include Admin.
@@ -73,16 +37,7 @@ public static class PolicyNames
     public const string BoardOnly = nameof(BoardOnly);
 
     /// <summary>
-    /// Read-only Barrios compliance matrix: CampAdmin OR Admin OR a coordinator /
-    /// management role-holder on any team or sub-team. Broader than
-    /// <see cref="CampAdminOrAdmin"/> (which gates the camp-management surface) so
-    /// team coordinators can also see role staffing across barrios. Composite
-    /// policy requiring a custom authorization handler.
-    /// </summary>
-    public const string CampComplianceAccess = nameof(CampComplianceAccess);
-
-    /// <summary>
-    /// City-planning map admin: CampAdmin OR Admin OR a member of the city-planning team.
+    /// City-planning map admin: CampsAdmin OR Admin OR a member of the city-planning team.
     /// The same audience <c>CityPlanningController</c> self-gates on, so the
     /// <c>/Settings#city-planning</c> tab is visible to exactly the people its POST
     /// endpoints accept. Composite policy requiring a custom authorization handler.
@@ -90,9 +45,8 @@ public static class PolicyNames
     public const string CityPlanningMapAdmin = nameof(CityPlanningMapAdmin);
 
     /// <summary>
-    /// Any admin-shaped role: Admin, Board, HumanAdmin, TeamsAdmin, CampAdmin,
-    /// TicketAdmin, EventsAdmin, FeedbackAdmin, FinanceAdmin, NoInfoAdmin,
-    /// VolunteerCoordinator, or ConsentCoordinator. Gates the admin-shell entry
+    /// Every catalogued role that opens the admin shell (<c>RoleDefinition.OpensAdminShell</c>), derived from the
+    /// sections' <c>ISectionRoles</c> through Auth's <c>RoleCatalog</c>. Gates the admin-shell entry
     /// point (/Admin) so domain admins (e.g. FinanceAdmin) can reach the dashboard
     /// and see only the sidebar items their per-item authorization permits. The
     /// dashboard tiles themselves are aggregate counts that are safe across all
@@ -110,11 +64,9 @@ public static class PolicyNames
     public const string RoleAssignmentManage = nameof(RoleAssignmentManage);
 
     /// <summary>
-    /// May view an expense report (the resource): submitter, its budget category's coordinator,
-    /// or FinanceAdmin/Admin. Registered by Expenses' <c>SectionPolicies</c>, wrapping its internal
-    /// <c>ExpenseReportOperationRequirement(View)</c>/handler, so an external caller — Backdoor's
-    /// finance read API (peterdrier/Humans#1838) — can reach the same check
-    /// <c>ExpensesController</c> uses without the requirement type leaving the section.
+    /// May view an expense report (the resource): submitter, its budget category's coordinator, or FinanceAdmin/Admin.
+    /// Registered by Expenses' <c>Section</c> so an external caller (Backdoor's finance read API) reaches the
+    /// same check as <c>ExpensesController</c> without the requirement type leaving the section.
     /// </summary>
     public const string ExpenseReportView = nameof(ExpenseReportView);
 }

@@ -5,15 +5,21 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace Humans.Search;
 
-/// <summary>
-/// Search's DI entry point. No <c>DbContext</c> and no caching decorator: the section owns
-/// no tables, and four of the five buckets already come from their owners' caches
-/// (<c>Docs/Search.md</c>).
-/// </summary>
-public sealed class Section : ISection
+public sealed class Section : ISection, ISectionNav
 {
     public void Register(IServiceCollection services, IConfiguration configuration)
     {
         services.AddScoped<ISearchService, SearchService>();
     }
+
+    IEnumerable<MemberNavItem> ISectionNav.Items() =>
+    [
+        new(
+            "Search",
+            Controller: "Search",
+            Action: "Index",
+            Weight: 0,
+            IconCssClass: "fa-solid fa-magnifying-glass",
+            Visible: (_, user) => user.Identity?.IsAuthenticated == true)
+    ];
 }

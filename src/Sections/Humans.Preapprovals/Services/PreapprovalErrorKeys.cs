@@ -1,9 +1,6 @@
 namespace Humans.Preapprovals.Services;
 
-/// <summary>
-/// The resource keys carried by <see cref="PreapprovalRefusal"/>. Named constants rather than
-/// literals so a renamed key is a build error, not a raw key on the page.
-/// </summary>
+/// <summary>Constants rather than literals, so a renamed key is a build error, not a raw key on the page.</summary>
 internal static class PreapprovalErrorKeys
 {
     public const string NotFound = "Preapprovals_Error_NotFound";
@@ -11,6 +8,8 @@ internal static class PreapprovalErrorKeys
     public const string PerPersonAmountRequired = "Preapprovals_Error_PerPersonAmountRequired";
     public const string PerPersonAmountNotAllowed = "Preapprovals_Error_PerPersonAmountNotAllowed";
     public const string AmountPositive = "Preapprovals_Error_AmountPositive";
+    public const string AmountPrecision = "Preapprovals_Error_AmountPrecision";
+    public const string AmountTooLarge = "Preapprovals_Error_AmountTooLarge";
     public const string AmountNotAllowed = "Preapprovals_Error_AmountNotAllowed";
     public const string AmountRequired = "Preapprovals_Error_AmountRequired";
     public const string AccountNotFound = "Preapprovals_Error_AccountNotFound";

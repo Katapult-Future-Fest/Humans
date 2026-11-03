@@ -6,13 +6,6 @@ using NodaTime;
 
 namespace Humans.Issues.Data;
 
-/// <summary>
-/// EF-backed implementation of <see cref="IIssuesRepository"/>. The only
-/// non-test file that touches <c>DbContext.Issues</c> or
-/// <c>DbContext.IssueComments</c>. Uses <see cref="IDbContextFactory{TContext}"/>
-/// so the repository can be registered as Singleton while
-/// <c>IssuesDbContext</c> remains Scoped.
-/// </summary>
 internal sealed class IssuesRepository(IDbContextFactory<IssuesDbContext> factory) : IIssuesRepository
 {
     public async Task AddIssueAsync(Issue issue, CancellationToken ct = default)
@@ -42,7 +35,9 @@ internal sealed class IssuesRepository(IDbContextFactory<IssuesDbContext> factor
     public async Task<IReadOnlyList<Issue>> GetListAsync(
         IssueListFilter f,
         IReadOnlySet<string>? sectionFilter,
-        Guid? reporterFallback,
+        IReadOnlyCollection<Guid>? reporterFallback,
+        IReadOnlyCollection<Guid>? reporterFilter,
+        IReadOnlyCollection<Guid>? assigneeFilter,
         CancellationToken ct = default)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
@@ -51,8 +46,8 @@ internal sealed class IssuesRepository(IDbContextFactory<IssuesDbContext> factor
         if (f.Statuses is { Length: > 0 }) q = q.Where(i => f.Statuses.Contains(i.Status));
         if (f.Categories is { Length: > 0 }) q = q.Where(i => f.Categories.Contains(i.Category));
         if (f.Sections is { Length: > 0 }) q = q.Where(i => f.Sections.Contains(i.Section));
-        if (f.ReporterUserId is { } rid) q = q.Where(i => i.ReporterUserId == rid);
-        if (f.AssigneeUserId is { } aid) q = q.Where(i => i.AssigneeUserId == aid);
+        if (reporterFilter is not null) q = q.Where(i => reporterFilter.Contains(i.ReporterUserId));
+        if (assigneeFilter is not null) q = q.Where(i => i.AssigneeUserId.HasValue && assigneeFilter.Contains(i.AssigneeUserId.Value));
         if (!string.IsNullOrWhiteSpace(f.SearchText))
         {
             // ILike, not Contains: Contains is case-sensitive on Postgres. Escape first so % and _ match literally.
@@ -64,10 +59,10 @@ internal sealed class IssuesRepository(IDbContextFactory<IssuesDbContext> factor
         if (sectionFilter is not null)
         {
             var sectionList = sectionFilter.ToList();
-            var fallback = reporterFallback;
+            var fallback = reporterFallback ?? [];
             q = q.Where(i =>
                 (i.Section != null && sectionList.Contains(i.Section)) ||
-                (fallback.HasValue && i.ReporterUserId == fallback.Value));
+                fallback.Contains(i.ReporterUserId));
         }
 
         return await q
@@ -102,7 +97,7 @@ internal sealed class IssuesRepository(IDbContextFactory<IssuesDbContext> factor
 
     public async Task<int> CountActionableAsync(
         IReadOnlySet<string>? sectionFilter,
-        Guid? viewerFallback,
+        IReadOnlyCollection<Guid>? viewerFallback,
         CancellationToken ct = default)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
@@ -112,10 +107,10 @@ internal sealed class IssuesRepository(IDbContextFactory<IssuesDbContext> factor
         if (sectionFilter is not null)
         {
             var sectionList = sectionFilter.ToList();
-            var fallback = viewerFallback;
+            var fallback = viewerFallback ?? [];
             q = q.Where(i =>
                 (i.Section != null && sectionList.Contains(i.Section)) ||
-                (fallback.HasValue && i.ReporterUserId == fallback.Value));
+                fallback.Contains(i.ReporterUserId));
         }
 
         return await q.CountAsync(ct);
@@ -143,7 +138,7 @@ internal sealed class IssuesRepository(IDbContextFactory<IssuesDbContext> factor
             .ToListAsync(ct);
     }
 
-    public async Task<IReadOnlyList<string>> EraseForUserAsync(Guid userId, CancellationToken ct = default)
+    public async Task EraseForUserAsync(Guid userId, CancellationToken ct = default)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
 
@@ -174,7 +169,6 @@ internal sealed class IssuesRepository(IDbContextFactory<IssuesDbContext> factor
         }
 
         await db.SaveChangesAsync(ct);
-        return ownIssues.Select(i => i.ScreenshotStoragePath).OfType<string>().ToList();
     }
 
     public async Task<IReadOnlyList<Guid>> GetExpiredTerminalAsync(
@@ -193,10 +187,7 @@ internal sealed class IssuesRepository(IDbContextFactory<IssuesDbContext> factor
     {
         if (ids.Count == 0) return (0, []);
 
-        // Load-then-RemoveRange (matching EmailOutboxRepository.DeleteSentOlderThanAsync)
-        // so unit tests using the EF InMemory provider still cover the path.
-        // ExecuteDeleteAsync would be cheaper at scale but is not supported by
-        // the InMemory provider.
+        // Load-then-RemoveRange rather than ExecuteDeleteAsync, which the EF InMemory test provider does not support.
         await using var db = await factory.CreateDbContextAsync(ct);
         var toDelete = await db.Issues
             .Where(i => ids.Contains(i.Id))

@@ -12,19 +12,14 @@ using Humans.Shifts.Services.Dtos;
 using NodaTime;
 using NSubstitute;
 using Humans.Users.Contracts;
+using Humans.Users.Domain;
+using Humans.Shifts.Tests.Infrastructure;
 
 namespace Humans.Shifts.Tests.Models;
 
 /// <summary>
-/// Tests for <see cref="ShiftAdminPageBuilder"/>'s private "Incomplete onboarding"
-/// Pending-list filter, reached only through <see cref="ShiftAdminPageBuilder.BuildAsync"/>
-/// when <see cref="ShiftAdminPageRequest.IncompleteOnboarding"/> is true. The filter keeps
-/// only pending signups whose user is NOT in the "has all required consents" set returned by
-/// <see cref="IMembershipCalculator.GetUsersWithAllRequiredConsentsForTeamAsync"/>.
-///
-/// Ported from the deleted
-/// tests/Humans.Application.Tests/Services/Shifts/ShiftSignupServiceFilterIncompleteOnboardingTests.cs
-/// (PR nobodies-collective/Humans#820 moved the logic from the service into this Web-layer builder).
+/// The private "Incomplete onboarding" pending filter, reached only through
+/// <see cref="ShiftAdminPageBuilder.BuildAsync"/>: it keeps pending signups whose user lacks a required consent.
 /// </summary>
 public sealed class ShiftAdminPageBuilderTests
 {
@@ -98,7 +93,7 @@ public sealed class ShiftAdminPageBuilderTests
         await _shiftManagement.Received(1).GetRotasByDepartmentAsync(Department.Id, Event.Id, cancellation.Token);
         await _membership.Received(1).GetUsersWithAllRequiredConsentsForTeamAsync(
             Arg.Any<IEnumerable<Guid>>(), SystemTeamIds.Volunteers, cancellation.Token);
-        await _userService.Received(2).GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), cancellation.Token);
+        await _userService.Received(1).GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), cancellation.Token);
         await _cantina.Received(1).GetDietaryProfilesAsync(Arg.Any<IReadOnlyCollection<Guid>>(), cancellation.Token);
         await _shiftManagement.Received(1).GetShiftProfileAsync(userId, cancellation.Token);
         await _teamService.Received(1).GetTeamsAsync(cancellation.Token);
@@ -199,9 +194,40 @@ public sealed class ShiftAdminPageBuilderTests
             Arg.Any<CancellationToken>());
     }
 
-    // ============================================================
-    // Helpers
-    // ============================================================
+    [HumansTheory]
+    [Xunit.InlineData(true)]
+    [Xunit.InlineData(false)]
+    public async Task MedicalBadge_IsAFlagForViewersOnly_TheTextStaysOnTheServer(bool canViewMedical)
+    {
+        var userId = Guid.NewGuid();
+        StubRotas(MakeRota(MakeShift(MakePending(userId))));
+        _membership.GetUsersWithAllRequiredConsentsForTeamAsync(
+                Arg.Any<IEnumerable<Guid>>(), SystemTeamIds.Volunteers, Arg.Any<CancellationToken>())
+            .Returns(new HashSet<Guid>());
+        _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<Guid, UserInfo>
+            {
+                [userId] = UserInfoStubHelpers.MakeUserInfo(userId, profile: new Profile
+                {
+                    Id = Guid.NewGuid(),
+                    UserId = userId,
+                    BurnerName = "Ann",
+                    MedicalConditions = "Epilepsy",
+                    CreatedAt = TestNow,
+                    UpdatedAt = TestNow,
+                    IsApproved = true,
+                }),
+            });
+        var builder = new ShiftAdminPageBuilder(_shiftManagement, _membership, _userService, _cantina, _teamService);
+
+        var vm = await builder.BuildAsync(new ShiftAdminPageRequest(
+            Department, Event, CanManage: true, CanApprove: true, canViewMedical, IncompleteOnboarding: false, TestNow));
+
+        var badges = vm.VolunteerProfiles[userId];
+        badges.UserId.Should().Be(userId);
+        badges.CanRevealMedical.Should().Be(canViewMedical);
+        badges.HasMedicalConditions.Should().Be(canViewMedical);
+    }
 
     private void StubRotas(params ShiftAdminRota[] rotas) =>
         _shiftManagement.GetRotasByDepartmentAsync(Department.Id, Event.Id)

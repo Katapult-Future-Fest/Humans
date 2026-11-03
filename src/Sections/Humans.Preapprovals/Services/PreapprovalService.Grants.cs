@@ -7,17 +7,11 @@ using NodaTime;
 
 namespace Humans.Preapprovals.Services;
 
-/// <summary>
-/// The grant state machine as managers and members drive it. Every transition is one
-/// person's act, audited with the actor; the ceiling is checked on every path that commits
-/// money (issue, approve, raise) and nowhere else.
-/// </summary>
+/// <summary>The ceiling is checked on every path that commits money (issue, approve, raise) and nowhere else.</summary>
 internal sealed partial class PreapprovalService
 {
     private const int LabelMax = 200;
     private const int NoteMax = 2000;
-
-    // ── Issue ─────────────────────────────────────────────────────────────
 
     public async Task<PreapprovalMutationResult<Guid>> IssueAsync(
         Guid programId, Guid beneficiaryUserId, decimal? amount, string? label, Guid actorUserId,
@@ -36,14 +30,8 @@ internal sealed partial class PreapprovalService
         var grant = NewGrant(program, beneficiaryUserId, sized.Value, Trimmed(label), GrantStatus.Open, now);
         grant.DecidedByUserId = actorUserId;
         grant.DecidedAt = now;
-        await repository.AddGrantsAsync([grant], ct);
-        // The grant committed; finish its audit and notices after the browser disconnects.
-        ct = CancellationToken.None;
-
-        await AuditGrantAsync(AuditAction.PreapprovalGrantIssued, grant,
-            $"Issued {Euros(grant.MaxAmount)} under \"{program.Name}\"{LabelSuffix(grant)} to {beneficiaryUserId}; claim by {program.ClaimBy.ToInvariantDate()}.",
-            actorUserId);
-        await AnnounceIssuedAsync(ToInfo(grant, program), ct);
+        await PersistIssuedGrantsAsync(program, [grant], actorUserId,
+            issued => $"Issued {Euros(issued.MaxAmount)} under \"{program.Name}\"{LabelSuffix(issued)} to {beneficiaryUserId}; claim by {program.ClaimBy.ToInvariantDate()}.", ct);
         return new(grant.Id);
     }
 
@@ -61,6 +49,7 @@ internal sealed partial class PreapprovalService
         if (ids.Count == 0) return new(Refusal: new PreapprovalRefusal(PreapprovalErrorKeys.NoBeneficiaries));
 
         var each = program.PerPersonAmount!.Value;
+        if (MoneyRefusal(each) is { } amountRefusal) return new(Refusal: amountRefusal);
         if (CeilingCheck(program, each * ids.Count) is { } over) return new(Refusal: over);
 
         var now = clock.GetCurrentInstant();
@@ -71,21 +60,23 @@ internal sealed partial class PreapprovalService
             g.DecidedAt = now;
             return g;
         }).ToList();
-        await repository.AddGrantsAsync(grants, ct);
-        // The grant committed; finish its audit and notices after the browser disconnects.
-        ct = CancellationToken.None;
-
-        foreach (var grant in grants)
-        {
-            await AuditGrantAsync(AuditAction.PreapprovalGrantIssued, grant,
-                $"Issued {Euros(grant.MaxAmount)} under \"{program.Name}\" to {grant.BeneficiaryUserId} (batch of {grants.Count}); claim by {program.ClaimBy.ToInvariantDate()}.",
-                actorUserId);
-            await AnnounceIssuedAsync(ToInfo(grant, program), ct);
-        }
+        await PersistIssuedGrantsAsync(program, grants, actorUserId,
+            grant => $"Issued {Euros(grant.MaxAmount)} under \"{program.Name}\" to {grant.BeneficiaryUserId} (batch of {grants.Count}); claim by {program.ClaimBy.ToInvariantDate()}.", ct);
         return new(grants.Select(g => g.Id).ToList());
     }
 
-    // ── Apply ─────────────────────────────────────────────────────────────
+    private async Task PersistIssuedGrantsAsync(
+        PreapprovalProgram program, IReadOnlyList<PreapprovalGrant> grants, Guid actorUserId,
+        Func<PreapprovalGrant, string> describe, CancellationToken ct)
+    {
+        await repository.AddGrantsAsync(grants, ct);
+        // The grants committed; finish their audit and notices after the browser disconnects.
+        foreach (var grant in grants)
+        {
+            await AuditGrantAsync(PreapprovalsAuditActions.PreapprovalGrantIssued, grant, describe(grant), actorUserId);
+            await AnnounceIssuedAsync(ToInfo(grant, program), CancellationToken.None);
+        }
+    }
 
     public async Task<PreapprovalMutationResult<Guid>> ApplyAsync(
         Guid programId, Guid applicantUserId, string? note, decimal? requestedAmount, CancellationToken ct = default)
@@ -110,9 +101,9 @@ internal sealed partial class PreapprovalService
         else
         {
             if (requestedAmount is not { } requested) return new(Refusal: new PreapprovalRefusal(PreapprovalErrorKeys.AmountRequired));
-            if (requested <= 0) return new(Refusal: new PreapprovalRefusal(PreapprovalErrorKeys.AmountPositive));
             amount = requested;
         }
+        if (MoneyRefusal(amount) is { } amountRefusal) return new(Refusal: amountRefusal);
 
         var ids = await AllIdsAsync(applicantUserId, ct);
         var now = clock.GetCurrentInstant();
@@ -128,7 +119,7 @@ internal sealed partial class PreapprovalService
             await repository.UpdateGrantAsync(pending, ct);
             // The grant committed; finish its audit and notices after the browser disconnects.
             ct = CancellationToken.None;
-            await AuditGrantAsync(AuditAction.PreapprovalGrantApplied, pending,
+            await AuditGrantAsync(PreapprovalsAuditActions.PreapprovalGrantApplied, pending,
                 $"Application to \"{program.Name}\" edited: {Euros(amount)}.", applicantUserId);
             await ResolveRequestAsync(pending.Id, applicantUserId, ct);
             await AnnounceApplicationAsync(info, ToInfo(pending, program), ct);
@@ -141,13 +132,11 @@ internal sealed partial class PreapprovalService
         await repository.AddGrantsAsync([grant], ct);
         // The grant committed; finish its audit and notices after the browser disconnects.
         ct = CancellationToken.None;
-        await AuditGrantAsync(AuditAction.PreapprovalGrantApplied, grant,
+        await AuditGrantAsync(PreapprovalsAuditActions.PreapprovalGrantApplied, grant,
             $"Applied to \"{program.Name}\": {Euros(amount)}.", applicantUserId);
         await AnnounceApplicationAsync(info, ToInfo(grant, program), ct);
         return new(grant.Id);
     }
-
-    // ── Decide ────────────────────────────────────────────────────────────
 
     public async Task<PreapprovalMutationResult> ApproveAsync(
         Guid grantId, decimal? amount, Guid actorUserId, CancellationToken ct = default)
@@ -173,7 +162,7 @@ internal sealed partial class PreapprovalService
         // The grant committed; finish its audit and notices after the browser disconnects.
         ct = CancellationToken.None;
 
-        await AuditGrantAsync(AuditAction.PreapprovalGrantApproved, grant,
+        await AuditGrantAsync(PreapprovalsAuditActions.PreapprovalGrantApproved, grant,
             $"Application to \"{program.Name}\" approved: {Euros(grant.MaxAmount)}" +
             $"{(grant.RequestedAmount is { } r && r != grant.MaxAmount ? $" (requested {Euros(r)})" : "")}; claim by {program.ClaimBy.ToInvariantDate()}.",
             actorUserId);
@@ -200,7 +189,7 @@ internal sealed partial class PreapprovalService
         ct = CancellationToken.None;
 
         var reason = Trimmed(note);
-        await AuditGrantAsync(AuditAction.PreapprovalGrantDeclined, grant,
+        await AuditGrantAsync(PreapprovalsAuditActions.PreapprovalGrantDeclined, grant,
             $"Application to \"{grant.Program.Name}\" declined{(reason is null ? "" : $": {reason}")}.", actorUserId);
         await ResolveRequestAsync(grant.Id, actorUserId, ct);
         var info = ToInfo(grant);
@@ -218,6 +207,7 @@ internal sealed partial class PreapprovalService
             return new(new PreapprovalRefusal(PreapprovalErrorKeys.WrongStatus));
         if ((reason?.Length ?? 0) > NoteMax) return new(new PreapprovalRefusal(PreapprovalErrorKeys.TextTooLong));
 
+        var holdingReportId = grant.Status == GrantStatus.Claimed ? grant.ExpenseReportId : null;
         // The amount and any report id stay: the row is the record of what was committed.
         grant.Status = GrantStatus.Revoked;
         grant.UpdatedAt = clock.GetCurrentInstant();
@@ -226,13 +216,13 @@ internal sealed partial class PreapprovalService
         ct = CancellationToken.None;
 
         var why = Trimmed(reason);
-        await AuditGrantAsync(AuditAction.PreapprovalGrantRevoked, grant,
+        await AuditGrantAsync(PreapprovalsAuditActions.PreapprovalGrantRevoked, grant,
             $"Revoked {Euros(grant.MaxAmount)} under \"{grant.Program.Name}\"{LabelSuffix(grant)}" +
-            $"{(grant.ExpenseReportId is { } r ? $" while held by expense report {r}" : "")}{(why is null ? "" : $": {why}")}.",
+            $"{(holdingReportId is { } r ? $" while held by expense report {r}" : "")}{(why is null ? "" : $": {why}")}.",
             actorUserId);
         await ResolveFileByAsync(grant.Id, actorUserId, ct);
         var info = ToInfo(grant);
-        await NotifyDecidedAsync(info, "Preapprovals_Notice_Revoked", why, ct);
+        await NotifyDecidedAsync(info, "Preapprovals_Notice_Revoked", why, ct, holdingReportId: holdingReportId);
         await EmailAsync(info, PreapprovalNoticeKind.Revoked, why, ct);
         return PreapprovalMutationResult.Ok;
     }
@@ -244,7 +234,7 @@ internal sealed partial class PreapprovalService
         if (grant is null) return new(new PreapprovalRefusal(PreapprovalErrorKeys.NotFound));
         if (grant.Status is not (GrantStatus.Open or GrantStatus.Claimed))
             return new(new PreapprovalRefusal(PreapprovalErrorKeys.WrongStatus));
-        if (amount <= 0) return new(new PreapprovalRefusal(PreapprovalErrorKeys.AmountPositive));
+        if (MoneyRefusal(amount) is { } amountRefusal) return new(amountRefusal);
         if (amount == grant.MaxAmount) return PreapprovalMutationResult.Ok;
 
         var program = await repository.GetProgramAsync(grant.ProgramId, ct)
@@ -258,9 +248,9 @@ internal sealed partial class PreapprovalService
         // The grant committed; finish its audit and notices after the browser disconnects.
         ct = CancellationToken.None;
 
-        await AuditGrantAsync(AuditAction.PreapprovalGrantAmountChanged, grant,
+        await AuditGrantAsync(PreapprovalsAuditActions.PreapprovalGrantAmountChanged, grant,
             $"Amount under \"{program.Name}\"{LabelSuffix(grant)} changed {Euros(old)} → {Euros(amount)}" +
-            $"{(grant.ExpenseReportId is { } r ? $" (held by expense report {r}; its cap follows at next submit)" : "")}.",
+            $"{(grant.Status == GrantStatus.Claimed && grant.ExpenseReportId is { } r ? $" (held by expense report {r}; its cap follows at next submit)" : "")}.",
             actorUserId);
         var info = ToInfo(grant, program);
         await NotifyDecidedAsync(info, "Preapprovals_Notice_AmountChanged", null, ct, previousAmount: old);
@@ -268,21 +258,23 @@ internal sealed partial class PreapprovalService
         return PreapprovalMutationResult.Ok;
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────
-
     /// <summary>Issue and approve commit money: refused on a closed program or past its deadline.</summary>
     private PreapprovalRefusal? CanCommit(PreapprovalProgram program) =>
         program.Status == ProgramStatus.Closed ? new(PreapprovalErrorKeys.ProgramClosed)
         : Today > program.ClaimBy ? new(PreapprovalErrorKeys.DeadlinePassed)
         : null;
 
-    /// <summary>The grant's amount by the program's kind: fixed takes none, per-grant needs one.</summary>
     private static (decimal Value, PreapprovalRefusal? Refusal) SizeGrant(PreapprovalProgram program, decimal? amount)
     {
+        decimal value;
         if (program.Kind == ProgramKind.FixedPerPerson)
-            return amount is null ? (program.PerPersonAmount!.Value, null) : (0, new(PreapprovalErrorKeys.AmountNotAllowed));
-        if (amount is not { } a) return (0, new(PreapprovalErrorKeys.AmountRequired));
-        return a <= 0 ? (0, new(PreapprovalErrorKeys.AmountPositive)) : (a, null);
+        {
+            if (amount is not null) return (0, new(PreapprovalErrorKeys.AmountNotAllowed));
+            value = program.PerPersonAmount!.Value;
+        }
+        else if (amount is { } supplied) value = supplied;
+        else return (0, new(PreapprovalErrorKeys.AmountRequired));
+        return MoneyRefusal(value) is { } refusal ? (0, refusal) : (value, null);
     }
 
     /// <summary>Granted + delta ≤ ceiling, else a refusal naming the headroom.</summary>

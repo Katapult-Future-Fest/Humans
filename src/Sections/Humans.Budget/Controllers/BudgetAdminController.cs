@@ -16,16 +16,9 @@ using Humans.Users.Contracts;
 namespace Humans.Budget.Controllers;
 
 /// <summary>
-/// Budget's admin surface: years, groups, categories, line items, the ticketing projection
-/// and the audit log, under the <c>/Finance</c> route prefix it shares with
-/// <c>Humans.Finance.Controllers.FinanceController</c> — the action templates are disjoint.
+/// Shares the <c>/Finance</c> route prefix with Finance's <c>FinanceController</c>; the action templates are disjoint.
 /// </summary>
-/// <remarks>
-/// It still calls <c>IHoldedFinanceService</c> for one thing: the per-category actuals shown on
-/// the year overview. That is an ordinary cross-section service call through the Finance
-/// section's read contract, not a reason to keep the controllers merged.
-/// </remarks>
-[Authorize(Policy = PolicyNames.FinanceAdminOrAdmin)]
+[Authorize(Policy = FinancePolicies.Read)]
 [Route("Finance")]
 internal sealed class BudgetAdminController(
     IBudgetManagement budgetService,
@@ -149,6 +142,7 @@ internal sealed class BudgetAdminController(
     }
 
     [HttpPost("Years/{id:guid}/SyncDepartments")]
+    [Authorize(Policy = FinancePolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> SyncDepartments(Guid id)
     {
@@ -173,6 +167,7 @@ internal sealed class BudgetAdminController(
     }
 
     [HttpPost("Years/Create")]
+    [Authorize(Policy = FinancePolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> CreateYear(string year, string name)
     {
@@ -200,6 +195,7 @@ internal sealed class BudgetAdminController(
     }
 
     [HttpPost("Years/{id:guid}/UpdateStatus")]
+    [Authorize(Policy = FinancePolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> UpdateYearStatus(Guid id, [BindRequired] BudgetYearStatus status)
     {
@@ -212,63 +208,57 @@ internal sealed class BudgetAdminController(
             return BadRequest(ModelState);
         }
 
-        try
-        {
-            await budgetService.UpdateYearStatusAsync(id, status, user.Id);
+        var result = await budgetService.UpdateYearStatusAsync(id, status, user.Id);
+        if (result.Succeeded)
             SetSuccess($"Budget year status updated to {status}.");
-            return RedirectToAction(nameof(Admin));
-        }
-        catch (Exception ex)
+        else
         {
-            logger.LogError(ex, "Error updating budget year {YearId} status to {Status}", id, status);
-            SetError($"Failed to update status: {ex.Message}");
-            return RedirectToAction(nameof(Admin));
+            logger.LogWarning("Budget year status change refused for {YearId}, actor {UserId}: {Reason}", id, user.Id, result.Refusal);
+            SetError($"Failed to update status: {result.Refusal}");
         }
+        return RedirectToAction(nameof(Admin));
     }
 
     [HttpPost("Years/{id:guid}/Update")]
+    [Authorize(Policy = FinancePolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> UpdateYear(Guid id, string year, string name, string? vendorEventId)
     {
         var (errorResult, user) = await RequireCurrentUserAsync();
         if (errorResult is not null) return errorResult;
 
-        try
-        {
-            await budgetService.UpdateYearAsync(id, year, name, vendorEventId, user.Id);
+        var result = await budgetService.UpdateYearAsync(id, year, name, vendorEventId, user.Id);
+        if (result.Succeeded)
             SetSuccess("Budget year updated.");
-            return RedirectToAction(nameof(Admin));
-        }
-        catch (Exception ex)
+        else
         {
-            logger.LogError(ex, "Error updating budget year {YearId}", id);
-            SetError($"Failed to update budget year: {ex.Message}");
-            return RedirectToAction(nameof(Admin));
+            logger.LogWarning("Budget year update refused for {YearId}, actor {UserId}: {Reason}", id, user.Id, result.Refusal);
+            SetError($"Failed to update budget year: {result.Refusal}");
         }
+        return RedirectToAction(nameof(Admin));
     }
 
     [HttpPost("Years/{id:guid}/Delete")]
+    [Authorize(Policy = FinancePolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> DeleteYear(Guid id)
     {
         var (errorResult, user) = await RequireCurrentUserAsync();
         if (errorResult is not null) return errorResult;
 
-        try
-        {
-            await budgetService.DeleteYearAsync(id, user.Id);
+        var result = await budgetService.DeleteYearAsync(id, user.Id);
+        if (result.Succeeded)
             SetSuccess("Budget year deleted.");
-            return RedirectToAction(nameof(Admin));
-        }
-        catch (Exception ex)
+        else
         {
-            logger.LogError(ex, "Error deleting budget year {YearId}", id);
-            SetError($"Failed to delete budget year: {ex.Message}");
-            return RedirectToAction(nameof(Admin));
+            logger.LogWarning("Budget year archive refused for {YearId}, actor {UserId}: {Reason}", id, user.Id, result.Refusal);
+            SetError($"Failed to delete budget year: {result.Refusal}");
         }
+        return RedirectToAction(nameof(Admin));
     }
 
     [HttpPost("Groups/Create")]
+    [Authorize(Policy = FinancePolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> CreateGroup(Guid budgetYearId, string name, [BindRequired] bool isRestricted)
     {
@@ -296,6 +286,7 @@ internal sealed class BudgetAdminController(
     }
 
     [HttpPost("Groups/{id:guid}/Update")]
+    [Authorize(Policy = FinancePolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> UpdateGroup(Guid id, string name, int sortOrder, [BindRequired] bool isRestricted)
     {
@@ -323,6 +314,7 @@ internal sealed class BudgetAdminController(
     }
 
     [HttpPost("Groups/{id:guid}/Delete")]
+    [Authorize(Policy = FinancePolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> DeleteGroup(Guid id)
     {
@@ -344,6 +336,7 @@ internal sealed class BudgetAdminController(
     }
 
     [HttpPost("Categories/Create")]
+    [Authorize(Policy = FinancePolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> CreateCategory(Guid budgetGroupId, string name, [BindRequired] decimal allocatedAmount,
         [BindRequired] ExpenditureType expenditureType, Guid? teamId, Guid budgetYearId)
@@ -359,7 +352,13 @@ internal sealed class BudgetAdminController(
 
         try
         {
-            await budgetService.CreateCategoryAsync(budgetGroupId, name, allocatedAmount, expenditureType, teamId, user.Id);
+            var result = await budgetService.CreateCategoryAsync(budgetGroupId, name, allocatedAmount, expenditureType, teamId, user.Id);
+            if (result.Refusal is not null)
+            {
+                logger.LogWarning("Rejected budget category amount for actor {ActorId}", user.Id);
+                SetError(result.Refusal);
+                return RedirectToAction(nameof(YearDetail), new { id = budgetYearId });
+            }
             SetSuccess($"Category '{name}' created.");
             return RedirectToAction(nameof(YearDetail), new { id = budgetYearId });
         }
@@ -372,6 +371,7 @@ internal sealed class BudgetAdminController(
     }
 
     [HttpPost("Categories/{id:guid}/Update")]
+    [Authorize(Policy = FinancePolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> UpdateCategory(Guid id, string name, [BindRequired] decimal allocatedAmount,
         [BindRequired] ExpenditureType expenditureType)
@@ -387,7 +387,13 @@ internal sealed class BudgetAdminController(
 
         try
         {
-            await budgetService.UpdateCategoryAsync(id, name, allocatedAmount, expenditureType, user.Id);
+            var result = await budgetService.UpdateCategoryAsync(id, name, allocatedAmount, expenditureType, user.Id);
+            if (result.Refusal is not null)
+            {
+                logger.LogWarning("Rejected budget category amount for actor {ActorId}", user.Id);
+                SetError(result.Refusal);
+                return RedirectToAction(nameof(CategoryDetail), new { id });
+            }
             SetSuccess($"Category '{name}' updated.");
             return RedirectToAction(nameof(CategoryDetail), new { id });
         }
@@ -400,6 +406,7 @@ internal sealed class BudgetAdminController(
     }
 
     [HttpPost("Categories/{id:guid}/Delete")]
+    [Authorize(Policy = FinancePolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> DeleteCategory(Guid id, Guid budgetYearId)
     {
@@ -421,6 +428,7 @@ internal sealed class BudgetAdminController(
     }
 
     [HttpPost("LineItems/Create")]
+    [Authorize(Policy = FinancePolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> CreateLineItem(Guid budgetCategoryId, string description, [BindRequired] decimal amount,
         Guid? responsibleTeamId, string? notes, DateTime? expectedDate, [BindRequired] int vatRate)
@@ -438,7 +446,13 @@ internal sealed class BudgetAdminController(
 
         try
         {
-            await budgetService.CreateLineItemAsync(budgetCategoryId, description, amount, responsibleTeamId, notes, nodaDate, vatRate, user.Id);
+            var result = await budgetService.CreateLineItemAsync(budgetCategoryId, description, amount, responsibleTeamId, notes, nodaDate, vatRate, user.Id);
+            if (result.Refusal is not null)
+            {
+                logger.LogWarning("Rejected budget line item amount for actor {ActorId}", user.Id);
+                SetError(result.Refusal);
+                return RedirectToAction(nameof(CategoryDetail), new { id = budgetCategoryId });
+            }
             SetSuccess($"Line item '{description}' created.");
             return RedirectToAction(nameof(CategoryDetail), new { id = budgetCategoryId });
         }
@@ -451,6 +465,7 @@ internal sealed class BudgetAdminController(
     }
 
     [HttpPost("LineItems/{id:guid}/Update")]
+    [Authorize(Policy = FinancePolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> UpdateLineItem(Guid id, string description, [BindRequired] decimal amount,
         Guid? responsibleTeamId, string? notes, DateTime? expectedDate, [BindRequired] int vatRate, Guid budgetCategoryId)
@@ -468,7 +483,13 @@ internal sealed class BudgetAdminController(
 
         try
         {
-            await budgetService.UpdateLineItemAsync(id, description, amount, responsibleTeamId, notes, nodaDate, vatRate, user.Id);
+            var result = await budgetService.UpdateLineItemAsync(id, description, amount, responsibleTeamId, notes, nodaDate, vatRate, user.Id);
+            if (result.Refusal is not null)
+            {
+                logger.LogWarning("Rejected budget line item amount for actor {ActorId}", user.Id);
+                SetError(result.Refusal);
+                return RedirectToAction(nameof(CategoryDetail), new { id = budgetCategoryId });
+            }
             SetSuccess($"Line item '{description}' updated.");
             return RedirectToAction(nameof(CategoryDetail), new { id = budgetCategoryId });
         }
@@ -481,6 +502,7 @@ internal sealed class BudgetAdminController(
     }
 
     [HttpPost("LineItems/{id:guid}/Delete")]
+    [Authorize(Policy = FinancePolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> DeleteLineItem(Guid id, Guid budgetCategoryId)
     {
@@ -502,6 +524,7 @@ internal sealed class BudgetAdminController(
     }
 
     [HttpPost("Years/{id:guid}/EnsureTicketingGroup")]
+    [Authorize(Policy = FinancePolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> EnsureTicketingGroup(Guid id)
     {
@@ -526,6 +549,7 @@ internal sealed class BudgetAdminController(
     }
 
     [HttpPost("TicketingProjection/{groupId:guid}/Update")]
+    [Authorize(Policy = FinancePolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> UpdateTicketingProjection(Guid groupId, TicketingProjectionUpdateForm form)
     {
@@ -565,6 +589,7 @@ internal sealed class BudgetAdminController(
         return RedirectToAction(nameof(YearDetail), new { id = form.BudgetYearId });
     }
     [HttpPost("TicketingBudget/{yearId:guid}/Sync")]
+    [Authorize(Policy = FinancePolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> SyncTicketingBudget(Guid yearId)
     {
@@ -588,7 +613,6 @@ internal sealed class BudgetAdminController(
         return RedirectToAction(nameof(YearDetail), new { id = yearId });
     }
 
-    /// <summary>FinanceOverviewViewModel via shared summary + actual tickets in ViewBag.</summary>
     private async Task<FinanceOverviewViewModel> BuildFinanceOverviewAsync(BudgetYearDetail year, IReadOnlyList<BudgetYearSummarySnapshot> allYears, CancellationToken ct)
     {
         var summary = budgetService.ComputeBudgetSummaryWithBuffers(year.Groups);

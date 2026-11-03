@@ -1,30 +1,18 @@
 using Humans.Base.Controllers;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using Humans.AuditLog.Contracts;
+using Humans.AuditLog.Services;
 using Humans.AuditLog.Models;
 using Humans.Base.Authorization;
 using Humans.Users.Contracts;
 
 namespace Humans.AuditLog.Controllers;
 
-/// <summary>
-/// The general audit browser, over the section's own <see cref="IAuditViewerService"/> —
-/// which resolves actor, subject and team display names, and moved here from
-/// <c>Humans.Application</c> in G5 lane 4b-2h (nobodies-collective/Humans#866).
-/// </summary>
-/// <remarks>
-/// The Google-sync audit views and the Drive-activity scan that used to live here are in
-/// <c>Humans.Monitor</c>, carved out when AuditLog was still forbidden from naming a vertical
-/// section. That constraint was lifted by Peter's 2026-08-14 Base-floor decision, and
-/// <c>AuditLogArchitectureTests.SectionReferencesNoVerticalSection</c> was retired with it;
-/// the Monitor split stands on its own merits (a distinct read model and a job) rather than on
-/// that rule.
-/// </remarks>
 [Route("AuditLog")]
 internal sealed class AuditLogController(
     IUserService userService,
-    IAuditViewerService auditViewer) : HumansControllerBase(userService)
+    AuditViewerService auditViewer,
+    AuditActionRegistry actions) : HumansControllerBase(userService)
 {
     [HttpGet("")]
     [Authorize(Policy = PolicyNames.BoardOrAdmin)]
@@ -37,7 +25,9 @@ internal sealed class AuditLogController(
         {
             Events = result.Items,
             ActionFilter = filter,
-            AnomalyCount = result.AnomalyCount,
+            QuickFilters = actions.QuickFilters,
+            Alerts = actions.Alerts,
+            AlertCounts = result.AlertCounts,
             TotalCount = result.TotalCount,
             PageNumber = page,
             PageSize = pageSize

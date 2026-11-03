@@ -41,7 +41,7 @@ internal sealed class GoogleController(
     }
 
     [HttpGet("Human/{id:guid}")]
-    [Authorize(Policy = PolicyNames.HumanAdminBoardOrAdmin)]
+    [Authorize(Policy = UsersPolicies.Read)]
     public async Task<IActionResult> Human(Guid id)
     {
         var user = await FindUserInfoByIdAsync(id, HttpContext.RequestAborted);
@@ -280,17 +280,16 @@ internal sealed class GoogleController(
     }
 
     [HttpGet("Sync")]
-    [Authorize(Policy = PolicyNames.TeamsAdminBoardOrAdmin)]
+    [Authorize(Policy = TeamsPolicies.Read)]
     public IActionResult Sync()
     {
         return View();
     }
 
-    // POST, not GET (HUM0038): a preview stamps the resource's error column
-    // when a Google lookup fails, so it writes. CancellationToken.None, as on
-    // the execute paths (HUM0033).
+    // POST (HUM0038): a preview writes the resource's error column when a Google lookup fails.
+    // CancellationToken.None, as on the execute paths.
     [HttpPost("Sync/Preview/{resourceType}")]
-    [Authorize(Policy = PolicyNames.TeamsAdminBoardOrAdmin)]
+    [Authorize(Policy = TeamsPolicies.Read)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> SyncPreview(GoogleResourceType resourceType)
     {
@@ -328,11 +327,8 @@ internal sealed class GoogleController(
     {
         try
         {
-            // Deliberately not passing HttpContext.RequestAborted: an admin
-            // closing the tab mid-reconcile would abort partway through applying
-            // group memberships and Drive permissions, leaving Workspace
-            // half-synced with no record of where it stopped
-            // (nobodies-collective/Humans#950).
+            // Not RequestAborted: closing the tab mid-reconcile would leave Workspace half-synced,
+            // with no record of where it stopped.
             var result = await googleSyncService.SyncSingleResourceAsync(
                 resourceId,
                 SyncAction.Execute,
@@ -353,10 +349,7 @@ internal sealed class GoogleController(
     {
         try
         {
-            // Deliberately not passing HttpContext.RequestAborted — see
-            // SyncExecute above. A full reconcile touches every resource of the
-            // type; aborting it midway is the worst case for partial remote
-            // state (nobodies-collective/Humans#950).
+            // Not RequestAborted: see SyncExecute.
             var result = resourceType == GoogleResourceType.Group
                 ? await googleGroupSync.ReconcileAllAsync(SyncAction.Execute, CancellationToken.None, GoogleSyncSource.ManualSync)
                 : await googleSyncService.SyncResourcesByTypeAsync(resourceType, SyncAction.Execute, CancellationToken.None);
@@ -370,7 +363,7 @@ internal sealed class GoogleController(
     }
 
     [HttpPost("Human/{id:guid}/ProvisionEmail")]
-    [Authorize(Policy = PolicyNames.HumanAdminOrAdmin)]
+    [Authorize(Policy = UsersPolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> ProvisionEmail(Guid id, string emailPrefix)
     {
@@ -429,9 +422,7 @@ internal sealed class GoogleController(
             MissingTwoFactorCount = result.MissingTwoFactorCount
         };
 
-        // If a previous POST just issued recovery credentials (password reset
-        // ± a 2FA backup code), surface them once via a modal. TempData is
-        // single-use — once the page renders, the secrets are gone.
+        // TempData is single-use: the recovery credentials show once, then are gone.
         if (TempData[TempDataKeys.WorkspaceRecoveryCredentials] is string credsJson)
         {
             var credsVm = System.Text.Json.JsonSerializer.Deserialize<WorkspaceRecoveryCredentialsViewModel>(credsJson);
@@ -620,7 +611,6 @@ internal sealed class GoogleController(
         ViewData["GoogleNotConfigured"] = !googleClient.IsConfigured;
         var events = (await googleSyncService.GetRecentOutboxEventsAsync(200, ct)).ToList();
 
-        // Display info via the UserInfo batch lookup. Google identity address, else primary. BurnerName per burnername-is-the-display-name.
         var userIds = events.Select(e => e.UserId).Distinct().ToList();
         var teamIds = events.Select(e => e.TeamId).Distinct().ToList();
         IReadOnlyDictionary<Guid, UserInfo> infos = userIds.Count == 0

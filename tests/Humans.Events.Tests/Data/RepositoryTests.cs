@@ -50,8 +50,7 @@ public sealed class EventRepositoryTests : IDisposable
     [HumansFact]
     public async Task GetActiveCategoriesAsync_ReturnsOnlyActiveCategories()
     {
-        // Display ordering moved to the controller (display-sort-in-controllers);
-        // the repo returns the active set, order-agnostic.
+        // Ordering is the controller's job; the repo returns the active set, order-agnostic.
         var inactive = SeedCategory("Inactive", "inactive", 0, isActive: false);
         var second = SeedCategory("Second", "second", 2);
         var first = SeedCategory("First", "first", 1);
@@ -76,8 +75,7 @@ public sealed class EventRepositoryTests : IDisposable
     [HumansFact]
     public async Task GetUserSubmissionsAsync_ReturnsOnlyIndividualEventsForSubmitter()
     {
-        // Newest-first ordering moved to the controller (display-sort-in-controllers);
-        // the repo returns the submitter's individual events, order-agnostic.
+        // Ordering is the controller's job; the repo returns the submitter's individual events.
         var category = SeedCategory("Workshop", "workshop", 1);
         var userId = Guid.NewGuid();
         var otherUserId = Guid.NewGuid();
@@ -134,7 +132,7 @@ public sealed class EventRepositoryTests : IDisposable
         SeedEvent(category.Id, Guid.NewGuid(), EventStatus.Withdrawn, _clock.GetCurrentInstant());
         await _db.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        var result = await _repo.GetModerationStatusCountsAsync(Xunit.TestContext.Current.CancellationToken);
+        var result = await _repo.GetModerationStatusCountsAsync(null, Xunit.TestContext.Current.CancellationToken);
 
         result.Should().ContainKey(EventStatus.Pending).WhoseValue.Should().Be(2);
         result.Should().ContainKey(EventStatus.Approved).WhoseValue.Should().Be(1);
@@ -145,9 +143,7 @@ public sealed class EventRepositoryTests : IDisposable
     [HumansFact]
     public async Task GetEventsByStatusAsync_ReturnsEventsForStatus()
     {
-        // Submitted-at ordering moved to the moderation controller
-        // (display-sort-in-controllers); the repo returns the status set,
-        // order-agnostic.
+        // Ordering is the moderation controller's job; the repo returns the status set.
         var category = SeedCategory("Workshop", "workshop", 1);
         var older = SeedEvent(category.Id, Guid.NewGuid(), EventStatus.Pending, Instant.FromUtc(2026, 5, 1, 12, 0));
         var newer = SeedEvent(category.Id, Guid.NewGuid(), EventStatus.Pending, Instant.FromUtc(2026, 5, 2, 12, 0));
@@ -161,9 +157,7 @@ public sealed class EventRepositoryTests : IDisposable
     [HumansFact]
     public async Task GetFavouritesWithEventsAsync_ReturnsOnlyApprovedEvents()
     {
-        // Start-at ordering moved to the schedule/API controllers
-        // (display-sort-in-controllers); the repo returns the approved-only set,
-        // order-agnostic.
+        // Ordering is the schedule/API controllers' job; the repo returns the approved-only set.
         var category = SeedCategory("Workshop", "workshop", 1);
         var userId = Guid.NewGuid();
         var later = SeedEvent(category.Id, userId, EventStatus.Approved, _clock.GetCurrentInstant(), startAt: Instant.FromUtc(2026, 7, 2, 10, 0));
@@ -281,10 +275,46 @@ public sealed class EventRepositoryTests : IDisposable
         SeedEvent(category.Id, Guid.NewGuid(), EventStatus.Pending, _clock.GetCurrentInstant());
         await _db.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        var result = await _repo.GetActiveCampEventsAsync(Xunit.TestContext.Current.CancellationToken);
+        var result = await _repo.GetActiveCampEventsAsync(null, Xunit.TestContext.Current.CancellationToken);
 
         result.Select(e => e.Id).Should().BeEquivalentTo([pendingCamp.Id, approvedCamp.Id]);
         result.Should().OnlyContain(e => e.CampId.HasValue);
+    }
+
+    [HumansFact]
+    public async Task GetModerationStatusCountsAsync_ScopesToEvent_KeepingUnassignedRows()
+    {
+        var category = SeedCategory("Workshop", "workshop", 1);
+        var thisEvent = Guid.NewGuid();
+        SeedEvent(category.Id, Guid.NewGuid(), EventStatus.Pending, _clock.GetCurrentInstant()).EventSettingsId = thisEvent;
+        SeedEvent(category.Id, Guid.NewGuid(), EventStatus.Pending, _clock.GetCurrentInstant());
+        SeedEvent(category.Id, Guid.NewGuid(), EventStatus.Pending, _clock.GetCurrentInstant()).EventSettingsId = Guid.NewGuid();
+        await _db.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var result = await _repo.GetModerationStatusCountsAsync(thisEvent, Xunit.TestContext.Current.CancellationToken);
+
+        result.Should().ContainKey(EventStatus.Pending).WhoseValue.Should().Be(2);
+    }
+
+    [HumansFact]
+    public async Task AssignEventSettingsIdsAsync_WritesOnlyUnassignedRows()
+    {
+        var category = SeedCategory("Workshop", "workshop", 1);
+        var unassigned = SeedEvent(category.Id, Guid.NewGuid(), EventStatus.Approved, _clock.GetCurrentInstant());
+        var assigned = SeedEvent(category.Id, Guid.NewGuid(), EventStatus.Approved, _clock.GetCurrentInstant());
+        var keptEvent = Guid.NewGuid();
+        assigned.EventSettingsId = keptEvent;
+        await _db.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+        var target = Guid.NewGuid();
+
+        var written = await _repo.AssignEventSettingsIdsAsync(
+            new Dictionary<Guid, Guid> { [unassigned.Id] = target, [assigned.Id] = target },
+            Xunit.TestContext.Current.CancellationToken);
+
+        written.Should().Be(1);
+        _db.ChangeTracker.Clear();
+        (await _db.Events.FindAsync([unassigned.Id], Xunit.TestContext.Current.CancellationToken))!.EventSettingsId.Should().Be(target);
+        (await _db.Events.FindAsync([assigned.Id], Xunit.TestContext.Current.CancellationToken))!.EventSettingsId.Should().Be(keptEvent);
     }
 
     [HumansFact]

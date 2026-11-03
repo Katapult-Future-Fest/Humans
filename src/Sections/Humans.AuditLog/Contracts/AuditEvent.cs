@@ -1,19 +1,17 @@
 using System.Text;
 using Humans.Base.Extensions;
-using Humans.AuditLog.Domain;
-using Humans.AuditLog.Services;
 using NodaTime;
 
 namespace Humans.AuditLog.Contracts;
 
 /// <summary>
-/// Resolved view of an <see cref="AuditLogEntry"/> with pre-resolved actor/subject/team display names.
-/// Constructed exclusively by <see cref="IAuditViewerService"/>. Privacy guard: no raw GUIDs in rendered output.
+/// Built only by <see cref="IAuditViewerService"/>. Rendered output never contains a raw GUID. <c>Action</c> is the
+/// stored name resolved to its definition; a name nobody declares any more is a bare definition with no verb.
 /// </summary>
 public sealed record AuditEvent(
     Guid Id,
     Instant OccurredAt,
-    AuditAction Action,
+    AuditActionDefinition Action,
     Guid? ActorUserId,
     string? ActorDisplayName,
     string EntityType,
@@ -28,13 +26,12 @@ public sealed record AuditEvent(
     string Description)
 {
     /// <summary>
-    /// Renders this event as a single-line sentence for the agent's tool output. Never emits raw GUIDs.
-    /// When <paramref name="viewerUserId"/> matches actor/subject, substitutes "You"/"you" and uses the self-verb.
-    /// Returns null when the action has no verb mapping (caller filters).
+    /// Uses "You" and the self-verb when <paramref name="viewerUserId"/> is the actor or subject. Null when the
+    /// action has no verb.
     /// </summary>
     public string? RenderPlainText(Guid? viewerUserId = null)
     {
-        var verb = AuditEventTextualizer.GetActionVerb(Action);
+        var verb = Action.Verb;
         if (verb is null)
             return null;
 
@@ -43,14 +40,12 @@ public sealed record AuditEvent(
         var actorIsSubject = ActorUserId.HasValue && SubjectUserId.HasValue
             && ActorUserId.Value == SubjectUserId.Value;
 
-        // "System" for jobs (no actor id).
         string actor = ActorUserId.HasValue
             ? actorIsViewer
                 ? "You"
                 : (ActorDisplayName ?? "Someone")
             : "System";
 
-        // Suppress subject when actor == subject ("You signed up", not "You created signup for You").
         string? subject = null;
         if (SubjectUserId.HasValue && !actorIsSubject)
         {
@@ -61,7 +56,7 @@ public sealed record AuditEvent(
 
         var noVisibleSubject = subject is null;
         var displayVerb = noVisibleSubject
-            ? AuditEventTextualizer.GetActionSelfVerb(Action) ?? AuditEventTextualizer.TrimDanglingPreposition(verb)
+            ? Action.SelfVerb ?? TrimDanglingPreposition(verb)
             : verb;
 
         var sb = new StringBuilder();
@@ -82,8 +77,7 @@ public sealed record AuditEvent(
             sb.Append(TargetTeamName);
         }
 
-        if (!string.IsNullOrWhiteSpace(Description)
-            && AuditEventTextualizer.ShouldRenderDescriptionTail(Action))
+        if (!string.IsNullOrWhiteSpace(Description) && Action.DescriptionIsTail)
         {
             sb.Append(" — ");
             sb.Append(Description.Trim());
@@ -92,24 +86,25 @@ public sealed record AuditEvent(
         return sb.ToString();
     }
 
-    /// <summary>
-    /// Structured render bundle for HTML composition. Shares verb tables with <see cref="RenderPlainText"/>.
-    /// </summary>
-    public AuditEventRender RenderStructured()
+    internal AuditEventRender RenderStructured() =>
+        new(
+            Verb: Action.Verb,
+            ShouldRenderDescriptionTail: !string.IsNullOrWhiteSpace(Description) && Action.DescriptionIsTail);
+
+    /// <summary>Trims a dangling " for"/" to" preposition when the verb has no subject.</summary>
+    internal static string TrimDanglingPreposition(string verb)
     {
-        var verb = AuditEventTextualizer.GetActionVerb(Action);
-        var renderTail = !string.IsNullOrWhiteSpace(Description)
-            && AuditEventTextualizer.ShouldRenderDescriptionTail(Action);
-        return new AuditEventRender(
-            Verb: verb,
-            ShouldRenderDescriptionTail: renderTail);
+        if (verb.EndsWith(" for", StringComparison.Ordinal))
+            return verb[..^4];
+        if (verb.EndsWith(" to", StringComparison.Ordinal))
+            return verb[..^3];
+        return verb;
     }
 
     private static string FormatDate(Instant occurredAt) =>
         occurredAt.InUtc().Date.ToInvariantDate();
 }
 
-/// <summary>Structured render bundle from <see cref="AuditEvent.RenderStructured"/>.</summary>
-public sealed record AuditEventRender(
+internal sealed record AuditEventRender(
     string? Verb,
     bool ShouldRenderDescriptionTail);

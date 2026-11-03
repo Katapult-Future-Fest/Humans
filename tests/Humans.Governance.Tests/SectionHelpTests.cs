@@ -1,23 +1,21 @@
+using Humans.Base.Interfaces;
 using AwesomeAssertions;
 using Humans.Base.Models;
 
 namespace Humans.Governance.Tests;
 
 /// <summary>
-/// The help widget and the agent's glossary corpus read this section's help content through
-/// the <c>ISectionHelp</c> seam, so what it contributes is pinned here rather than in Base.
-/// The markdown itself lives in <c>Docs/help/</c> and ships as an embedded resource — a
-/// renamed file or a missing csproj entry surfaces as a null Guide or Glossary below.
+/// Docs/help/ ships as an embedded resource: a renamed file or missing csproj entry shows as a null Guide or Glossary.
 /// </summary>
 public class SectionHelpTests
 {
     private static SectionHelpEntry Entry(string key) =>
-        new SectionHelp().HelpEntries.Single(e => string.Equals(e.Key, key, StringComparison.Ordinal));
+        ((ISectionHelp)new Section()).HelpEntries.Single(e => string.Equals(e.Key, key, StringComparison.Ordinal));
 
     [HumansFact]
     public void Contributes_its_help_entries_in_corpus_order()
     {
-        new SectionHelp().HelpEntries
+        ((ISectionHelp)new Section()).HelpEntries
             .Select(e => (e.Key, e.Order))
             .Should().Equal(("Admin", 30), ("Governance", 60), ("Board", 80));
     }

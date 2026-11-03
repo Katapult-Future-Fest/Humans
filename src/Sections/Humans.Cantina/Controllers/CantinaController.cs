@@ -1,3 +1,4 @@
+using Humans.Cantina.Contracts;
 using Humans.Base.Extensions;
 using Humans.Cantina.Services;
 using Humans.Base.Authorization;
@@ -10,18 +11,17 @@ using Humans.Users.Contracts;
 namespace Humans.Cantina.Controllers;
 
 /// <summary>
-/// Cantina coordinator surface — weekly roster, per-day drill-down, and their CSV
-/// exports (feature #36 — src/Sections/Humans.Cantina/Docs/features/daily-roster.md). View-only.
-/// Authorization gate: the <see cref="PolicyNames.CantinaAdminOrAdmin"/> policy
-/// (Admin or the grantable CantinaAdmin role). Anonymous callers follow the
-/// standard <see cref="AuthorizeAttribute"/> challenge; authenticated humans
-/// without the role are redirected to /Account/AccessDenied by cookie
-/// authentication's AccessDeniedPath — not a bare 403.
+/// View-only. Members without the role get the cookie AccessDeniedPath redirect, not a bare 403.
+/// Allergy and intolerance details (health data) render only for the one page load that follows an audited reveal
+/// POST, handed over through TempData the way the IBAN reveal does; the aggregates and dietary columns always show.
 /// </summary>
-[Authorize(Policy = PolicyNames.CantinaAdminOrAdmin)]
+[Authorize(Policy = CantinaPolicies.Read)]
 [Route("Cantina")]
 internal sealed class CantinaController : HumansControllerBase
 {
+    /// <summary>TempData key on the reveal POST, ViewData key on the page that renders the details.</summary>
+    internal const string HealthRevealedKey = "CantinaHealthRevealed";
+
     private readonly ICantinaRosterService _roster;
     private readonly ILogger<CantinaController> _logger;
 
@@ -37,20 +37,33 @@ internal sealed class CantinaController : HumansControllerBase
     [HttpGet("Roster")]
     public async Task<IActionResult> Roster(int? weekStartOffset = null, CancellationToken ct = default)
     {
-        // No sort: the weekly page is overview-only and renders none of People.
-        // The CSV below is the one surface that reads it, and sorts for itself.
-        return View(await _roster.GetWeeklyRosterAsync(weekStartOffset, ct: ct).ConfigureAwait(false));
+        // No sort: the weekly page renders none of People; the CSV sorts for itself.
+        var roster = await _roster.GetWeeklyRosterAsync(weekStartOffset, ct: ct).ConfigureAwait(false);
+        ViewData[HealthRevealedKey] = TakeReveal(RevealToken("week", roster.WeekStartOffset));
+        return View(roster);
+    }
+
+    /// <summary>Shows the week's free-text allergy and intolerance entries on the next render, audited.</summary>
+    [HttpPost("Roster/RevealHealth")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> RevealHealth(int? weekStartOffset = null, CancellationToken ct = default)
+    {
+        var actorUserId = GetCurrentUserId();
+        if (actorUserId is null) return Unauthorized();
+
+        var roster = await _roster.GetWeeklyRosterAsync(weekStartOffset, RosterDisclosure.HealthReveal(actorUserId.Value), ct).ConfigureAwait(false);
+        TempData[HealthRevealedKey] = RevealToken("week", roster.WeekStartOffset);
+        return RedirectToAction(nameof(Roster), new { weekStartOffset = roster.WeekStartOffset });
     }
 
     [HttpGet("Roster/Csv")]
+    [Authorize(Policy = CantinaPolicies.Manage)]
     public async Task<IActionResult> Csv(int? weekStartOffset = null, CancellationToken ct = default)
     {
         var actorUserId = GetCurrentUserId();
         if (actorUserId is null) return Unauthorized();
 
-        var roster = await _roster.GetWeeklyRosterAsync(weekStartOffset, exportActorUserId: actorUserId.Value, ct: ct).ConfigureAwait(false);
-        // Display sort is a presentation concern; the service returns People in
-        // unspecified order (memory/architecture/display-sort-in-controllers.md).
+        var roster = await _roster.GetWeeklyRosterAsync(weekStartOffset, RosterDisclosure.Export(actorUserId.Value), ct).ConfigureAwait(false);
         roster = CantinaRosterAssembler.WithSortedPeople(roster);
 
         var bytes = CantinaRosterCsvWriter.Write(roster);
@@ -62,31 +75,35 @@ internal sealed class CantinaController : HumansControllerBase
         return File(bytes, "text/csv; charset=utf-8", filename);
     }
 
-    /// <summary>
-    /// Per-day drill-down matrix. Linked from each row of the weekly view's
-    /// per-day mini-table — coordinators planning a specific meal click a
-    /// day to see the row-per-person matrix (chips as columns + totals).
-    /// </summary>
     [HttpGet("Roster/Day")]
     public async Task<IActionResult> Day(int? dayOffset = null, CancellationToken ct = default)
     {
         var matrix = await _roster.GetDailyRosterAsync(dayOffset, ct: ct).ConfigureAwait(false);
-        // Display sort is a presentation concern; the service returns People
-        // in unspecified order. See memory/architecture/display-sort-in-controllers.md.
+        ViewData[HealthRevealedKey] = TakeReveal(RevealToken("day", matrix.DayOffset));
         return View(CantinaRosterAssembler.WithSortedPeople(matrix));
     }
 
-    /// <summary>
-    /// Per-day matrix CSV companion to <see cref="Day"/>. Same content layout
-    /// as the on-screen matrix, with chip-by-chip column totals at the bottom.
-    /// </summary>
+    /// <summary>Shows the day matrix's allergy and intolerance columns on the next render, audited.</summary>
+    [HttpPost("Roster/Day/RevealHealth")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> RevealDayHealth(int? dayOffset = null, CancellationToken ct = default)
+    {
+        var actorUserId = GetCurrentUserId();
+        if (actorUserId is null) return Unauthorized();
+
+        var matrix = await _roster.GetDailyRosterAsync(dayOffset, RosterDisclosure.HealthReveal(actorUserId.Value), ct).ConfigureAwait(false);
+        TempData[HealthRevealedKey] = RevealToken("day", matrix.DayOffset);
+        return RedirectToAction(nameof(Day), new { dayOffset = matrix.DayOffset });
+    }
+
     [HttpGet("Roster/Day/Csv")]
+    [Authorize(Policy = CantinaPolicies.Manage)]
     public async Task<IActionResult> DayCsv(int? dayOffset = null, CancellationToken ct = default)
     {
         var actorUserId = GetCurrentUserId();
         if (actorUserId is null) return Unauthorized();
 
-        var matrix = await _roster.GetDailyRosterAsync(dayOffset, exportActorUserId: actorUserId.Value, ct: ct).ConfigureAwait(false);
+        var matrix = await _roster.GetDailyRosterAsync(dayOffset, RosterDisclosure.Export(actorUserId.Value), ct).ConfigureAwait(false);
         matrix = CantinaRosterAssembler.WithSortedPeople(matrix);
 
         var bytes = CantinaDailyMatrixCsvWriter.Write(matrix);
@@ -97,4 +114,11 @@ internal sealed class CantinaController : HumansControllerBase
             matrix.DayOffset, matrix.People.Count);
         return File(bytes, "text/csv; charset=utf-8", filename);
     }
+
+    // The token names the page the reveal was for, so a reveal never unlocks a different week or day.
+    private static string RevealToken(string scope, int offset) => FormattableString.Invariant($"{scope}:{offset}");
+
+    private bool TakeReveal(string expectedToken) =>
+        TempData.TryGetValue(HealthRevealedKey, out var value) && value is string token
+        && string.Equals(token, expectedToken, StringComparison.Ordinal);
 }

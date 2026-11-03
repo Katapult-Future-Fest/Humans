@@ -108,11 +108,7 @@ public class ProfileControllerEditTests
             .Returns(new User { Id = _userId, DisplayName = "Test Human", PreferredLanguage = "en" });
         userManager.GetUserId(Arg.Any<ClaimsPrincipal>()).Returns(_userId.ToString());
 
-        // Edit POST resolves the current user through GetCurrentUserInfoAsync
-        // (cache-resident); subsequent setup-detection lookups in the action body
-        // also call IUserManagement.GetUserInfoAsync. Default stub returns a UserInfo
-        // with no profile so the initial-setup branch is taken; per-test overrides
-        // (e.g. approved profile) replace it.
+        // The default UserInfo has no profile, so the initial-setup branch is taken.
         _userService.GetUserInfoAsync(_userId, Arg.Any<CancellationToken>())
             .Returns(new ValueTask<UserInfo?>(
                 new User { Id = _userId, DisplayName = "Test Human", PreferredLanguage = "en" }
@@ -126,10 +122,6 @@ public class ProfileControllerEditTests
         _userService.SaveProfileLanguagesAsync(
                 Arg.Any<Guid>(), Arg.Any<IReadOnlyList<ProfileLanguageInfo>>(), Arg.Any<CancellationToken>())
             .Returns(Task.FromResult(new UserProfileLanguagesSaveResult(true, _userId)));
-
-        // The happy path now also writes meal-pref + allergies onto the shift
-        // profile. Return a fresh profile by default so existing tests don't NRE
-        // when the controller sets fields on it.
     }
 
     [HumansTheory]
@@ -403,8 +395,7 @@ public class ProfileControllerEditTests
     [HumansFact]
     public async Task Edit_InitialSetup_SavesProfileWithoutTouchingTierApplications()
     {
-        // Tier applications left the edit form for /Governance/Applications/Create
-        // (Users decomposition commit 11): saving the profile never reads or writes them.
+        // Tier applications live at /Governance/Applications/Create: saving the profile never touches them.
         var model = MakeValidModel();
 
         await _controller.Edit(model);
@@ -434,19 +425,17 @@ public class ProfileControllerEditTests
     {
         _governanceService.GetUserApplicationsAsync(_userId, Arg.Any<CancellationToken>()).Returns([]);
         _profileEditorService.SaveProfileAsync(Arg.Any<Guid>(), Arg.Any<ProfileSaveRequest>(), Arg.Any<CancellationToken>())
-            .Returns(new ProfileEditResult(false, ErrorKey: "Profile_BurnerCVRequired"));
+            .Returns(new ProfileEditResult(false, ErrorKey: "Users_Profile_BurnerCVRequired"));
         var model = MakeValidModel();
 
         var result = await _controller.Edit(model);
 
         result.Should().BeOfType<ViewResult>().Which.Model.Should().BeSameAs(model);
         _controller.ModelState[nameof(ProfileViewModel.NoPriorBurnExperience)]!.Errors.Should().ContainSingle()
-            .Which.ErrorMessage.Should().Be("Profile_BurnerCVRequired");
+            .Which.ErrorMessage.Should().Be("Users_Profile_BurnerCVRequired");
         await _userService.DidNotReceiveWithAnyArgs().SaveProfileLanguagesAsync(default, default!, default);
         await _onboardingService.DidNotReceiveWithAnyArgs().ProfileSavedAsync(default, default);
     }
-
-    // ─── /Profile/Me/Medical (GDPR Art. 9, owner-only) ─────────────────────────
 
     [HumansFact]
     public async Task Medical_Get_ShowsOnlyTheSignedInMembersOwnConditions()
@@ -456,8 +445,9 @@ public class ProfileControllerEditTests
 
         var result = await _controller.Medical(CancellationToken.None);
 
-        result.Should().BeOfType<ViewResult>().Which.Model.Should().BeOfType<MedicalViewModel>()
-            .Which.MedicalConditions.Should().Be("Epilepsy");
+        var model = result.Should().BeOfType<ViewResult>().Which.Model.Should().BeOfType<MedicalViewModel>().Which;
+        model.MedicalConditions.Should().Be("Epilepsy");
+        model.UserId.Should().Be(_userId, "the reveal list below the form is keyed on the signed-in member");
         await _userService.Received().GetUserInfoAsync(_userId, Arg.Any<CancellationToken>());
     }
 
@@ -476,13 +466,16 @@ public class ProfileControllerEditTests
     }
 
     [HumansFact]
-    public async Task Medical_Post_InvalidModel_DoesNotSave()
+    public async Task Medical_Post_InvalidModel_DoesNotSave_AndReRendersForTheSignedInMember()
     {
+        _userService.GetUserInfoAsync(_userId, Arg.Any<CancellationToken>())
+            .Returns(BuildUserInfo(new Profile { UserId = _userId, BurnerName = "Burner" }));
         _controller.ModelState.AddModelError(nameof(MedicalViewModel.MedicalConditions), "Validation_MaxLength");
 
-        var result = await _controller.Medical(new MedicalViewModel { MedicalConditions = "x" });
+        var result = await _controller.Medical(new MedicalViewModel { MedicalConditions = "x", UserId = Guid.NewGuid() });
 
-        result.Should().BeOfType<ViewResult>();
+        result.Should().BeOfType<ViewResult>().Which.Model.Should().BeOfType<MedicalViewModel>()
+            .Which.UserId.Should().Be(_userId, "a posted id never picks whose reveal list renders");
         await _userService.DidNotReceiveWithAnyArgs().SaveMedicalConditionsAsync(default, default, default);
     }
 

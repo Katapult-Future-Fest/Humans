@@ -1,5 +1,10 @@
-using Humans.Base.Interfaces;
+using System.Globalization;
+using Humans.Base.Authorization;
+using Humans.Base.Constants;
 using Humans.Base.Hosting;
+using Humans.Base.Interfaces;
+using Humans.Finance.Contracts;
+using Humans.Settings.Contracts;
 using Humans.Store.Authorization;
 using Humans.Store.Contracts;
 using Humans.Store.Data;
@@ -7,30 +12,73 @@ using Humans.Store.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Humans.AuditLog.Contracts;
 
 namespace Humans.Store;
 
-/// <summary>
-/// Store's DI entry point, at the project root by convention. Discovered by Shell —
-/// nothing names it, so it needs no section prefix.
-/// </summary>
-public sealed class Section : ISection
+public sealed class Section :
+    ISection,
+    ISectionRoles,
+    ISectionAdminNav,
+    ISectionAdminTiles,
+    ISectionPolicies
 {
+    IReadOnlyList<RoleDefinition> ISectionRoles.Roles { get; } =
+    [
+        new(StoreRoles.StoreAdmin, "Store Admin",
+            "Quartermasters of the collective shop. They curate the catalog, mind the orders, reconcile the payments, and keep the treasury in sync.",
+            "fa-solid fa-store"),
+    ];
+
     public void Register(IServiceCollection services, IConfiguration configuration)
     {
-        // Acountax's two numbers — the fianzas liability account and the simplified-invoice
-        // threshold. Both change without a deploy, hence configuration.
+        services.AddSingleton<IAuditActionContributor, StoreAuditActions>();
         services.Configure<StoreSectionOptions>(configuration.GetSection(StoreSectionOptions.Section));
 
         services.AddSectionDbContext<StoreDbContext>(sentinelTable: "store_orders");
 
         services.AddSingleton<IStoreRepository, Repository>();
-        // Store's one cross-section contract is the accounting read behind /api/backdoor/store
-        // (peterdrier/Humans#1719).
         services.AddScoped<Service>();
         services.AddScoped<IStoreAccountingRead>(sp => sp.GetRequiredService<Service>());
 
-        // Resource-based handler; the StoreCatalogAdmin policy registers through SectionPolicies.
         services.AddScoped<IAuthorizationHandler, OrderAuthorizationHandler>();
+    }
+
+    IEnumerable<AdminNavGroup> ISectionAdminNav.Groups() =>
+    [
+        new("Store", [
+            new("Catalog",     "StoreAdmin", "Catalog",    null, null, "fa-solid fa-tags",           StorePolicies.Read),
+            new("Summary",     "StoreAdmin", "Summary",    null, null, "fa-solid fa-chart-column",   StorePolicies.Read),
+            new("Payments",    "StoreAdmin", "Payments",   null, null, "fa-solid fa-credit-card",    StorePolicies.Read),
+            new("Order years", "StoreAdmin", "OrderYears", null, null, "fa-solid fa-calendar-check", StorePolicies.Read),
+            new("Payment methods", "StoreAdmin", "PaymentMethods", null, null, "fa-solid fa-wrench", StorePolicies.Read)
+        ])
+    ];
+
+    IEnumerable<AdminTile> ISectionAdminTiles.Tiles() =>
+    [
+        new AdminTile("store.orders", "Store orders", "fa-solid fa-cart-shopping", OrdersAsync,
+            Policy: StorePolicies.Read, Weight: 120)
+    ];
+
+    private static async ValueTask<AdminTileValue?> OrdersAsync(IServiceProvider sp, CancellationToken ct)
+    {
+        var activeEvent = await sp.GetRequiredService<ISettingsService>().GetActiveEventSettingsAsync(ct);
+        if (activeEvent is not { Year: > 0 })
+            return new AdminTileValue("", Detail: "no active event", Secondary: "—");
+
+        var summary = await sp.GetRequiredService<Service>().GetStoreSummaryAsync(activeEvent.Year, ct);
+        var orders = summary.ByCounterparty.Count;
+        var totalEur = summary.ByCounterparty.Sum(o => o.TotalDueEur);
+        return new AdminTileValue(orders.ToString("N0", CultureInfo.CurrentCulture), Detail: $"€{totalEur:N0} total, active year");
+    }
+
+    void ISectionPolicies.AddPolicies(AuthorizationOptions options)
+    {
+        options.AddPolicy(StorePolicies.Read, policy =>
+            policy.RequireRole(StoreRoles.StoreAdmin, FinanceRoles.FinanceAdmin, RoleNames.Board, RoleNames.Admin));
+
+        options.AddPolicy(StorePolicies.Manage, policy =>
+            policy.RequireRole(StoreRoles.StoreAdmin, FinanceRoles.FinanceAdmin, RoleNames.Admin));
     }
 }

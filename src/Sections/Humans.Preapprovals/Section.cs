@@ -12,15 +12,13 @@ using Humans.Preapprovals.Services;
 using Humans.Users.Contracts;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.Extensions.Configuration;
+using Humans.Notifications.Contracts;
 using Microsoft.Extensions.DependencyInjection;
+using Humans.AuditLog.Contracts;
 
 namespace Humans.Preapprovals;
 
-/// <summary>
-/// Preapprovals' DI entry point, at the project root by convention. Discovered by Shell —
-/// nothing names it, so it needs no section prefix.
-/// </summary>
-public sealed class Section : ISection, ISectionAdminNav
+public sealed class Section : ISection, ISectionAdminNav, ISectionJobs, ISectionPolicies
 {
     IEnumerable<AdminNavGroup> ISectionAdminNav.Groups() =>
     [
@@ -32,12 +30,12 @@ public sealed class Section : ISection, ISectionAdminNav
 
     public void Register(IServiceCollection services, IConfiguration configuration)
     {
+        services.AddSingleton<IAuditActionContributor, PreapprovalsAuditActions>();
+        services.AddSingleton<INotificationSourceContributor, PreapprovalsNotificationSources>();
         services.AddSectionDbContext<PreapprovalsDbContext>(sentinelTable: "pre_programs");
 
-        // Singleton + IDbContextFactory pattern (§15b): the repository owns context lifetime.
         services.AddSingleton<IPreapprovalRepository, PreapprovalRepository>();
 
-        // No caching decorator: a handful of programs, read on a few pages a day.
         services.AddScoped<PreapprovalService>();
         services.AddScoped<IPreapprovalManagement>(sp => sp.GetRequiredService<PreapprovalService>());
         services.AddScoped<IPreapprovalService>(sp => sp.GetRequiredService<PreapprovalService>());
@@ -50,8 +48,6 @@ public sealed class Section : ISection, ISectionAdminNav
 
         services.AddScoped<PreapprovalRemindersJob>();
 
-        // Preapprovals owns its email copy and its gallery samples; Email keeps the mechanics
-        // (memory/architecture/email-templates-live-in-sender.md).
         services.AddScoped<PreapprovalsEmails>();
         services.AddScoped<IEmailPreviewContributor, PreapprovalsEmailPreviews>();
 
@@ -66,5 +62,19 @@ public sealed class Section : ISection, ISectionAdminNav
             [ProgramStatus.Open] = "bg-success",
             [ProgramStatus.Closed] = "bg-secondary",
         });
+    }
+
+    IEnumerable<RecurringJobDescriptor> ISectionJobs.Jobs(IServiceProvider services)
+    {
+        yield return new RecurringJobDescriptor(
+            PreapprovalRemindersJob.JobId, typeof(PreapprovalRemindersJob), "0 5 * * *");
+    }
+
+    void ISectionPolicies.AddPolicies(AuthorizationOptions options)
+    {
+        options.AddPolicy(PreapprovalsPolicies.Manage, policy =>
+            policy.AddRequirements(new ManagesPreapprovalsRequirement()));
+        options.AddPolicy(PreapprovalsPolicies.Access, policy =>
+            policy.AddRequirements(new PreapprovalsAccessRequirement()));
     }
 }

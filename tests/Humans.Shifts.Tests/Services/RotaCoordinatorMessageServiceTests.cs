@@ -10,6 +10,7 @@ using Humans.Shifts.Services;
 using Humans.Shifts.Tests.Infrastructure;
 using Humans.Base.Enums;
 using Humans.Base.Extensions;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using NodaTime;
 using NodaTime.Testing;
@@ -19,14 +20,6 @@ using Humans.Users.Contracts;
 using Humans.Shifts.Contracts;
 namespace Humans.Shifts.Tests.Services;
 
-/// <summary>
-/// Orchestration tests for <see cref="RotaCoordinatorMessageService"/>:
-/// recipient fan-out, per-recipient shift list, audit log, and the failure shapes
-/// (missing message body, missing rota, missing signups). Issue
-/// nobodies-collective/Humans#732. Team-scoped variants cover the
-/// <c>SendTeamRotasMessageAsync</c> path (fan-out across all current/upcoming
-/// rotas in a team, deduped by user).
-/// </summary>
 public sealed class RotaCoordinatorMessageServiceTests
 {
     private readonly IShiftManagementRepository _repo = Substitute.For<IShiftManagementRepository>();
@@ -37,12 +30,11 @@ public sealed class RotaCoordinatorMessageServiceTests
     private readonly IAuditLogService _auditLog = Substitute.For<IAuditLogService>();
     private readonly FakeClock _clock = new(Instant.FromUtc(2026, 6, 15, 12, 0));
 
-    // Calendars for the EventSettings rows the test helpers below create, keyed by id —
-    // stands in for the Settings section (nobodies-collective/Humans#1630).
+    // Stands in for the Settings section: calendars for the EventSettings rows the helpers create.
     private readonly Dictionary<Guid, EventSettings> _calendars = [];
     private readonly ISettingsService _settingsService = Substitute.For<ISettingsService>();
 
-    private RotaCoordinatorMessageService CreateSut()
+    private RotaCoordinatorMessageService CreateSut(ILogger<RotaCoordinatorMessageService>? logger = null)
     {
         _settingsService.GetEventSettingsByIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>())
             .Returns(ci =>
@@ -51,8 +43,8 @@ public sealed class RotaCoordinatorMessageServiceTests
                 return Task.FromResult(found ? ToEventSettingsInfo(es!) : null);
             });
         return new(_repo, _teamService, _userService, _emailService, _emailMessages, _auditLog,
-            new EventCalendarResolver(_settingsService), _clock,
-            NullLogger<RotaCoordinatorMessageService>.Instance);
+            new EventCalendarResolver(_settingsService, Substitute.For<Humans.Shifts.Data.IShiftManagementRepository>()), _clock,
+            logger ?? NullLogger<RotaCoordinatorMessageService>.Instance);
     }
 
     private static EventSettingsInfo ToEventSettingsInfo(EventSettings src) => new(
@@ -73,6 +65,53 @@ public sealed class RotaCoordinatorMessageServiceTests
             ? null : new Dictionary<int, int>(src.BarriosEarlyEntryAllocation),
         EarlyEntryClose: src.EarlyEntryClose);
 
+    [HumansTheory]
+    [Xunit.InlineData(false)]
+    [Xunit.InlineData(true)]
+    public async Task Dispatch_AuditFailureAfterRequestingEmails_KeepsSuccessAndLogsCritical(bool teamWide)
+    {
+        var teamId = StubTeam();
+        var es = StubEvent();
+        var recipient = Guid.NewGuid();
+        var sender = Guid.NewGuid();
+        var shift = MakeShift(Guid.Empty, dayOffset: 30, startHour: 10);
+        var rota = MakeTeamRota(teamId, es, "Rota1", [(shift, [recipient])]);
+        _repo.GetRotasAsync(es.Id, Arg.Any<IReadOnlyCollection<Guid>>(), RotaReadShape.View, Arg.Any<CancellationToken>())
+            .Returns([rota]);
+        _repo.GetRotaAsync(rota.Id, RotaReadShape.View, Arg.Any<CancellationToken>()).Returns(rota);
+        StubUsers(sender, recipient);
+        var failure = new InvalidOperationException("Audit unavailable");
+        _auditLog.LogAsync(Arg.Any<AuditActionDefinition>(), Arg.Any<string>(), Arg.Any<Guid>(),
+            Arg.Any<string>(), Arg.Any<Guid>(), Arg.Any<Guid?>(), Arg.Any<string?>())
+            .Returns(Task.FromException(failure));
+        var logger = Substitute.For<ILogger<RotaCoordinatorMessageService>>();
+        var service = CreateSut(logger);
+
+        if (teamWide)
+        {
+            var result = await service.SendTeamRotasMessageAsync(teamId, sender, "Private message", false,
+                TeamRotasAudienceFilter.Default, Xunit.TestContext.Current.CancellationToken);
+            result.Succeeded.Should().BeTrue();
+            result.RecipientCount.Should().Be(1);
+        }
+        else
+        {
+            var result = await service.SendRotaMessageAsync(rota.Id, sender, "Private message", false,
+                Xunit.TestContext.Current.CancellationToken);
+            result.Succeeded.Should().BeTrue();
+            result.RecipientCount.Should().Be(1);
+        }
+
+        await _emailService.Received(1).SendAsync(Arg.Any<EmailMessage>(), Arg.Any<CancellationToken>());
+        var log = logger.ReceivedCalls()
+            .Single(call => string.Equals(call.GetMethodInfo().Name, "Log", StringComparison.Ordinal))
+            .GetArguments();
+        log[0].Should().Be(LogLevel.Critical);
+        log[3].Should().BeSameAs(failure);
+        log[2]!.ToString().Should().Contain((teamWide ? teamId : rota.Id).ToString())
+            .And.Contain(sender.ToString()).And.NotContain("Private message");
+    }
+
     [HumansFact]
     public async Task SendRotaMessageAsync_RejectsBlankMessage()
     {
@@ -82,7 +121,7 @@ public sealed class RotaCoordinatorMessageServiceTests
         result.Error.Should().Contain("required", "blank body must surface a clear error");
         await _emailService.DidNotReceiveWithAnyArgs().SendAsync(null!);
         await _auditLog.DidNotReceiveWithAnyArgs().LogAsync(
-            default, null!, Guid.Empty, null!, Guid.Empty);
+            null!, null!, Guid.Empty, null!, Guid.Empty);
     }
 
     [HumansFact]
@@ -205,10 +244,8 @@ public sealed class RotaCoordinatorMessageServiceTests
     [HumansFact]
     public async Task SendRotaMessageAsync_CarriesSenderEmail_ForReplyTo()
     {
-        // Shifts.md: Reply-To is the sending coordinator while From stays the
-        // shared address. This section's contribution to that invariant is
-        // passing the sender's own address through as SenderEmail — the
-        // Email section's factory turns it into the ReplyTo header.
+        // Reply-To is the sending coordinator while From stays shared (Shifts.md). This
+        // section's part is passing the sender's address through as SenderEmail.
         var rota = MakeRota(out _);
         _repo.GetRotaAsync(rota.Id, RotaReadShape.View, Arg.Any<CancellationToken>()).Returns(rota);
 
@@ -252,7 +289,7 @@ public sealed class RotaCoordinatorMessageServiceTests
         result.RotaName.Should().Be(rota.Name);
 
         await _auditLog.Received(1).LogAsync(
-            AuditAction.CoordinatorRotaMessageSent,
+            ShiftsAuditActions.CoordinatorRotaMessageSent,
             nameof(Rota),
             rota.Id,
             Arg.Is<string>(d => d.StartsWith("Requested rota message", StringComparison.Ordinal) && d.Contains($"'{expectedSnippet}'", StringComparison.Ordinal) && d.Contains(rota.Name)),
@@ -334,7 +371,7 @@ public sealed class RotaCoordinatorMessageServiceTests
             Arg.Is<EmailMessage>(m => m.RecipientEmail == "b@example.com"), Arg.Any<CancellationToken>());
 
         await _auditLog.Received(1).LogAsync(
-            AuditAction.CoordinatorRotaMessageSent,
+            ShiftsAuditActions.CoordinatorRotaMessageSent,
             nameof(Rota),
             rota.Id,
             Arg.Is<string>(d => d.Contains("1 failed") && d.Contains("schedule change")),
@@ -374,7 +411,7 @@ public sealed class RotaCoordinatorMessageServiceTests
 
         // Audit row still written so the failures are forensically visible.
         await _auditLog.Received(1).LogAsync(
-            AuditAction.CoordinatorRotaMessageSent,
+            ShiftsAuditActions.CoordinatorRotaMessageSent,
             nameof(Rota),
             rota.Id,
             Arg.Is<string>(d => d.Contains("2 failed")),
@@ -382,11 +419,6 @@ public sealed class RotaCoordinatorMessageServiceTests
             Arg.Any<Guid?>(),
             Arg.Any<string?>());
     }
-
-    // ============================================================
-    // SendTeamRotasMessageAsync — team-scoped fan-out across all
-    // current/upcoming rotas in a team.
-    // ============================================================
 
     [HumansFact]
     public async Task SendTeamRotasMessageAsync_RejectsBlankMessage()
@@ -613,7 +645,7 @@ public sealed class RotaCoordinatorMessageServiceTests
         await CreateSut().SendTeamRotasMessageAsync(teamId, sender, message, includeShifts: true, TeamRotasAudienceFilter.Default, Xunit.TestContext.Current.CancellationToken);
 
         await _auditLog.Received(1).LogAsync(
-            AuditAction.CoordinatorTeamRotasMessageSent,
+            ShiftsAuditActions.CoordinatorTeamRotasMessageSent,
             nameof(Team),
             teamId,
             Arg.Is<string>(d => d.StartsWith("Requested team-wide rota message", StringComparison.Ordinal) && d.Contains($"'{expectedSnippet}'", StringComparison.Ordinal) && d.Contains("Test Team")),
@@ -827,12 +859,7 @@ public sealed class RotaCoordinatorMessageServiceTests
         return es;
     }
 
-    /// <summary>
-    /// Builds a team-scoped Rota with EventSettings wired up and Shift+ShiftSignup
-    /// collections populated as the team-level path expects (via Rota.Shifts →
-    /// Shift.ShiftSignups). Each tuple is (shift, recipient user ids); all signups
-    /// default to Confirmed status.
-    /// </summary>
+    /// <summary>Attaches each signup and its shift to the rota (Rota.Shifts → Shift.ShiftSignups), as the team-level path reads them.</summary>
     private static void AddSignups(Rota rota, IReadOnlyList<ShiftSignup> signups)
     {
         foreach (var signup in signups)
@@ -941,8 +968,7 @@ public sealed class RotaCoordinatorMessageServiceTests
         {
             Id = id,
             DisplayName = displayName,
-            // Mirrors CopyNamesToUser's dual-write from Profile onto User (#1097) —
-            // UserInfo.BurnerName reads User.BurnerName only (#1098).
+            // UserInfo.BurnerName reads User.BurnerName, so it is seeded there.
             BurnerName = displayName,
             PreferredLanguage = language,
             Email = email,
@@ -987,9 +1013,8 @@ public sealed class RotaCoordinatorMessageServiceTests
     }
 
     /// <summary>
-    /// The shift labels the builder wrote into the body, one per <c>&lt;li&gt;</c> row and in
-    /// body order. The list is the only place the per-recipient shift set is observable now
-    /// that the service builds its own message.
+    /// The shift labels the builder wrote into the body, one per <c>&lt;li&gt;</c> row in body order:
+    /// the only place the per-recipient shift set is observable.
     /// </summary>
     private static IReadOnlyList<string> ShiftLines(EmailMessage message) =>
     [

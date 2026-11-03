@@ -1,4 +1,6 @@
 using Humans.Email.Contracts;
+using Humans.Notifications.Contracts;
+using Humans.Notifications.Services;
 using Humans.Users.Contracts;
 using NSubstitute;
 
@@ -24,8 +26,7 @@ internal static class NotificationTestFixtures
 
     /// <summary>
     /// The columns of an <c>email_communication_preferences</c> row these tests seed. Owned
-    /// here rather than the section's entity, which is internal to <c>Humans.Email</c>
-    /// (nobodies-collective/Humans#1051).
+    /// here rather than the section's entity, which is internal to <c>Humans.Email</c>.
     /// </summary>
     internal sealed class PreferenceRow
     {
@@ -38,7 +39,7 @@ internal static class NotificationTestFixtures
 
     /// <summary>
     /// Stubs <see cref="ICommunicationPreferenceService.GetUsersWithInboxDisabledAsync"/> to
-    /// read from <paramref name="registry"/>, matching the old DB-backed stub's behaviour.
+    /// read from <paramref name="registry"/>.
     /// </summary>
     internal static ICommunicationPreferenceService StubInboxDisabledFrom(
         this ICommunicationPreferenceService service, PreferenceRegistry registry)
@@ -61,4 +62,17 @@ internal static class NotificationTestFixtures
     /// <summary>Minimal <see cref="UserInfo"/> projection — the meter tests only read counts.</summary>
     internal static UserInfo ToUserInfo(this User user) =>
         UserInfo.Create(user, [], [], [], profile: null, []);
+}
+
+/// <summary>Sources these tests own: the section's tests never borrow another section's definitions.</summary>
+internal sealed class TestSources : NotificationSourceContributor
+{
+    public static readonly NotificationSourceDefinition TeamUpdate = new("TestTeamUpdate", MessageCategory.TeamUpdates);
+    public static readonly NotificationSourceDefinition ShiftUpdate = new("TestShiftUpdate", MessageCategory.VolunteerUpdates, NotificationInboxGroup.Shifts);
+    public static readonly NotificationSourceDefinition Approval = new("TestApproval", MessageCategory.Governance, NotificationInboxGroup.Approvals);
+    public static readonly NotificationSourceDefinition Plain = new("TestPlain", MessageCategory.System);
+    public static readonly NotificationSourceDefinition Retired = new("TestRetired", MessageCategory.Governance, NotificationInboxGroup.Approvals, Retired: true);
+    public static readonly NotificationSourceDefinition RetiredToo = new("TestRetiredToo", MessageCategory.System, Retired: true);
+
+    public static NotificationSourceRegistry Registry => new([new TestSources()]);
 }

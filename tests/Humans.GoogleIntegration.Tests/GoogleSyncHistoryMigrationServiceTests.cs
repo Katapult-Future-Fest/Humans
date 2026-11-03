@@ -12,10 +12,8 @@ using NSubstitute;
 namespace Humans.GoogleIntegration.Tests;
 
 /// <summary>
-/// Behaviour of the one-time <c>audit_log</c> → <c>google_sync_log</c> history move
-/// (nobodies-collective/Humans#1083): what maps, what does not, and that a second run is a
-/// no-op. Runs against a real <see cref="GoogleSyncLogRepository"/> so the idempotency claim
-/// is tested through EF rather than through a substitute's memory.
+/// Runs against a real <see cref="GoogleSyncLogRepository"/> so the idempotency claim is tested
+/// through EF rather than through a substitute's memory.
 /// </summary>
 public sealed class GoogleSyncHistoryMigrationServiceTests : IDisposable
 {
@@ -85,7 +83,7 @@ public sealed class GoogleSyncHistoryMigrationServiceTests : IDisposable
     {
         var audit = Granted(Guid.NewGuid()) with
         {
-            Action = AuditAction.GoogleResourceAccessRevoked,
+            Action = GoogleIntegrationAuditActions.GoogleResourceAccessRevoked.Name,
             Success = false,
             ErrorMessage = "Google group remove failed for a@b.org"
         };
@@ -138,7 +136,7 @@ public sealed class GoogleSyncHistoryMigrationServiceTests : IDisposable
     [HumansFact]
     public async Task MigrateAsync_SkipsRowsWithNoSyncLogEquivalent()
     {
-        var otherAction = Granted(Guid.NewGuid()) with { Action = AuditAction.GoogleResourceProvisioned };
+        var otherAction = Granted(Guid.NewGuid()) with { Action = GoogleIntegrationAuditActions.GoogleResourceProvisioned.Name };
         var noPayload = Granted(Guid.NewGuid()) with { SyncSource = null, Success = null };
         Legacy(otherAction, noPayload, Granted(Guid.NewGuid()));
 
@@ -188,7 +186,7 @@ public sealed class GoogleSyncHistoryMigrationServiceTests : IDisposable
 
     private static LegacyGoogleSyncAuditRow Granted(Guid resourceId) => new(
         Id: Guid.NewGuid(),
-        Action: AuditAction.GoogleResourceAccessGranted,
+        Action: GoogleIntegrationAuditActions.GoogleResourceAccessGranted.Name,
         OccurredAt: Noon,
         Description: "GoogleWorkspaceSyncService: Granted Drive access",
         ResourceId: resourceId,

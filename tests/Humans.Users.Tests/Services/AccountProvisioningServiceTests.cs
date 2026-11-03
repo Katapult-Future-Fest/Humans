@@ -17,11 +17,11 @@ namespace Humans.Users.Tests.Services;
 
 file sealed class StubAuditLog : IAuditLogService
 {
-    public Task LogAsync(AuditAction action, string entityType, Guid entityId,
+    public Task LogAsync(AuditActionDefinition action, string entityType, Guid entityId,
         string description, string jobName,
         Guid? relatedEntityId = null, string? relatedEntityType = null) => Task.CompletedTask;
 
-    public Task LogAsync(AuditAction action, string entityType, Guid entityId,
+    public Task LogAsync(AuditActionDefinition action, string entityType, Guid entityId,
         string description, Guid actorUserId,
         Guid? relatedEntityId = null, string? relatedEntityType = null) => Task.CompletedTask;
 
@@ -36,26 +36,22 @@ file sealed class StubAuditLog : IAuditLogService
         Task.FromResult<IReadOnlyList<AuditLogEntrySnapshot>>([]);
 
     public Task<IReadOnlyList<AuditLogEntrySnapshot>> GetFilteredEntriesAsync(
+        IReadOnlyList<AuditActionDefinition> actions,
         string? entityType = null,
         Guid? entityId = null,
         Guid? userId = null,
-        IReadOnlyList<AuditAction>? actions = null,
         int limit = 20,
         CancellationToken ct = default) =>
         Task.FromResult<IReadOnlyList<AuditLogEntrySnapshot>>([]);
 
     public Task<IReadOnlySet<Guid>> GetEntityIdsForEntityTypeActionsAsync(
-        string entityType, IReadOnlyList<AuditAction> actions, CancellationToken ct = default) =>
+        string entityType, IReadOnlyList<AuditActionDefinition> actions, CancellationToken ct = default) =>
         Task.FromResult((IReadOnlySet<Guid>)new HashSet<Guid>());
 }
 
 /// <summary>
-/// Unit tests for the Application-layer <see cref="AccountProvisioningService"/>.
-/// Repositories are stubbed in-memory so these
-/// tests do not depend on Npgsql-specific translations (<c>ILike</c>) that
-/// the EF InMemory provider does not support; behaviour of the actual
-/// <see cref="UserEmail"/> / <see cref="User"/> matching is covered in
-/// integration/QA against Postgres.
+/// Repositories are in-memory fakes because the real matching uses Npgsql <c>ILike</c>, which the
+/// EF InMemory provider cannot evaluate.
 /// </summary>
 public class AccountProvisioningServiceTests
 {
@@ -153,9 +149,6 @@ public class AccountProvisioningServiceTests
         public Task<(string ContentType, string? StorageKey)?> GetProfilePictureLocationAsync(
             Guid profileId, CancellationToken ct = default) =>
             throw new NotSupportedException();
-        public Task<IReadOnlyList<(Guid ProfileId, Guid UserId, string BurnerName, string ContentType, string? StorageKey, Instant UpdatedAt)>>
-            GetCustomPictureRowsAsync(CancellationToken ct = default) =>
-            throw new NotSupportedException();
         public Task<IReadOnlyList<ProfileLanguage>> GetLanguagesAsync(
             Guid profileId, CancellationToken ct = default) =>
             throw new NotSupportedException();
@@ -243,16 +236,15 @@ public class AccountProvisioningServiceTests
     }
 
     /// <summary>
-    /// In-memory fake of the two <c>IUserEmailService</c> methods that
-    /// <c>AccountProvisioningService</c> calls. AccountProvisioningService routes
-    /// UserEmail mutations through <c>IUserEmailService</c> instead of the
-    /// repository, so the test fixture mirrors the same boundary.
+    /// Fakes the <c>IUserEmailService</c> calls the service makes: it routes UserEmail writes
+    /// through that service, not the repository.
     /// </summary>
     private sealed class FakeUserEmailService
     {
         private readonly Dictionary<Guid, UserEmail> _emails = new();
 
         public bool ThrowOnAddVerified { get; set; }
+        public bool RefuseAddVerified { get; set; }
         public bool ThrowOnAddProvisioned { get; set; }
 
         public void Seed(UserEmail email) => _emails[email.Id] = email;
@@ -315,10 +307,13 @@ public class AccountProvisioningServiceTests
             return Task.CompletedTask;
         }
 
-        public Task<bool> AddVerifiedAsync(Guid userId, string email, Instant now)
+        public Task<UserEmailAddResult> AddVerifiedAsync(Guid userId, string email, Instant now)
         {
             if (ThrowOnAddVerified)
                 throw new InvalidOperationException("boom");
+
+            if (RefuseAddVerified)
+                return Task.FromResult(new UserEmailAddResult(Guid.Empty, false, false, "Users_EmailUpdate_AccountUnavailable"));
 
             var normalized = EmailNormalization.NormalizeForComparison(email);
             foreach (var ue in _emails.Values)
@@ -326,7 +321,7 @@ public class AccountProvisioningServiceTests
                 if (ue.UserId != userId) continue;
                 var existing = EmailNormalization.NormalizeForComparison(ue.Email);
                 if (string.Equals(existing, normalized, StringComparison.OrdinalIgnoreCase))
-                    return Task.FromResult(false);
+                    return Task.FromResult(new UserEmailAddResult(ue.Id, false, false));
             }
 
             var row = new UserEmail
@@ -342,7 +337,7 @@ public class AccountProvisioningServiceTests
                 UpdatedAt = now,
             };
             _emails[row.Id] = row;
-            return Task.FromResult(true);
+            return Task.FromResult(new UserEmailAddResult(row.Id, true, false));
         }
 
         private static string? GetAlternateEmail(string normalizedEmail)
@@ -445,11 +440,11 @@ public class AccountProvisioningServiceTests
                     .ThrowsAsync(new InvalidOperationException("Profile creation failed"));
                 break;
             case "Audit":
-                _audit.LogAsync(AuditAction.ContactCreated, nameof(User), Arg.Any<Guid>(), Arg.Any<string>(), nameof(AccountProvisioningService),
+                _audit.LogAsync(UsersAuditActions.ContactCreated, nameof(User), Arg.Any<Guid>(), Arg.Any<string>(), nameof(AccountProvisioningService),
                     Arg.Any<Guid?>(), Arg.Any<string?>()).ThrowsAsync(new InvalidOperationException("Audit failed"));
                 break;
             case "DeletionAudit":
-                _audit.LogAsync(AuditAction.UserEmailDeleted, nameof(UserEmail), row.Id, Arg.Any<string>(), nameof(AccountProvisioningService),
+                _audit.LogAsync(UsersAuditActions.UserEmailDeleted, nameof(UserEmail), row.Id, Arg.Any<string>(), nameof(AccountProvisioningService),
                     row.UserId, nameof(User)).ThrowsAsync(new InvalidOperationException("Deletion audit failed"));
                 break;
         }
@@ -474,7 +469,7 @@ public class AccountProvisioningServiceTests
 
         result.Created.Should().BeTrue();
         result.UserId.Should().NotBe(row.UserId);
-        await _audit.Received(1).LogAsync(AuditAction.UserEmailDeleted, nameof(UserEmail), row.Id,
+        await _audit.Received(1).LogAsync(UsersAuditActions.UserEmailDeleted, nameof(UserEmail), row.Id,
             Arg.Is<string>(description => description.Contains(result.UserId.ToString(), StringComparison.Ordinal)),
             nameof(AccountProvisioningService), row.UserId, nameof(User));
         _userEmailFake.All.Should().ContainSingle().Which.UserId.Should().Be(result.UserId);
@@ -544,7 +539,6 @@ public class AccountProvisioningServiceTests
         StoredUser(result.UserId).BurnerName.Should().Be("Alice Smith");
         StoredUser(result.UserId).ContactSource.Should().Be(ContactSource.TicketTailor);
 
-        // Verify UserEmail was created
         var userEmail = _userEmailFake.All.FirstOrDefault(ue => ue.UserId == result.UserId);
         userEmail.Should().NotBeNull();
         userEmail.Email.Should().Be("alice@example.com");
@@ -555,7 +549,6 @@ public class AccountProvisioningServiceTests
     [HumansFact]
     public async Task FindOrCreateUserByEmailAsync_FindsExisting_ByPrimaryEmail()
     {
-        // Seed an existing user
         var existingUser = new User
         {
             Id = Guid.NewGuid(),
@@ -622,7 +615,6 @@ public class AccountProvisioningServiceTests
             UpdatedAt = _clock.GetCurrentInstant(),
         });
 
-        // Look up by secondary email
         var result = await _service.FindOrCreateUserByEmailAsync(
             "carol@secondary.com", "Carol", ContactSource.TicketTailor, Xunit.TestContext.Current.CancellationToken);
 
@@ -633,13 +625,11 @@ public class AccountProvisioningServiceTests
     [HumansFact]
     public async Task FindOrCreateUserByEmailAsync_DoesNotCreateDuplicates()
     {
-        // Create the first time
         var result1 = await _service.FindOrCreateUserByEmailAsync(
             "dave@example.com", "Dave", ContactSource.TicketTailor, Xunit.TestContext.Current.CancellationToken);
 
         result1.Created.Should().BeTrue();
 
-        // Call again with the same email
         var result2 = await _service.FindOrCreateUserByEmailAsync(
             "dave@example.com", "Dave Smith", ContactSource.MailerLite, Xunit.TestContext.Current.CancellationToken);
 
@@ -699,7 +689,6 @@ public class AccountProvisioningServiceTests
 
         result.Created.Should().BeFalse();
         result.UserId.Should().Be(existingUser.Id);
-        // ContactSource should now be set
         StoredUser(result.UserId).ContactSource.Should().Be(ContactSource.TicketTailor);
     }
 
@@ -762,8 +751,7 @@ public class AccountProvisioningServiceTests
     [HumansFact]
     public async Task FindOrCreateUserByEmailAsync_RoutesEmailRowsThroughIUserEmailService()
     {
-        // Email-row policy still routes through IUserEmailService even though
-        // Users now owns the underlying repository storage methods.
+        // Email-row policy routes through IUserEmailService, not the repository.
         var result = await _service.FindOrCreateUserByEmailAsync(
             "jane@example.com", "Jane", ContactSource.MailerLite, Xunit.TestContext.Current.CancellationToken);
 
@@ -788,7 +776,7 @@ public class AccountProvisioningServiceTests
                 : Task.FromResult(true));
         _userInfoRefresher.RefreshAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>(), Arg.Any<string>(), Arg.Any<string>())
             .Returns(call => { Transaction.Current.Should().BeNull(); return Task.CompletedTask; });
-        _audit.LogAsync(AuditAction.ContactCreated, nameof(User), Arg.Any<Guid>(), Arg.Any<string>(),
+        _audit.LogAsync(UsersAuditActions.ContactCreated, nameof(User), Arg.Any<Guid>(), Arg.Any<string>(),
             nameof(AccountProvisioningService)).Returns(_ =>
             {
                 Transaction.Current.Should().BeNull();
@@ -867,10 +855,10 @@ public class AccountProvisioningServiceTests
         _userRepo.All.Should().ContainSingle();
         await _userManager.Received(imported ? 0 : 1).CreateAsync(Arg.Any<User>());
         if (imported)
-            await _audit.Received(1).LogAsync(AuditAction.StubProfileBackfilled, nameof(User), persistedUser.Id,
+            await _audit.Received(1).LogAsync(UsersAuditActions.StubProfileBackfilled, nameof(User), persistedUser.Id,
                 Arg.Any<string>(), nameof(AccountProvisioningService));
         else
-            await _audit.Received(1).LogAsync(AuditAction.StubProfileBackfilled, nameof(User), persistedUser.Id,
+            await _audit.Received(1).LogAsync(UsersAuditActions.StubProfileBackfilled, nameof(User), persistedUser.Id,
                 Arg.Any<string>(), persistedUser.Id);
         await ProvisionAsync();
         profiles.Should().ContainSingle();
@@ -955,15 +943,18 @@ public class AccountProvisioningServiceTests
 
         result.Outcome.Should().Be(MagicLinkSignupCompletionOutcome.ExistingUser);
         result.UserId.Should().Be(user.Id);
-        // Login stamp goes through the single owner of the rule (A1).
+        // The login stamp goes through the rule's single owner.
         await _userService.Received(1).RecordLoginAsync(user.Id, Arg.Any<CancellationToken>());
         await _userManager.DidNotReceive().CreateAsync(Arg.Any<User>());
     }
 
-    [HumansFact]
-    public async Task CompleteMagicLinkSignupAsync_AddVerifiedEmailFailureRollsBackUser()
+    [HumansTheory]
+    [Xunit.InlineData(false)]
+    [Xunit.InlineData(true)]
+    public async Task CompleteMagicLinkSignupAsync_AddVerifiedEmailFailureRollsBackUser(bool refusal)
     {
-        _userEmailFake.ThrowOnAddVerified = true;
+        _userEmailFake.ThrowOnAddVerified = !refusal;
+        _userEmailFake.RefuseAddVerified = refusal;
 
         var result = await _service.CompleteMagicLinkSignupAsync(
             "rollback@example.com", "Rollback", "First", "Last", Xunit.TestContext.Current.CancellationToken);

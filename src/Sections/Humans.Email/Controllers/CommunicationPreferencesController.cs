@@ -1,3 +1,4 @@
+using Humans.Base.Attributes;
 using Humans.Base.Controllers;
 using Humans.Email.Contracts;
 using Humans.Email.Services;
@@ -9,11 +10,7 @@ using Microsoft.Extensions.Localization;
 
 namespace Humans.Email.Controllers;
 
-/// <summary>
-/// A member's own communication preferences, <c>/Email/CommunicationPreferences</c>. Moved
-/// from Users' <c>ProfileController</c> in Users decomposition commit 14. Acts on the
-/// signed-in member only and never takes a user id.
-/// </summary>
+/// <summary>The signed-in member's own preferences only; never takes a user id.</summary>
 [Authorize]
 [Route("Email")]
 internal sealed class CommunicationPreferencesController(
@@ -23,6 +20,7 @@ internal sealed class CommunicationPreferencesController(
     IStringLocalizer<EmailResource> localizer) : HumansControllerBase(userService)
 {
     [HttpGet("CommunicationPreferences")]
+    [AllowBeforeActiveMembership]
     public async Task<IActionResult> Index()
     {
         try
@@ -43,6 +41,7 @@ internal sealed class CommunicationPreferencesController(
 
     [HttpPost("CommunicationPreferences/Update")]
     [ValidateAntiForgeryToken]
+    [AllowBeforeActiveMembership]
     public async Task<IActionResult> UpdatePreference(MessageCategory category, [BindRequired] bool emailEnabled, [BindRequired] bool alertEnabled)
     {
         try

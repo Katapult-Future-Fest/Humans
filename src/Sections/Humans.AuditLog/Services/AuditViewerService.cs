@@ -3,13 +3,9 @@ using Humans.Base.Interfaces;
 
 namespace Humans.AuditLog.Services;
 
-/// <summary>Read-side wrapper over <see cref="IAuditLogReader"/> that resolves actor/subject/team names. No DB or caching.</summary>
-/// <remarks>
-/// Names come from the <see cref="IEntityNameContributor"/> fan-out, so this section reaches
-/// into none of the sections that own the ids it renders (nobodies-collective/Humans#1059).
-/// </remarks>
 internal sealed class AuditViewerService(
     IAuditLogReader auditLog,
+    AuditActionRegistry registry,
     IEnumerable<IEntityNameContributor> nameContributors) : IAuditViewerService
 {
     public async Task<IReadOnlyList<AuditEvent>> GetForUserAsync(Guid userId, int count, CancellationToken ct = default)
@@ -22,7 +18,7 @@ internal sealed class AuditViewerService(
         string? entityType,
         Guid? entityId,
         Guid? userId,
-        IReadOnlyList<AuditAction>? actions,
+        IReadOnlyList<string>? actions,
         int limit,
         CancellationToken ct = default)
     {
@@ -30,14 +26,13 @@ internal sealed class AuditViewerService(
         return await ResolveAsync(entries, ct);
     }
 
+    /// <summary><paramref name="actionFilter"/> is a case-insensitive match on a declared action name.</summary>
     public async Task<AuditEventPage> GetPageAsync(string? actionFilter, int page, int pageSize, CancellationToken ct = default)
     {
-        var (items, totalCount, anomalyCount) = await auditLog.GetFilteredAsync(actionFilter, page, pageSize, ct);
+        var (items, totalCount, alertCounts) = await auditLog.GetFilteredAsync(actionFilter, page, pageSize, ct);
         var events = await ResolveAsync(items, ct);
-        return new AuditEventPage(events, totalCount, anomalyCount);
+        return new AuditEventPage(events, totalCount, alertCounts);
     }
-
-    // ─── Resolution ───
 
     private async Task<IReadOnlyList<AuditEvent>> ResolveAsync(
         IReadOnlyList<AuditLogEntrySnapshot> entries, CancellationToken ct)
@@ -53,10 +48,7 @@ internal sealed class AuditViewerService(
         return result;
     }
 
-    /// <summary>
-    /// One pass over every registered contributor. Each answers for the ids it owns and
-    /// ignores the rest; first answer for an id wins.
-    /// </summary>
+    /// <summary>Each contributor answers for the ids it owns; the first answer for an id wins.</summary>
     private async Task<Dictionary<Guid, EntityName>> ResolveNamesAsync(
         IReadOnlyCollection<Guid> ids, CancellationToken ct)
     {
@@ -72,7 +64,7 @@ internal sealed class AuditViewerService(
         return resolved;
     }
 
-    private static AuditEvent Resolve(
+    private AuditEvent Resolve(
         AuditLogEntrySnapshot entry,
         IReadOnlyDictionary<Guid, EntityName> names)
     {
@@ -82,7 +74,7 @@ internal sealed class AuditViewerService(
         return new AuditEvent(
             Id: entry.Id,
             OccurredAt: entry.OccurredAt,
-            Action: entry.Action,
+            Action: registry.Resolve(entry.Action),
             ActorUserId: entry.ActorUserId,
             ActorDisplayName: NameOf(entry.ActorUserId, names),
             EntityType: entry.EntityType,
@@ -123,7 +115,7 @@ internal sealed class AuditViewerService(
 
     private static Guid? ResolveSubjectId(AuditLogEntrySnapshot e)
     {
-        // Subject = person acted upon. Guid.Empty → null (e.g. unmatched WorkspaceAccount addresses).
+        // Guid.Empty is an unmatched address (e.g. WorkspaceAccount): no subject.
         Guid? subject = e.EntityType is "User" or "Profile" or "WorkspaceAccount"
             ? e.EntityId
             : string.Equals(e.RelatedEntityType, "User", StringComparison.Ordinal)
@@ -137,3 +129,9 @@ internal sealed class AuditViewerService(
         : string.Equals(e.RelatedEntityType, "Team", StringComparison.Ordinal) ? e.RelatedEntityId
         : null;
 }
+
+/// <summary><c>AlertCounts</c> is rows per <see cref="AuditActionDefinition.Alert"/> action over the whole log, keyed by name.</summary>
+internal sealed record AuditEventPage(
+    IReadOnlyList<AuditEvent> Items,
+    int TotalCount,
+    IReadOnlyDictionary<string, int> AlertCounts);

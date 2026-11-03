@@ -1,19 +1,10 @@
+using Humans.Camps.Contracts;
 using Humans.Base.Authorization;
 using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 
 namespace Humans.Camps.Authorization;
 
-/// <summary>
-/// Resource-based authorization handler for camp operations.
-///
-/// Authorization logic:
-/// - Admin / CampAdmin: allow any camp (both operations).
-/// - <see cref="CampOperationRequirement.Manage"/>: Camp lead for the resource camp.
-/// - <see cref="CampOperationRequirement.SubmitEvent"/>: Lead OR Workshop role holder
-///   for the resource camp.
-/// - Everyone else: deny.
-/// </summary>
 internal sealed class CampAuthorizationHandler(ICampService campService) : AuthorizationHandler<CampOperationRequirement>
 {
     protected override async Task HandleRequirementAsync(AuthorizationHandlerContext context, CampOperationRequirement requirement)
@@ -30,7 +21,7 @@ internal sealed class CampAuthorizationHandler(ICampService campService) : Autho
         if (campId is null)
             return;
 
-        if (RoleChecks.IsCampAdmin(context.User))
+        if (CampsRoles.IsCampsAdmin(context.User))
         {
             context.Succeed(requirement);
             return;
@@ -46,7 +37,7 @@ internal sealed class CampAuthorizationHandler(ICampService campService) : Autho
             return;
         }
 
-        var camp = resourceCamp ?? await GetPublicYearCampAsync(campId.Value);
+        var camp = resourceCamp ?? await GetActiveEventCampAsync(campId.Value);
         var allowed = requirement.OperationName switch
         {
             nameof(CampOperationRequirement.Manage) =>
@@ -62,10 +53,11 @@ internal sealed class CampAuthorizationHandler(ICampService campService) : Autho
         }
     }
 
-    private async Task<CampInfo?> GetPublicYearCampAsync(Guid campId)
+    private async Task<CampInfo?> GetActiveEventCampAsync(Guid campId)
     {
-        var settings = await campService.GetSettingsAsync();
-        return (await campService.GetCampsForYearAsync(settings.PublicYear))
-            .FirstOrDefault(c => c.Id == campId);
+        var activeEventId = (await campService.GetSettingsAsync()).ActiveEventSettingsId;
+        return activeEventId is { } eventId
+            ? (await campService.GetCampsForEventAsync(eventId)).FirstOrDefault(c => c.Id == campId)
+            : null;
     }
 }

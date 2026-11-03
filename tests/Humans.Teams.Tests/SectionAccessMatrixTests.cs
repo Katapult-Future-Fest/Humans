@@ -1,16 +1,13 @@
+using Humans.Base.Interfaces;
 using AwesomeAssertions;
 using Humans.Base.Models;
 
 namespace Humans.Teams.Tests;
 
-/// <summary>
-/// The help widget and the agent's preload both read this section's access matrix through the
-/// <c>ISectionAccessMatrix</c> seam, so the rows are pinned here rather than in Base.
-/// </summary>
 public class SectionAccessMatrixTests
 {
     private static AccessMatrixData Matrix() =>
-        new SectionAccessMatrix().AccessMatrices.Should().ContainSingle().Subject;
+        ((ISectionAccessMatrix)new Section()).AccessMatrices.Should().ContainSingle().Subject;
 
     [HumansFact]
     public void Contributes_the_Teams_matrix_under_the_key_the_page_calls_it_with()

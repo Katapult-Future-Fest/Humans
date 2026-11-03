@@ -4,7 +4,7 @@
   src/Sections/Humans.Camps/Services/CachingCampService.cs
   src/Sections/Humans.Camps/Services/CampService.cs
   src/Sections/Humans.Shifts/Section.cs
-  src/Sections/Humans.Shifts/SectionPolicies.cs
+  src/Sections/Humans.Shifts/Section.cs
   src/Sections/Humans.Shifts/Services/VolunteerTrackingExportService.cs
   src/Sections/Humans.Shifts/Services/ShiftEarlyEntryProjection.cs
   src/Sections/Humans.Teams/Section.cs
@@ -55,7 +55,7 @@ verbatim; the nav entry is the section's own "Early Entry" group. The route is n
 |-------|--------------|
 | Any authenticated human | Sees their own EE date on ticket-stub surfaces (homepage strip, holdings, transfer wizard). The stub and holdings view components answer for the user they are invoked with; an admin profile view shows the profiled user's. |
 | Gate / Scanner staff | Sees the *scanned attendee's* EE on the gate card (`ScannerController`, `GateService`). |
-| `ShiftDashboardAccess` (Admin, NoInfoAdmin, VolunteerCoordinator) | Reads the full cross-source roster at `/Shifts/Admin/EarlyEntry`. |
+| `ShiftsPolicies.Read` (Admin, Board, ShiftsNoInfo, ShiftsAdmin) | Reads the full cross-source roster at `/Shifts/Admin/EarlyEntry`. |
 
 ## Invariants
 
@@ -64,13 +64,13 @@ verbatim; the nav entry is the section's own "Early Entry" group. The route is n
 - The fan-out is sequential — a simplicity choice, not a thread-safety requirement
   (design-rules §8b); each provider reads through its own section.
 - **Nothing outlives the request.** The scoped service fans out over the providers once per
-  request scope (the home page asks twice), so a grant written in any contributing section shows
+  request scope, so a grant written in any contributing section shows
   on the next request and no section has to tell this one about its writes
   (`EarlyEntryServiceTests.GetForUserAsync_GathersOncePerScope_AndFreshInTheNext`,
   `EarlyEntryArchitectureTests.SectionRegistersTheOrchestratorPerRequest`).
 - Per human: earliest date wins, sources are distinct and ordinal-compared in provider order,
   and `HasMultiple` is `Sources.Count > 1`.
-- The roster is gated by `ShiftDashboardAccess`
+- The roster is gated by `ShiftsPolicies.Manage`
   (`EarlyEntryArchitectureTests.RosterRequiresShiftDashboardAccess`).
 - No `Resources/` folder: the roster is an admin page with inline English
   ([`localization-admin-exempt`](../../../../memory/code/localization-admin-exempt.md)).
@@ -81,14 +81,14 @@ verbatim; the nav entry is the section's own "Early Entry" group. The route is n
   components answer for the user they are invoked with, so who may see another member's EE
   there is the invoking page's gate, not this section's. The gate card is the deliberate
   staff-facing exception.
-- A human without `ShiftDashboardAccess` **cannot** reach `/Shifts/Admin/EarlyEntry`.
+- A human without `ShiftsPolicies.Manage` **cannot** reach `/Shifts/Admin/EarlyEntry`.
 - The section exposes no write path, so no write **cannot**-clause applies.
 
 ## Triggers
 
-None. Every read derives grants live from the providers, so a camp EE flag, a build-shift
+None. Every request derives grants live from the providers, so a camp EE flag, a build-shift
 signup, a team grant, a team flag or rename, a shift edit or an event-settings save shows on
-the next read with no signal to this section.
+the next request with no signal to this section.
 
 ## Cross-Section Dependencies
 
@@ -116,9 +116,7 @@ Inbound, all through `Contracts/`:
 ### Cross-section read interface
 
 The whole outward surface is read-only, so there is no read/write split to make. The
-contracts live in `Contracts/`, a folder rather than a leaf project — known debt with a
-queued carve-out decision (`debt-ledger.yml`), not a settled shape: every
-consumer references the whole section, and only `internal` keeps them off the internals.
+contracts live in `Contracts/`, the house shape (design-rules §1).
 
 | Read interface | Methods | Notes |
 |---|---:|---|
@@ -128,7 +126,7 @@ consumer references the whole section, and only `internal` keeps them off the in
 
 - **No repository, no `DbContext`.**
 - **Decorator decision** — Option A, no decorator. A per-human cache here could only be kept
-  true by every contributing section evicting it on its writes; a read costs one provider
+  true by every contributing section evicting it on its writes; a request costs one provider
   pass (a few small queries), which this scale affords on every ticket page and gate scan.
 - **Cross-section calls** — `IUserService`.
 - **Architecture test** — `tests/Humans.EarlyEntry.Tests/EarlyEntryArchitectureTests.cs`; the

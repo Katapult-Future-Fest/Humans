@@ -1,12 +1,6 @@
 namespace Humans.Camps.Contracts;
 
-/// <summary>
-/// The camp write verbs <c>Humans.Development</c>'s dev seeders drive.
-/// <c>DevPersonaSeeder</c>/<c>DevelopmentCampRoleSeeder</c> build multi-section persona
-/// fixtures, so taking the seeding in-house would steal another section's fixtures
-/// (Teams' <c>ITeamSeeding</c> shape). Only the verbs a fixture actually needs are here;
-/// the section's full write surface stays internal.
-/// </summary>
+/// <summary>The camp writes the dev seeders need; the full write surface stays internal.</summary>
 public interface ICampSeeding
 {
     Task<Guid> CreateCampForSeedAsync(
@@ -17,10 +11,10 @@ public interface ICampSeeding
         bool isSwissCamp,
         int timesAtNowhere,
         CampSeasonData seasonData,
-        int year,
+        Guid eventSettingsId,
         CancellationToken cancellationToken = default);
 
-    Task OptInToSeasonAsync(Guid campId, int year, CancellationToken cancellationToken = default);
+    Task OptInToSeasonAsync(Guid campId, Guid eventSettingsId, CancellationToken cancellationToken = default);
 
     Task ApproveSeasonAsync(Guid seasonId, Guid reviewedByUserId, string? notes, CancellationToken cancellationToken = default);
 
@@ -30,12 +24,6 @@ public interface ICampSeeding
         CancellationToken cancellationToken = default);
 }
 
-/// <summary>
-/// The camp-role definition verbs the dev seeders drive. Separate from
-/// <see cref="ICampSeeding"/> because <c>DevelopmentCampRoleSeeder</c> needs only these and
-/// the two services behind them are separate (the interface count is not
-/// the thing to minimise, the surface is).
-/// </summary>
 public interface ICampRoleSeeding
 {
     Task<IReadOnlyList<CampRoleDefinitionSeedInfo>> ListDefinitionsForSeedAsync(
@@ -51,10 +39,8 @@ public interface ICampRoleSeeding
     Task<Guid?> GetDefinitionIdBySlugAsync(string slug, CancellationToken cancellationToken = default);
 }
 
-/// <summary>Flat projection of a camp role definition, for seeders deciding what already exists.</summary>
 public sealed record CampRoleDefinitionSeedInfo(Guid Id, string Slug, string Name);
 
-/// <summary>The system camp-role slugs a fixture may name.</summary>
 public static class CampSeedRoles
 {
     public const string CampLeadSlug = "camp-lead";
