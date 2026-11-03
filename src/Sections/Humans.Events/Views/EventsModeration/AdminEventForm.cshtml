@@ -115,7 +115,7 @@
                         <option value="">— Select day —</option>
                         @foreach (var day in Model.EventDays)
                         {
-                            <option value="@day.Date.ToInvariantDate()" selected="@(day.Date.Date == Model.StartDate.Date ? "selected" : null)">@day.Label</option>
+                            <option value="@day.Date.ToInvariantDate()" selected="@(DateOnly.FromDateTime(day.Date) == Model.StartDate ? "selected" : null)">@day.Label</option>
                         }
                     </select>
                     <span asp-validation-for="StartDate" class="text-danger"></span>
@@ -196,7 +196,7 @@
     <partial name="_EventCharacterCounters" />
     <script>
         (function () {
-            // All-day toggle (individual events only)
+            // Individual events only.
             var allDayCheck = document.getElementById('IsAllDay');
             var startTimeField = document.getElementById('startTimeField');
             var durationField = document.getElementById('durationField');
@@ -213,7 +213,6 @@
                 applyAllDay();
             }
 
-            // Recurrence days toggle
             var recurringCheck = document.getElementById('IsRecurring');
             var recSection = document.getElementById('recurrence-days-section');
             var recHidden = document.getElementById('RecurrenceDaysHidden');

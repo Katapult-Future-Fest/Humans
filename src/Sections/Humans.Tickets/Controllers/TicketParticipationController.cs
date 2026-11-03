@@ -1,3 +1,4 @@
+using Humans.Base.Attributes;
 using Humans.Base.Controllers;
 using Humans.Settings.Contracts;
 using Humans.Tickets.Services;
@@ -8,13 +9,7 @@ using Microsoft.Extensions.Localization;
 
 namespace Humans.Tickets.Controllers;
 
-/// <summary>
-/// The member's own "not attending this year" declaration, posted from the dashboard ticket card.
-/// </summary>
-/// <remarks>
-/// Writes <c>tickets_event_participations</c>, a Tickets table. Owner-only: every action acts on the signed-in
-/// member.
-/// </remarks>
+/// <summary>Owner-only: every action acts on the signed-in member.</summary>
 [Authorize]
 [Route("Tickets")]
 internal sealed class TicketParticipationController(
@@ -26,6 +21,7 @@ internal sealed class TicketParticipationController(
 {
     [HttpPost("DeclareNotAttending")]
     [ValidateAntiForgeryToken]
+    [AllowBeforeActiveMembership]
     public async Task<IActionResult> DeclareNotAttending()
     {
         var (errorResult, user) = await RequireCurrentUserAsync();
@@ -53,6 +49,7 @@ internal sealed class TicketParticipationController(
 
     [HttpPost("UndoNotAttending")]
     [ValidateAntiForgeryToken]
+    [AllowBeforeActiveMembership]
     public async Task<IActionResult> UndoNotAttending()
     {
         var (errorResult, user) = await RequireCurrentUserAsync();

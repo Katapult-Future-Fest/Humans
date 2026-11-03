@@ -19,9 +19,7 @@ using Microsoft.Extensions.Localization;
 
 namespace Humans.Shifts.Services;
 
-/// <summary>
-/// Manages the shift signup state machine. No caching decorator (§15 Option A).
-/// </summary>
+/// <summary>No caching decorator.</summary>
 internal sealed class ShiftSignupService(
     IShiftManagementRepository repo,
     IVolunteerTrackingRepository trackingRepo,
@@ -38,17 +36,17 @@ internal sealed class ShiftSignupService(
     IStringLocalizer<ShiftsResource> localizer) : IShiftSignupService, IUserDataContributor, IUserMerge, ICalendarFeedContributor
 {
     private static readonly ResourceManager NoticeResources = new(typeof(ShiftsResource));
-    // Release after the enrollment save, before audit and notices; using scopes
-    // still release the gate on refusals and failures.
+    private readonly ShiftRangeSelection rangeSelection = new(repo, calendarResolver, localizer);
+    // Released after the enrollment save, before audit and notices; refusals and failures release via using.
     private static readonly TrackedLock EnrollmentLock = new("Shifts.Enrollment");
 
-    /// <summary>GDPR export JSON keys for this contributor's data.</summary>
+    /// <summary>GDPR export key.</summary>
     internal const string ShiftSignups = "ShiftSignups";
     internal const string VolunteerEventProfiles = "VolunteerEventProfiles";
     internal const string GeneralAvailability = "GeneralAvailability";
     internal const string ShiftTagPreferences = "ShiftTagPreferences";
 
-    // Lazy-resolved for notification coordinator / team-name lookups.
+    // Lazy, to break the DI cycle with TeamService.
     private ITeamService TeamService => serviceProvider.GetRequiredService<ITeamService>();
 
     public async Task<SignupResult> SignUpAsync(
@@ -80,7 +78,7 @@ internal sealed class ShiftSignupService(
         if (!localEs.IsShiftBrowsingOpen && !isPrivileged)
             return SignupResult.Fail(localizer["Shifts_Signup_BrowsingClosed"]);
 
-        if (shift.AdminOnly && !isPrivileged)
+        if ((!shift.Rota.IsVisibleToVolunteers || shift.AdminOnly) && !isPrivileged)
             return SignupResult.Fail(localizer["Shifts_Signup_Restricted"]);
 
         if (shift.IsEarlyEntry && calendar.IsEarlyEntryClosed(now) && !isPrivileged)
@@ -104,8 +102,7 @@ internal sealed class ShiftSignupService(
 
         var canApprove = await shiftMgmt.CanApproveSignupsAsync(userId, shift.Rota.TeamId);
 
-        // For Active accounts, Public rotas auto-confirm regardless of admission/consent
-        // status; only RequireApproval rotas park signups as Pending for coordinator review.
+        // Public rotas auto-confirm whatever the admission or consent status; only RequireApproval parks as Pending.
         var autoConfirm = shift.Rota.Policy == SignupPolicy.Public || canApprove;
 
         var signup = new ShiftSignup
@@ -128,15 +125,13 @@ internal sealed class ShiftSignupService(
 
         await repo.SaveChangesAsync();
         enrollment.Dispose();
-        shiftMgmt.InvalidateDashboardCaches(localEs.Id);
-        viewInvalidator.InvalidateUser(userId);
-        viewInvalidator.InvalidateShift(shiftId);
+        InvalidateSignupCaches(localEs.Id, userId, shiftId);
         var shiftDate = FormatAuditDay(calendar, shift.DayOffset);
         var statusSuffix = autoConfirm ? "confirmed" : "pending";
         await auditLogService.LogAsync(
-            AuditAction.ShiftSignupCreated, nameof(ShiftSignup), signup.Id,
+            ShiftsAuditActions.ShiftSignupCreated, nameof(ShiftSignup), signup.Id,
             $"shift '{shift.Rota.Name}' on {shiftDate} ({statusSuffix})",
-            userId,
+            actorUserId ?? userId,
             userId, nameof(User));
 
         if (autoConfirm)
@@ -188,11 +183,9 @@ internal sealed class ShiftSignupService(
 
         await repo.SaveChangesAsync();
         enrollment.Dispose();
-        shiftMgmt.InvalidateDashboardCaches(signup.Shift.Rota.EventSettingsId);
-        viewInvalidator.InvalidateUser(signup.UserId);
-        viewInvalidator.InvalidateShift(signup.ShiftId);
+        InvalidateSignupCaches(signup.Shift.Rota.EventSettingsId, signup.UserId, signup.ShiftId);
         await auditLogService.LogAsync(
-            AuditAction.ShiftSignupConfirmed, nameof(ShiftSignup), signup.Id,
+            ShiftsAuditActions.ShiftSignupConfirmed, nameof(ShiftSignup), signup.Id,
             $"shift '{signup.Shift.Rota.Name}'",
             reviewerUserId,
             signup.UserId, nameof(User));
@@ -213,12 +206,10 @@ internal sealed class ShiftSignupService(
         signup.Refuse(reviewerUserId, clock, reason);
 
         await repo.SaveChangesAsync();
-        shiftMgmt.InvalidateDashboardCaches(signup.Shift.Rota.EventSettingsId);
-        viewInvalidator.InvalidateUser(signup.UserId);
-        viewInvalidator.InvalidateShift(signup.ShiftId);
+        InvalidateSignupCaches(signup.Shift.Rota.EventSettingsId, signup.UserId, signup.ShiftId);
 
         await auditLogService.LogAsync(
-            AuditAction.ShiftSignupRefused, nameof(ShiftSignup), signup.Id,
+            ShiftsAuditActions.ShiftSignupRefused, nameof(ShiftSignup), signup.Id,
             $"shift '{signup.Shift.Rota.Name}'" + (reason is not null ? $": {reason}" : ""),
             reviewerUserId,
             signup.UserId, nameof(User));
@@ -240,7 +231,6 @@ internal sealed class ShiftSignupService(
         var isOwner = signup.UserId == actorUserId;
         var isPrivileged = await IsPrivilegedAsync(actorUserId, signup.Shift.Rota.TeamId);
 
-        // Auth: must be signup owner or privileged (dept coordinator/NoInfoAdmin/Admin)
         if (!isOwner && !isPrivileged)
             return SignupResult.Fail(localizer["Shifts_Bail_NotAuthorized"]);
 
@@ -267,11 +257,9 @@ internal sealed class ShiftSignupService(
         signup.Bail(actorUserId, clock, reason);
 
         await repo.SaveChangesAsync();
-        shiftMgmt.InvalidateDashboardCaches(signup.Shift.Rota.EventSettingsId);
-        viewInvalidator.InvalidateUser(signup.UserId);
-        viewInvalidator.InvalidateShift(signup.ShiftId);
+        InvalidateSignupCaches(signup.Shift.Rota.EventSettingsId, signup.UserId, signup.ShiftId);
         await auditLogService.LogAsync(
-            AuditAction.ShiftSignupBailed, nameof(ShiftSignup), signup.Id,
+            ShiftsAuditActions.ShiftSignupBailed, nameof(ShiftSignup), signup.Id,
             $"shift '{signup.Shift.Rota.Name}'" + (reason is not null ? $": {reason}" : ""),
             actorUserId,
             signup.UserId, nameof(User));
@@ -330,11 +318,9 @@ internal sealed class ShiftSignupService(
 
         await repo.SaveChangesAsync();
         enrollment.Dispose();
-        shiftMgmt.InvalidateDashboardCaches(calendar.Id);
-        viewInvalidator.InvalidateUser(userId);
-        viewInvalidator.InvalidateShift(shiftId);
+        InvalidateSignupCaches(calendar.Id, userId, shiftId);
         await auditLogService.LogAsync(
-            AuditAction.ShiftSignupVoluntold, nameof(ShiftSignup), signup.Id,
+            ShiftsAuditActions.ShiftSignupVoluntold, nameof(ShiftSignup), signup.Id,
             $"shift '{shift.Rota.Name}' on {FormatAuditDay(calendar, shift.DayOffset)}",
             enrollerUserId,
             userId, nameof(User));
@@ -368,7 +354,7 @@ internal sealed class ShiftSignupService(
         var rota = await repo.GetRotaAsync(rotaId, RotaReadShape.Shifts);
         if (rota is null) return SignupResult.Fail(localizer["Shifts_Signup_RotaNotFound"]);
 
-        var shiftsInRange = SelectAllDayRangeShifts(rota, startDayOffset, endDayOffset);
+        var shiftsInRange = ShiftRangeSelection.SelectAllDayRangeShifts(rota, startDayOffset, endDayOffset);
 
         if (shiftsInRange.Count == 0)
             return SignupResult.Fail(localizer["Shifts_Signup_RangeEmpty"]);
@@ -386,7 +372,7 @@ internal sealed class ShiftSignupService(
         var calendar = await calendarResolver.GetAsync(rota.EventSettingsId);
         if (calendar is null) return SignupResult.Fail(localizer["Shifts_EventCalendarNotConfigured"]);
         var existingSignups = await GetActiveUserSignupsAsync(userId);
-        var conflictingDays = await GetConflictingRangeDaysAsync(shiftsToAssign, existingSignups, calendar);
+        var conflictingDays = await rangeSelection.GetConflictingRangeDaysAsync(shiftsToAssign, existingSignups, calendar);
         var assignable = shiftsToAssign.Where(s => !conflictingDays.Contains(s.DayOffset)).ToList();
         var skippedOverlaps = shiftsToAssign.Count - assignable.Count;
 
@@ -446,14 +432,11 @@ internal sealed class ShiftSignupService(
 
         await repo.SaveChangesAsync();
         enrollment.Dispose();
-        shiftMgmt.InvalidateDashboardCaches(calendar.Id);
-        viewInvalidator.InvalidateUser(userId);
-        // Range affects every shift in the rota; cascade via the rota.
-        viewInvalidator.InvalidateRota(rotaId);
+        InvalidateRangeSignupCaches(calendar.Id, userId, rotaId);
         foreach (var (auditedSignup, dayOffset) in voluntoldForAudit)
         {
             await auditLogService.LogAsync(
-                AuditAction.ShiftSignupVoluntold, nameof(ShiftSignup), auditedSignup.Id,
+                ShiftsAuditActions.ShiftSignupVoluntold, nameof(ShiftSignup), auditedSignup.Id,
                 $"'{rota.Name}' on {FormatAuditDay(calendar, dayOffset)} (range)",
                 enrollerUserId,
                 userId, nameof(User));
@@ -497,11 +480,9 @@ internal sealed class ShiftSignupService(
         signup.MarkNoShow(reviewerUserId, clock);
 
         await repo.SaveChangesAsync();
-        shiftMgmt.InvalidateDashboardCaches(calendar.Id);
-        viewInvalidator.InvalidateUser(signup.UserId);
-        viewInvalidator.InvalidateShift(signup.ShiftId);
+        InvalidateSignupCaches(calendar.Id, signup.UserId, signup.ShiftId);
         await auditLogService.LogAsync(
-            AuditAction.ShiftSignupNoShow, nameof(ShiftSignup), signup.Id,
+            ShiftsAuditActions.ShiftSignupNoShow, nameof(ShiftSignup), signup.Id,
             $"shift '{signup.Shift.Rota.Name}'",
             reviewerUserId,
             signup.UserId, nameof(User));
@@ -523,11 +504,9 @@ internal sealed class ShiftSignupService(
         signup.Remove(removedByUserId, clock, reason);
 
         await repo.SaveChangesAsync();
-        shiftMgmt.InvalidateDashboardCaches(signup.Shift.Rota.EventSettingsId);
-        viewInvalidator.InvalidateUser(signup.UserId);
-        viewInvalidator.InvalidateShift(signup.ShiftId);
+        InvalidateSignupCaches(signup.Shift.Rota.EventSettingsId, signup.UserId, signup.ShiftId);
         await auditLogService.LogAsync(
-            AuditAction.ShiftSignupCancelled, nameof(ShiftSignup), signup.Id,
+            ShiftsAuditActions.ShiftSignupCancelled, nameof(ShiftSignup), signup.Id,
             $"shift '{signup.Shift.Rota.Name}'" +
             (reason is not null ? $": {reason}" : ""),
             removedByUserId,
@@ -568,6 +547,9 @@ internal sealed class ShiftSignupService(
         if (!localEs.IsShiftBrowsingOpen && !isPrivileged)
             return SignupResult.Fail(localizer["Shifts_Signup_BrowsingClosed"]);
 
+        if (!rota.IsVisibleToVolunteers && !isPrivileged)
+            return SignupResult.Fail(localizer["Shifts_Signup_RangeRestricted"]);
+
         if (rota.Period == RotaPeriod.Build
             && calendar.IsEarlyEntryClosed(now)
             && !isPrivileged)
@@ -575,18 +557,18 @@ internal sealed class ShiftSignupService(
             return SignupResult.Fail(localizer["Shifts_Signup_EarlyEntryClosed"]);
         }
 
-        var shiftsInRange = SelectAllDayRangeShifts(rota, startDayOffset, endDayOffset);
+        var shiftsInRange = ShiftRangeSelection.SelectAllDayRangeShifts(rota, startDayOffset, endDayOffset);
 
         if (!isPrivileged && shiftsInRange.Any(s => s.AdminOnly))
             return SignupResult.Fail(localizer["Shifts_Signup_RangeRestricted"]);
 
         var existingSignups = await GetActiveUserSignupsAsync(userId);
 
-        var duplicateSelection = PruneDuplicateRangeShifts(shiftsInRange, existingSignups, calendar, skipConflicts);
+        var duplicateSelection = rangeSelection.PruneDuplicateRangeShifts(shiftsInRange, existingSignups, calendar, skipConflicts);
         if (duplicateSelection.Failure is not null)
             return duplicateSelection.Failure;
 
-        var conflictSelection = await PruneConflictingRangeShiftsAsync(
+        var conflictSelection = await rangeSelection.PruneConflictingRangeShiftsAsync(
             duplicateSelection.Shifts,
             existingSignups,
             calendar,
@@ -601,7 +583,7 @@ internal sealed class ShiftSignupService(
                 ? SignupResult.Fail(string.Join(" ", conflictSelection.Warnings) + " " + localizer["Shifts_Signup_RangeNothingToAdd"].Value)
                 : SignupResult.Fail(localizer["Shifts_Signup_RangeEmpty"]);
 
-        var capacitySelection = await SelectCapacityAvailableRangeShiftsAsync(shiftsInRange);
+        var capacitySelection = await rangeSelection.SelectCapacityAvailableRangeShiftsAsync(shiftsInRange);
         if (capacitySelection.AvailableShifts.Count == 0)
             return SignupResult.Fail(localizer["Shifts_Signup_RangeAtCapacity"]);
 
@@ -610,7 +592,7 @@ internal sealed class ShiftSignupService(
             : null;
         if (capacitySelection.FullDayOffsets.Count > 0)
         {
-            var dayList = FormatRangeDayList(calendar, capacitySelection.FullDayOffsets);
+            var dayList = ShiftRangeSelection.FormatRangeDayList(calendar, capacitySelection.FullDayOffsets);
             warning = AppendRangeWarning(warning, localizer["Shifts_Signup_RangeCapacityDays", dayList].Value);
         }
 
@@ -627,10 +609,8 @@ internal sealed class ShiftSignupService(
 
         await repo.SaveChangesAsync();
         enrollment.Dispose();
-        shiftMgmt.InvalidateDashboardCaches(calendar.Id);
-        viewInvalidator.InvalidateUser(userId);
-        viewInvalidator.InvalidateRota(rotaId);
-        await AuditRangeSignupsAsync(userId, rota, calendar, createdSignups.SignupsForAudit, autoConfirm);
+        InvalidateRangeSignupCaches(calendar.Id, userId, rotaId);
+        await AuditRangeSignupsAsync(userId, actorUserId ?? userId, rota, calendar, createdSignups.SignupsForAudit, autoConfirm);
 
         if (autoConfirm)
         {
@@ -641,116 +621,19 @@ internal sealed class ShiftSignupService(
         return SignupResult.Ok(createdSignups.LastSignup.Id, warning);
     }
 
-    private RangeSignupCandidateSelection PruneDuplicateRangeShifts(
-        List<Shift> shiftsInRange,
-        IReadOnlyCollection<ShiftSignup> existingSignups,
-        EventSettingsInfo eventSettings,
-        bool skipConflicts)
+    private void InvalidateSignupCaches(Guid eventSettingsId, Guid userId, Guid shiftId)
     {
-        var shiftIdsInRange = shiftsInRange.Select(s => s.Id).ToHashSet();
-        var activeShiftIds = existingSignups
-            .Where(s => shiftIdsInRange.Contains(s.ShiftId))
-            .Select(s => s.ShiftId)
-            .ToHashSet();
-
-        if (activeShiftIds.Count == 0)
-            return new RangeSignupCandidateSelection(shiftsInRange, [], null);
-
-        if (!skipConflicts)
-            return new RangeSignupCandidateSelection(
-                shiftsInRange,
-                [],
-                SignupResult.Fail(localizer["Shifts_Signup_RangeDuplicate"]));
-
-        var alreadySignedUpDays = shiftsInRange
-            .Where(s => activeShiftIds.Contains(s.Id))
-            .Select(s => s.DayOffset)
-            .ToList();
-        var dayList = FormatRangeDayList(eventSettings, alreadySignedUpDays);
-        var warnings = new List<string> { localizer["Shifts_Signup_RangeDuplicateWarning", dayList].Value };
-        var remainingShifts = shiftsInRange
-            .Where(s => !activeShiftIds.Contains(s.Id))
-            .ToList();
-
-        return new RangeSignupCandidateSelection(remainingShifts, warnings, null);
+        shiftMgmt.InvalidateDashboardCaches(eventSettingsId);
+        viewInvalidator.InvalidateUser(userId);
+        viewInvalidator.InvalidateShift(shiftId);
     }
 
-    private async Task<RangeSignupCandidateSelection> PruneConflictingRangeShiftsAsync(
-        List<Shift> shiftsInRange,
-        IReadOnlyCollection<ShiftSignup> existingSignups,
-        EventSettingsInfo eventSettings,
-        IReadOnlyList<string> existingWarnings,
-        bool skipConflicts)
+    private void InvalidateRangeSignupCaches(Guid eventSettingsId, Guid userId, Guid rotaId)
     {
-        var conflictingDays = await GetConflictingRangeDaysAsync(shiftsInRange, existingSignups, eventSettings);
-        if (conflictingDays.Count == 0)
-            return new RangeSignupCandidateSelection(shiftsInRange, existingWarnings.ToList(), null);
-
-        var dayList = FormatRangeDayList(eventSettings, conflictingDays);
-        if (!skipConflicts)
-            return new RangeSignupCandidateSelection(
-                shiftsInRange,
-                existingWarnings.ToList(),
-                SignupResult.Fail(localizer["Shifts_Signup_RangeConflictDays", dayList].Value));
-
-        var warnings = existingWarnings.Append(localizer["Shifts_Signup_RangeConflictDays", dayList].Value).ToList();
-        var remainingShifts = shiftsInRange
-            .Where(s => !conflictingDays.Contains(s.DayOffset))
-            .ToList();
-
-        return new RangeSignupCandidateSelection(remainingShifts, warnings, null);
-    }
-
-    private async Task<List<int>> GetConflictingRangeDaysAsync(
-        IReadOnlyList<Shift> shiftsInRange,
-        IEnumerable<ShiftSignup> existingSignups,
-        EventSettingsInfo eventSettings)
-    {
-        // Range candidates are all-day shifts from one rota, so two on the same
-        // date overlap in the standard work block, even with no existing bookings.
-        var conflictingDays = shiftsInRange.GroupBy(s => s.DayOffset)
-            .Where(day => day.Count() > 1)
-            .Select(day => day.Key)
-            .ToHashSet();
-        var confirmedSignups = existingSignups.Where(s => s.Status == SignupStatus.Confirmed).ToList();
-        foreach (var shift in shiftsInRange)
-        {
-            if (conflictingDays.Contains(shift.DayOffset)) continue;
-            var shiftStart = shift.GetAbsoluteStart(eventSettings);
-            var shiftEnd = shift.GetAbsoluteEnd(eventSettings);
-
-            foreach (var existing in confirmedSignups)
-            {
-                var existingCalendar = await calendarResolver.GetAsync(existing.Shift.Rota.EventSettingsId);
-                if (existingCalendar is null) continue;
-                var existingStart = existing.Shift.GetAbsoluteStart(existingCalendar);
-                var existingEnd = existing.Shift.GetAbsoluteEnd(existingCalendar);
-
-                if (shiftStart < existingEnd && shiftEnd > existingStart)
-                {
-                    conflictingDays.Add(shift.DayOffset);
-                    break;
-                }
-            }
-        }
-
-        return shiftsInRange.Select(s => s.DayOffset).Where(conflictingDays.Contains).Distinct().ToList();
-    }
-
-    private async Task<RangeCapacitySelection> SelectCapacityAvailableRangeShiftsAsync(List<Shift> shiftsInRange)
-    {
-        var shiftIdsInRange = shiftsInRange.Select(s => s.Id).ToHashSet();
-        var signupCounts = await repo.GetConfirmedSignupCountsByShiftAsync(shiftIdsInRange);
-        var fullDays = shiftsInRange
-            .Where(s => signupCounts.GetValueOrDefault(s.Id) >= s.MaxVolunteers)
-            .Select(s => s.DayOffset)
-            .ToList();
-
-        var availableShifts = shiftsInRange
-            .Where(s => signupCounts.GetValueOrDefault(s.Id) < s.MaxVolunteers)
-            .ToList();
-
-        return new RangeCapacitySelection(availableShifts, fullDays);
+        shiftMgmt.InvalidateDashboardCaches(eventSettingsId);
+        viewInvalidator.InvalidateUser(userId);
+        // A range touches every shift in the rota.
+        viewInvalidator.InvalidateRota(rotaId);
     }
 
     private async Task<string?> AppendEarlyEntryRangeWarningAsync(
@@ -773,17 +656,14 @@ internal sealed class ShiftSignupService(
         if (fullEeDays.Count == 0)
             return warning;
 
-        var eeDayList = FormatRangeDayList(eventSettings, fullEeDays);
+        var eeDayList = ShiftRangeSelection.FormatRangeDayList(eventSettings, fullEeDays);
         return AppendRangeWarning(warning, localizer["Shifts_Signup_RangeEarlyEntryCapacityDays", eeDayList].Value);
     }
 
     private static string AppendRangeWarning(string? warning, string nextWarning)
         => warning is null ? nextWarning : $"{warning} {nextWarning}";
 
-    private static string FormatRangeDayList(EventSettingsInfo eventSettings, IEnumerable<int> dayOffsets)
-        => string.Join(", ", dayOffsets.Select(offset => eventSettings.GateOpeningDate.PlusDays(offset).ToWeekdayDayMonth()));
-
-    // Audit and coordinator-notice text is persisted English; keep its dates out of the actor's UI culture.
+    // Audit and notice text is persisted English; keep its dates out of the actor's UI culture.
     private static string FormatAuditDay(EventSettingsInfo eventSettings, int dayOffset)
     {
         using var culture = new CultureScope("en");
@@ -834,6 +714,7 @@ internal sealed class ShiftSignupService(
 
     private async Task AuditRangeSignupsAsync(
         Guid userId,
+        Guid actorUserId,
         Rota rota,
         EventSettingsInfo eventSettings,
         IEnumerable<(ShiftSignup Signup, int DayOffset)> rangeSignupsForAudit,
@@ -843,10 +724,10 @@ internal sealed class ShiftSignupService(
         foreach (var (auditedSignup, dayOffset) in rangeSignupsForAudit)
         {
             await auditLogService.LogAsync(
-                AuditAction.ShiftSignupCreated,
+                ShiftsAuditActions.ShiftSignupCreated,
                 nameof(ShiftSignup), auditedSignup.Id,
                 $"'{rota.Name}' on {FormatAuditDay(eventSettings, dayOffset)} (range, {statusSuffix})",
-                userId,
+                actorUserId,
                 userId, nameof(User));
         }
     }
@@ -868,10 +749,10 @@ internal sealed class ShiftSignupService(
         if (calendar is null) return SignupResult.Fail(localizer["Shifts_EventCalendarNotConfigured"]);
 
         var existingSignups = await GetActiveUserSignupsAsync(signups[0].UserId);
-        var conflictingDays = await GetConflictingRangeDaysAsync(
+        var conflictingDays = await rangeSelection.GetConflictingRangeDaysAsync(
             signups.Select(s => s.Shift).ToList(), existingSignups, calendar);
         if (conflictingDays.Count > 0)
-            warnings.Add(localizer["Shifts_Signup_RangeConflictDays", FormatRangeDayList(calendar, conflictingDays)].Value);
+            warnings.Add(localizer["Shifts_Signup_RangeConflictDays", ShiftRangeSelection.FormatRangeDayList(calendar, conflictingDays)].Value);
 
         foreach (var signup in signups)
         {
@@ -917,14 +798,12 @@ internal sealed class ShiftSignupService(
             {
                 await repo.SaveChangesAsync();
                 enrollment.Dispose();
-                shiftMgmt.InvalidateDashboardCaches(calendar.Id);
-                viewInvalidator.InvalidateUser(skippedAtCapacity[0].UserId);
-                viewInvalidator.InvalidateRota(skippedAtCapacity[0].Shift.RotaId);
+                InvalidateRangeSignupCaches(calendar.Id, skippedAtCapacity[0].UserId, skippedAtCapacity[0].Shift.RotaId);
 
                 foreach (var skipped in skippedAtCapacity)
                 {
                     await auditLogService.LogAsync(
-                        AuditAction.ShiftSignupRefused, nameof(ShiftSignup), skipped.Id,
+                        ShiftsAuditActions.ShiftSignupRefused, nameof(ShiftSignup), skipped.Id,
                         $"shift '{skipped.Shift.Rota.Name}' day {skipped.Shift.DayOffset} (auto-refused, at capacity)",
                         reviewerUserId,
                         skipped.UserId, nameof(User));
@@ -935,14 +814,12 @@ internal sealed class ShiftSignupService(
 
         await repo.SaveChangesAsync();
         enrollment.Dispose();
-        shiftMgmt.InvalidateDashboardCaches(calendar.Id);
-        viewInvalidator.InvalidateUser(approved[0].UserId);
-        viewInvalidator.InvalidateRota(approved[0].Shift.RotaId);
+        InvalidateRangeSignupCaches(calendar.Id, approved[0].UserId, approved[0].Shift.RotaId);
 
         foreach (var approvedSignup in approved)
         {
             await auditLogService.LogAsync(
-                AuditAction.ShiftSignupConfirmed, nameof(ShiftSignup), approvedSignup.Id,
+                ShiftsAuditActions.ShiftSignupConfirmed, nameof(ShiftSignup), approvedSignup.Id,
                 $"shift '{approvedSignup.Shift.Rota.Name}' day {approvedSignup.Shift.DayOffset} (range)",
                 reviewerUserId,
                 approvedSignup.UserId, nameof(User));
@@ -951,7 +828,7 @@ internal sealed class ShiftSignupService(
         foreach (var skipped in skippedAtCapacity)
         {
             await auditLogService.LogAsync(
-                AuditAction.ShiftSignupRefused, nameof(ShiftSignup), skipped.Id,
+                ShiftsAuditActions.ShiftSignupRefused, nameof(ShiftSignup), skipped.Id,
                 $"shift '{skipped.Shift.Rota.Name}' day {skipped.Shift.DayOffset} (auto-refused, at capacity)",
                 reviewerUserId,
                 skipped.UserId, nameof(User));
@@ -980,14 +857,12 @@ internal sealed class ShiftSignupService(
         }
 
         await repo.SaveChangesAsync();
-        shiftMgmt.InvalidateDashboardCaches(signups[0].Shift.Rota.EventSettingsId);
-        viewInvalidator.InvalidateUser(signups[0].UserId);
-        viewInvalidator.InvalidateRota(signups[0].Shift.RotaId);
+        InvalidateRangeSignupCaches(signups[0].Shift.Rota.EventSettingsId, signups[0].UserId, signups[0].Shift.RotaId);
 
         foreach (var signup in signups)
         {
             await auditLogService.LogAsync(
-                AuditAction.ShiftSignupRefused, nameof(ShiftSignup), signup.Id,
+                ShiftsAuditActions.ShiftSignupRefused, nameof(ShiftSignup), signup.Id,
                 $"shift '{signup.Shift.Rota.Name}' day {signup.Shift.DayOffset} (range)" +
                 (reason is not null ? $": {reason}" : ""),
                 reviewerUserId,
@@ -1024,8 +899,7 @@ internal sealed class ShiftSignupService(
         if (IsStatusReasonTooLong(reason, firstSignup.Id, actorUserId))
             return new("Shifts_StatusReasonTooLong");
 
-        // Only withdrawing confirmed signups reduces staffing. Capture them before
-        // Bail replaces both Pending and Confirmed with the same terminal status.
+        // Captured before Bail gives Pending and Confirmed the same status: only confirmed ones reduce staffing.
         var confirmedSignups = signups.Where(s => s.Status == SignupStatus.Confirmed).ToList();
         foreach (var signup in signups)
         {
@@ -1033,14 +907,12 @@ internal sealed class ShiftSignupService(
         }
 
         await repo.SaveChangesAsync();
-        shiftMgmt.InvalidateDashboardCaches(firstSignup.Shift.Rota.EventSettingsId);
-        viewInvalidator.InvalidateUser(firstSignup.UserId);
-        viewInvalidator.InvalidateRota(firstSignup.Shift.RotaId);
+        InvalidateRangeSignupCaches(firstSignup.Shift.Rota.EventSettingsId, firstSignup.UserId, firstSignup.Shift.RotaId);
 
         foreach (var signup in signups)
         {
             await auditLogService.LogAsync(
-                AuditAction.ShiftSignupBailed, nameof(ShiftSignup), signup.Id,
+                ShiftsAuditActions.ShiftSignupBailed, nameof(ShiftSignup), signup.Id,
                 $"shift '{signup.Shift.Rota.Name}' day {signup.Shift.DayOffset} (range)" +
                 (reason is not null ? $": {reason}" : ""),
                 actorUserId,
@@ -1109,12 +981,6 @@ internal sealed class ShiftSignupService(
             }).ToList();
     }
 
-    private static List<Shift> SelectAllDayRangeShifts(Rota rota, int startDayOffset, int endDayOffset) =>
-        rota.Shifts
-            .Where(s => s.IsAllDay && s.DayOffset >= startDayOffset && s.DayOffset <= endDayOffset)
-            .OrderBy(s => s.DayOffset)
-            .ToList();
-
     private async Task<IReadOnlyList<ShiftSignup>> GetActiveUserSignupsAsync(Guid userId)
     {
         var signups = await repo.GetForUsersAsync([userId]);
@@ -1169,14 +1035,14 @@ internal sealed class ShiftSignupService(
     {
         var availableSlots = EarlyEntryCapacityCalculator.GetAvailableEeSlots(es, dayOffset);
         if (availableSlots <= 0)
-            return localizer["Shifts_Signup_RangeEarlyEntryCapacityDays", FormatRangeDayList(es, [dayOffset])];
+            return localizer["Shifts_Signup_RangeEarlyEntryCapacityDays", ShiftRangeSelection.FormatRangeDayList(es, [dayOffset])];
 
         var currentEeCount = (await repo
             .GetUserIdsForDayAsync(es.Id, dayOffset, ShiftDayUserStatusScope.ConfirmedOnly))
             .Count;
 
         if (currentEeCount >= availableSlots)
-            return localizer["Shifts_Signup_RangeEarlyEntryCapacityDays", FormatRangeDayList(es, [dayOffset])];
+            return localizer["Shifts_Signup_RangeEarlyEntryCapacityDays", ShiftRangeSelection.FormatRangeDayList(es, [dayOffset])];
 
         return null;
     }
@@ -1192,7 +1058,7 @@ internal sealed class ShiftSignupService(
         var culture = await GetRecipientCultureAsync(userId);
         var title = string.Format(culture, NoticeResources.GetString(resourceKey, culture)!, args);
         await notificationService.SendAsync(
-            NotificationSource.ShiftAssigned,
+            ShiftsNotificationSources.ShiftAssigned,
             NotificationClass.Informational,
             NotificationPriority.Normal,
             title,
@@ -1247,7 +1113,7 @@ internal sealed class ShiftSignupService(
 
             var title = $"Coverage gap: {shift.Rota.Name} day {shift.DayOffset}";
             await notificationService.SendAsync(
-                NotificationSource.ShiftCoverageGap,
+                ShiftsNotificationSources.ShiftCoverageGap,
                 NotificationClass.Actionable,
                 NotificationPriority.High,
                 title,
@@ -1272,7 +1138,7 @@ internal sealed class ShiftSignupService(
             var teamId = rota.TeamId;
             var rotaName = rota.Name;
 
-            // Calendar comes from Settings, not this row's own (dead) columns (nobodies-collective/Humans#1631).
+            // From Settings: the row's own calendar columns are dead.
             var calendar = await calendarResolver.GetAsync(rota.EventSettingsId);
             if (calendar is null) return;
             var enrichedDescription = $"{changeDescription} ({rotaName}, {FormatAuditDay(calendar, shift.DayOffset)})";
@@ -1288,7 +1154,7 @@ internal sealed class ShiftSignupService(
 
             var title = $"Shift signup change: {rotaName}";
             await notificationService.SendAsync(
-                NotificationSource.ShiftSignupChange,
+                ShiftsNotificationSources.ShiftSignupChange,
                 NotificationClass.Informational,
                 NotificationPriority.Normal,
                 title,
@@ -1305,12 +1171,11 @@ internal sealed class ShiftSignupService(
 
     public async Task<IReadOnlyList<UserDataSlice>> ContributeForUserAsync(Guid userId, CancellationToken ct)
     {
-        // No `.Include(r => r.Team)` — Teams is a different section; resolve via ITeamService.
         var signups = (await repo.GetForUsersAsync([userId], ct: ct))
             .OrderByDescending(ss => ss.CreatedAt)
             .ToList();
 
-        // GetTeamsAsync includes deactivated teams so historical signups still resolve a name (GDPR).
+        // Includes deactivated teams, so historical signups still resolve a name.
         var referencedTeamIds = signups
             .Select(ss => ss.Shift.Rota.TeamId)
             .Distinct()
@@ -1326,8 +1191,6 @@ internal sealed class ShiftSignupService(
         var generalAvailability = await trackingRepo.GetAvailabilityForUserAsync(userId, ct: ct);
         var tagPreferences = await repo.GetVolunteerTagPreferencesForUsersAsync([userId], ct);
 
-        // Resolve EventName for each distinct EventSettingsId via the Settings-sourced calendar
-        // (nobodies-collective/Humans#1630) — covers both signups and general availability.
         var distinctEventSettingsIds = signups.Select(ss => ss.Shift.Rota.EventSettingsId)
             .Concat(generalAvailability.Select(ga => ga.EventSettingsId))
             .Distinct();
@@ -1354,8 +1217,7 @@ internal sealed class ShiftSignupService(
             ReviewedAt = ss.ReviewedAt.ToIso8601()
         }).ToList());
 
-        // Dietary + medical moved to Profile — they are exported by the Profiles
-        // data contributor now. The Shifts VEP slice carries only shift-matching data.
+        // Dietary and medical are exported by Profiles; this slice is shift-matching data only.
         var vepSlice = new UserDataSlice(VolunteerEventProfiles, volunteerEventProfiles.Select(vep => new
         {
             vep.Skills,
@@ -1396,23 +1258,18 @@ internal sealed class ShiftSignupService(
 
     public IReadOnlyDictionary<string, string?> ErasureDeclaration => Erasure;
 
-    /// <summary>
-    /// Cancels live commitments, then deletes the volunteer event profile (free-text
-    /// skills/quirks/languages), the availability and build-status rows, and the
-    /// shift-tag preferences.
-    /// </summary>
+    /// <summary>Cancels live commitments, then deletes the profile, availability, build-status and tag rows.</summary>
     public async Task EraseForUserAsync(Guid userId, CancellationToken ct)
     {
-        // Before cancelling, so the "Account deletion" reason the cancel writes survives:
-        // the retained signup row is shift/status/timestamps, not whatever a coordinator
-        // typed about this person when they bailed or no-showed.
+        // Before cancelling, so the "Account deletion" reason survives: the kept row is shift, status and
+        // timestamps, not what a coordinator typed about the person.
         await repo.ClearSignupStatusReasonsForUserAsync(userId, ct);
 
         var cancelled = await CancelActiveSignupsForUserAsync(userId, "Account deletion", ct);
         foreach (var (signupId, shiftId) in cancelled)
         {
             await auditLogService.LogAsync(
-                AuditAction.ShiftSignupCancelled, nameof(ShiftSignup), signupId,
+                ShiftsAuditActions.ShiftSignupCancelled, nameof(ShiftSignup), signupId,
                 $"Cancelled signup (account deletion) for shift {shiftId}",
                 jobName: nameof(ShiftSignupService));
         }
@@ -1423,20 +1280,17 @@ internal sealed class ShiftSignupService(
         viewInvalidator.InvalidateUser(userId);
     }
 
-    // Nothing public to contribute to the community calendar yet.
     public Task<IReadOnlyList<CalendarFeedItem>> GetPublicItemsForWindowAsync(Instant from, Instant to, CancellationToken ct) =>
         Task.FromResult<IReadOnlyList<CalendarFeedItem>>([]);
 
     public async Task<IReadOnlyList<CalendarFeedItem>> GetCalendarItemsForUserAsync(Guid userId, CancellationToken ct)
     {
-        // Active commitments only — Confirmed + Pending. Cancelled/bailed/noshow
-        // history is deliberately out of feed scope (spec 2026-06-09-ical-feed).
+        // Active commitments only; history is out of feed scope (spec 2026-06-09-ical-feed).
         var signups = (await repo.GetForUsersAsync([userId], ct: ct))
             .Where(ss => ss.Status is SignupStatus.Confirmed or SignupStatus.Pending)
             .ToList();
         if (signups.Count == 0) return [];
 
-        // Team names cross-section via ITeamService (same as the GDPR contributor).
         var teamsById = await TeamService.GetTeamsAsync(ct);
 
         var calendarsById = new Dictionary<Guid, EventSettingsInfo>();
@@ -1493,7 +1347,7 @@ internal sealed class ShiftSignupService(
         await adminAuthorization.RequireCurrentUserIsAdminAsync(ct);
         var eventIds = await GetSignupEventIdsAsync(userIds, ct);
         var deleted = await repo.DeleteAllForUsersAsync(userIds, ct);
-        // Repo doesn't return affected shift ids; cheap at our small scale to drop all and lazy-rebuild.
+        // The repository doesn't return affected shift ids; at this scale dropping all is cheap.
         if (deleted > 0)
         {
             viewInvalidator.InvalidateAll();
@@ -1574,7 +1428,7 @@ internal sealed class ShiftSignupService(
 
         viewInvalidator.InvalidateUser(sourceUserId);
         viewInvalidator.InvalidateUser(targetUserId);
-        // Affected shifts unknown; cheap to drop all at our small scale.
+        // Affected shifts unknown; at this scale dropping all is cheap.
         if (movedCount > 0)
             viewInvalidator.InvalidateAll();
 
@@ -1584,7 +1438,7 @@ internal sealed class ShiftSignupService(
                 shiftMgmt.InvalidateDashboardCaches(eventId);
 
             await auditLogService.LogAsync(
-                AuditAction.ShiftSignupReassigned, nameof(User), targetUserId,
+                ShiftsAuditActions.ShiftSignupReassigned, nameof(User), targetUserId,
                 $"Reassigned {movedCount} shift signup(s) from merged source user {sourceUserId}",
                 actorUserId,
                 targetUserId, nameof(User));
@@ -1595,15 +1449,6 @@ internal sealed class ShiftSignupService(
         IReadOnlyCollection<Guid> userIds, CancellationToken ct) =>
         (await repo.GetForUsersAsync(userIds, ct: ct))
             .Select(s => s.Shift.Rota.EventSettingsId).Distinct().ToList();
-
-    private sealed record RangeSignupCandidateSelection(
-        List<Shift> Shifts,
-        List<string> Warnings,
-        SignupResult? Failure);
-
-    private sealed record RangeCapacitySelection(
-        List<Shift> AvailableShifts,
-        List<int> FullDayOffsets);
 
     private sealed record RangeSignupCreation(
         ShiftSignup LastSignup,

@@ -1,3 +1,4 @@
+using Humans.Camps.Contracts;
 using Humans.Base.Authorization;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -6,12 +7,10 @@ using Humans.Users.Contracts;
 namespace Humans.Camps.Controllers;
 
 /// <summary>
-/// Read-only Barrios role-compliance matrix at <c>/Barrios/Admin/Compliance</c>.
-/// Split out from <see cref="CampAdminController"/> so it can be gated by the
-/// broader <see cref="PolicyNames.CampComplianceAccess"/> (CampAdmin/Admin OR any
-/// team coordinator) while the camp-management actions stay CampAdmin-only.
+/// Split from <see cref="CampAdminController"/> so the broader <see cref="CampsPolicies.Compliance"/> can
+/// gate it while camp management stays CampAdmin-only.
 /// </summary>
-[Authorize(Policy = PolicyNames.CampComplianceAccess)]
+[Authorize(Policy = CampsPolicies.Compliance)]
 [Route("Barrios/Admin")]
 [Route("Camps/Admin")]
 internal sealed class CampComplianceController(
@@ -20,14 +19,21 @@ internal sealed class CampComplianceController(
     IUserService userService) : HumansControllerBase(userService)
 {
     [HttpGet("Compliance")]
-    public async Task<IActionResult> Compliance(int? year, CancellationToken ct)
+    public async Task<IActionResult> Compliance(Guid? eventSettingsId, CancellationToken ct)
     {
         var settings = await campService.GetSettingsAsync(ct);
-        var matrix = await campRoleService.BuildComplianceMatrixAsync(year ?? settings.PublicYear, ct);
+        var resolvedEventId = eventSettingsId
+            ?? settings.ActiveEventSettingsId
+            ?? settings.Events.FirstOrDefault()?.EventSettingsId;
+        var matrix = resolvedEventId is { } id
+            ? await campRoleService.BuildComplianceMatrixAsync(id, ct)
+            : null;
+        if (matrix is null) return NotFound();
 
         return View(new CampComplianceViewModel
         {
-            Year = matrix.Year,
+            Event = matrix.Event,
+            EventOptions = settings.Events,
             Roles = matrix.Roles
                 .Select(r => new CampComplianceRoleColumn(r.Id, r.Name, r.MinimumRequired))
                 .ToList(),

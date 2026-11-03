@@ -1,32 +1,23 @@
 using Humans.Email.Contracts;
 using Humans.Auth.Contracts;
-using Humans.Base.Caching;
 using Humans.Notifications.Data;
 using Humans.Notifications.Domain;
 using Humans.Notifications.Contracts;
-using Microsoft.Extensions.Caching.Memory;
 using NodaTime;
 using Humans.Users.Contracts;
 
 namespace Humans.Notifications.Services;
 
-/// <summary>
-/// Application-layer implementation of <see cref="INotificationService"/>.
-/// Dispatches in-app notifications, materializes recipients, checks
-/// preferences, and delegates persistence to <see cref="INotificationRepository"/>.
-/// Invalidates per-user nav-badge cache keys after every successful send.
-/// </summary>
 internal sealed class NotificationService(
     INotificationEmitter emitter,
     INotificationRepository repo,
     IRoleAssignmentService roleAssignmentService,
     ICommunicationPreferenceService preferenceService,
     IClock clock,
-    IMemoryCache cache,
     ILogger<NotificationService> logger) : INotificationService, IUserMerge
 {
     public Task SendAsync(
-        NotificationSource source,
+        NotificationSourceDefinition source,
         NotificationClass notificationClass,
         NotificationPriority priority,
         string title,
@@ -42,7 +33,7 @@ internal sealed class NotificationService(
             body, actionUrl, actionLabel, targetGroupName, sourceKey, cancellationToken);
 
     public async Task SendToRoleAsync(
-        NotificationSource source,
+        NotificationSourceDefinition source,
         NotificationClass notificationClass,
         NotificationPriority priority,
         string title,
@@ -61,7 +52,7 @@ internal sealed class NotificationService(
             return;
         }
 
-        var category = source.ToMessageCategory();
+        var category = source.Category;
         var inboxDisabled = notificationClass == NotificationClass.Informational
             ? await preferenceService.GetUsersWithInboxDisabledAsync(roleUserIds, category, cancellationToken)
             : null;
@@ -76,7 +67,7 @@ internal sealed class NotificationService(
             ActionUrl = actionUrl,
             ActionLabel = actionLabel,
             Priority = priority,
-            Source = source,
+            Source = source.Name,
             Class = notificationClass,
             TargetGroupName = roleName,
             CreatedAt = now,
@@ -104,25 +95,13 @@ internal sealed class NotificationService(
         }
 
         await repo.AddAsync(notification, cancellationToken);
-        InvalidateBadgeCaches(notification.Recipients.Select(r => r.UserId));
 
         logger.LogInformation(
             "Dispatched {Source} notification '{Title}' to role '{RoleName}' ({Count} recipients)",
             source, title, roleName, notification.Recipients.Count);
     }
 
-    private void InvalidateBadgeCaches(IEnumerable<Guid> userIds)
-    {
-        foreach (var userId in userIds)
-        {
-            cache.Remove(CacheKeys.NotificationBadgeCounts(userId));
-        }
-    }
-
     public Task ReassignAsync(Guid sourceUserId, Guid targetUserId, Guid actorUserId, Instant updatedAt,
-        CancellationToken ct)
-        => repo.ReassignRecipientsToUserAsync(sourceUserId, targetUserId, ct);
-
-    public void InvalidateBadgeCachesForUsers(IEnumerable<Guid> userIds) =>
-        InvalidateBadgeCaches(userIds);
+        CancellationToken ct) =>
+        repo.ReassignRecipientsToUserAsync(sourceUserId, targetUserId, ct);
 }

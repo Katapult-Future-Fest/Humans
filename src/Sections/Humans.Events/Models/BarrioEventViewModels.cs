@@ -49,12 +49,13 @@ internal sealed class CampEventFormViewModel
 
     [Required(ErrorMessage = "Validation_Required")]
     [Display(Name = "Date")]
-    public DateTime StartDate { get; set; }
+    [BindRequired]
+    public DateOnly StartDate { get; set; }
 
     [Required(ErrorMessage = "Validation_Required")]
     [Display(Name = "Start Time")]
     [BindRequired]
-    public TimeSpan StartTime { get; set; }
+    public TimeOnly StartTime { get; set; }
 
     [Required(ErrorMessage = "Validation_Required")]
     [Range(15, 480, ErrorMessage = "Validation_Range")]
@@ -82,14 +83,11 @@ internal sealed class CampEventFormViewModel
     [Display(Name = "Priority Rank")]
     public int? PriorityRank { get; set; }
 
-    // Dropdown data
     public List<CategoryOptionViewModel> Categories { get; set; } = [];
     public List<EventDayOptionViewModel> EventDays { get; set; } = [];
     public string? TimeZoneId { get; set; }
 
-    /// <summary>
-    /// Whether this is a resubmission of a rejected/resubmit-requested event.
-    /// </summary>
+    /// <summary>Resubmitting a rejected or resubmit-requested event.</summary>
     public bool IsResubmit { get; set; }
 }
 

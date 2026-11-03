@@ -26,7 +26,6 @@ internal sealed class FeedbackReplyDelivery(
 {
     private static readonly TrackedLock ReplyDeliveryLock = new("Feedback.ReplyDelivery");
 
-    /// <summary>Retries durable replies whose Email handoff has not yet been acknowledged.</summary>
     public async Task ExecuteAsync(CancellationToken cancellationToken = default)
     {
         var pending = await repository.GetPendingReplyEmailsAsync(cancellationToken);
@@ -59,10 +58,10 @@ internal sealed class FeedbackReplyDelivery(
             {
                 var description = $"Queued response email for feedback {report!.Id}, reply {message.Id}";
                 if (current.SenderUserId.HasValue)
-                    await auditLogService.LogAsync(AuditAction.FeedbackResponseSent, AuditEntityTypes.FeedbackReport,
+                    await auditLogService.LogAsync(FeedbackAuditActions.FeedbackResponseSent, AuditEntityTypes.FeedbackReport,
                         report.Id, description, current.SenderUserId.Value);
                 else
-                    await auditLogService.LogAsync(AuditAction.FeedbackResponseSent, AuditEntityTypes.FeedbackReport,
+                    await auditLogService.LogAsync(FeedbackAuditActions.FeedbackResponseSent, AuditEntityTypes.FeedbackReport,
                         report.Id, description, "API");
             }
             await DispatchAdminReplyNotificationAsync(report!, ct);
@@ -88,11 +87,11 @@ internal sealed class FeedbackReplyDelivery(
             !string.IsNullOrWhiteSpace(recipientEmail))
         {
             await emailService.SendAsync(emailMessages.FeedbackResponse(
-                recipientEmail, reporter.BurnerName,
+                reporter.Id, recipientEmail, reporter.BurnerName,
                 report.Description, message.Content,
                 reporter.PreferredLanguage.IsSupportedCultureCode()
                     ? reporter.PreferredLanguage : CultureCatalog.DefaultCultureCode) with
-            { UserId = reporter.Id, DeliveryId = message.Id }, ct);
+            { DeliveryId = message.Id }, ct);
             return true;
         }
         else
@@ -118,7 +117,7 @@ internal sealed class FeedbackReplyDelivery(
             // No action link: /Feedback/{id} is Admin-only now, so the reporter would land on a 403.
             // The response text itself reaches them in the FeedbackResponse email.
             await notificationService.SendAsync(
-                NotificationSource.FeedbackResponse,
+                FeedbackNotificationSources.FeedbackResponse,
                 NotificationClass.Informational,
                 NotificationPriority.Normal,
                 notification.Title,

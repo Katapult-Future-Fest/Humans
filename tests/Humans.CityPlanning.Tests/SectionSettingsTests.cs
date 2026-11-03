@@ -1,10 +1,12 @@
+using Humans.Settings.Contracts;
+using Humans.Base.Interfaces;
 using AwesomeAssertions;
 using Humans.Base.Authorization;
 
 namespace Humans.CityPlanning.Tests;
 
 /// <summary>
-/// The /Settings#city-planning tab contribution (peterdrier/Humans#1634). The Policy
+/// The /Settings#city-planning tab contribution. The Policy
 /// assertion is the negative case: <c>SettingsTabComposition</c> (Humans.Settings.Tests)
 /// drops any tab whose policy the viewer fails, so a viewer who is neither CampAdmin/Admin
 /// nor a city-planning team member never sees this tab.
@@ -14,7 +16,7 @@ public sealed class SectionSettingsTests
     [HumansFact]
     public void Tabs_ReturnsTheCityPlanningTabGatedOnMapAdmin()
     {
-        var tabs = new SectionSettings().Tabs().ToList();
+        var tabs = ((ISectionSettings)new Section()).Tabs().ToList();
 
         var tab = tabs.Should().ContainSingle().Which;
         tab.Key.Should().Be("city-planning");

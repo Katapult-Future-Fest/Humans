@@ -1,30 +1,27 @@
+using Humans.Base.Authorization;
 using Humans.Base.Constants;
-using Humans.Issues.Contracts;
+using Humans.Base.Hosting;
 using Humans.Base.Interfaces;
-using Humans.Gdpr.Contracts;
 using Humans.Budget.Authorization;
 using Humans.Budget.Contracts;
 using Humans.Budget.Data;
 using Humans.Budget.Jobs;
 using Humans.Budget.Services;
-using Humans.Base.Hosting;
+using Humans.Finance.Contracts;
+using Humans.Gdpr.Contracts;
+using Humans.Issues.Contracts;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Humans.Budget;
 
-/// <summary>
-/// Budget's DI entry point, at the project root by convention. Discovered by Shell —
-/// nothing names it, so it needs no section prefix.
-/// </summary>
-/// <remarks>
-/// <c>TicketingBudgetSyncJob</c> is Budget's — both its collaborators are Budget's and the
-/// rows it writes are budget line items. Its schedule is contributed via
-/// <c>SectionJobs.cs</c>; the DI registration stays here as a factory (ruling 43): the
-/// job's constructor is <c>internal</c>, so only this assembly can build it.
-/// </remarks>
-public sealed class Section : ISection, IIssueQueueOwner
+public sealed class Section :
+    ISection,
+    IIssueQueueOwner,
+    ISectionAdminNav,
+    ISectionJobs,
+    ISectionNav
 {
     public void Register(IServiceCollection services, IConfiguration configuration)
     {
@@ -34,35 +31,46 @@ public sealed class Section : ISection, IIssueQueueOwner
         services.AddScoped<BudgetService>();
         services.AddScoped<IBudgetManagement>(sp => sp.GetRequiredService<BudgetService>());
         services.AddScoped<IBudgetService>(sp => sp.GetRequiredService<BudgetService>());
-        // Owns the user-attributed budget_audit_logs table → GDPR export contributor
-        // (design-rules §8a).
         services.AddScoped<IUserDataContributor>(sp => sp.GetRequiredService<BudgetService>());
 
         services.AddScoped<TicketingBudgetService>();
         services.AddScoped<ITicketingBudgetService>(sp => sp.GetRequiredService<TicketingBudgetService>());
-        // Factory registration, not plain AddScoped<T>: the job's constructor is internal, so
-        // only this assembly can call it — DI's reflection-based activation only sees public ones.
+        // A factory: the job's constructor is internal, and DI's activation only sees public ones.
         services.AddScoped(sp => new TicketingBudgetSyncJob(
             sp.GetRequiredService<ITicketingBudgetService>(),
             sp.GetRequiredService<IBudgetService>(),
             sp.GetRequiredService<ILogger<TicketingBudgetSyncJob>>()));
 
-        // Development's /dev/seed/budget action drives this through the Contracts/ interface rather than
-        // resolving the concrete seeder, which is what keeps Budget's write methods
-        // off the public surface.
+        // Development drives this through the Contracts/ interface, which keeps Budget's write methods off the
+        // public surface.
         services.AddScoped<IBudgetDemoSeeder, DevelopmentBudgetSeeder>();
 
-        // Resource-based handlers register here; section-owned policies register through ISectionPolicies.
         services.AddScoped<IAuthorizationHandler, BudgetAuthorizationHandler>();
     }
 
-    // This section owns the issue queue its members' reports land in; Issues discovers
-    // the seam rather than holding a list of sections (memory/architecture/section-contribution-seams.md).
     string IIssueQueueOwner.QueueKey => "Budget";
 
     string IIssueQueueOwner.AreaLabelResourceKey => "Issues_Area_Budget";
 
     IReadOnlyList<string> IIssueQueueOwner.PathSegments => ["finance", "budget"];
 
-    IReadOnlyList<string> IIssueQueueOwner.OwningRoles => [RoleNames.FinanceAdmin];
+    IReadOnlyList<string> IIssueQueueOwner.OwningRoles => [FinanceRoles.FinanceAdmin];
+
+    IEnumerable<AdminNavGroup> ISectionAdminNav.Groups() =>
+    [
+        new("Budget", [
+            // "BudgetAdmin", not "Finance": the tag helper resolves controller names, not routes, and a name that
+            // resolves to no action renders the anchor with no href.
+            new("Overview", "BudgetAdmin", "Index", null, null, "fa-solid fa-coins", FinancePolicies.Read)
+        ])
+    ];
+
+    IEnumerable<RecurringJobDescriptor> ISectionJobs.Jobs(IServiceProvider services)
+    {
+        yield return new RecurringJobDescriptor(
+            "budget-ticketing-sync", typeof(TicketingBudgetSyncJob), "30 4 * * *");
+    }
+
+    IEnumerable<MemberNavItem> ISectionNav.Items() =>
+        [new("Nav_Budget", Controller: "Budget", Action: "Summary", Policy: PolicyNames.AppAccess, Weight: 70)];
 }

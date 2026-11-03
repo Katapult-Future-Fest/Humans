@@ -1,13 +1,14 @@
 using System.ComponentModel.DataAnnotations;
 using Humans.Grants.Domain;
 using Humans.Grants.Services;
+using Humans.Settings.Contracts;
 using Humans.Users.Contracts;
 using Microsoft.AspNetCore.Mvc.ModelBinding;
 using NodaTime;
 
 namespace Humans.Grants.Models;
 
-/// <summary>The admin index: every program with its counts, or only the ones the person manages.</summary>
+/// <summary>Every program, or only the ones the person manages.</summary>
 internal sealed class AdminIndexViewModel
 {
     public required LocalDate Today { get; init; }
@@ -15,7 +16,6 @@ internal sealed class AdminIndexViewModel
     public required bool CanAdminister { get; init; }
 }
 
-/// <summary>One program's manage page: its grants and the issue form.</summary>
 internal sealed class AdminProgramViewModel
 {
     public required ProgramInfo Program { get; init; }
@@ -30,7 +30,7 @@ internal sealed class AdminProgramViewModel
         .OrderBy(g => g.State(Today)).ThenByDescending(g => g.IssuedAt);
 }
 
-/// <summary>The create/edit form. Managers arrive as a list of ids from the people picker.</summary>
+/// <summary>Managers arrive as a list of ids from the people picker.</summary>
 internal sealed class ProgramFormViewModel
 {
     public Guid? Id { get; set; }
@@ -44,8 +44,8 @@ internal sealed class ProgramFormViewModel
     [StringLength(2000)]
     public string? Description { get; set; }
 
-    [Required, Range(2000, 2100)]
-    public int? Year { get; set; }
+    [Required(ErrorMessage = "Pick an event.")]
+    public Guid? EventSettingsId { get; set; }
 
     [BindRequired]
     public GrantIssuer IssuedBy { get; set; } = GrantIssuer.Managers;
@@ -60,11 +60,14 @@ internal sealed class ProgramFormViewModel
 
     public List<Guid> ManagerUserIds { get; set; } = [];
 
-    /// <summary>Set by the controller for rendering; never posted.</summary>
+    /// <summary>For rendering only; never posted.</summary>
     public IReadOnlyDictionary<Guid, UserInfo> People { get; set; } = new Dictionary<Guid, UserInfo>();
 
+    /// <summary>For rendering only: the events a program can be for, newest first.</summary>
+    public IReadOnlyList<EventSettingsInfo> Events { get; set; } = [];
+
     public ProgramSave ToSave() => new(
-        Name, Entitles, Description, Year!.Value, IssuedBy, SourceKey, GrantsExpireOn, Status,
+        Name, Entitles, Description, EventSettingsId, IssuedBy, SourceKey, GrantsExpireOn, Status,
         ManagerUserIds.Distinct().ToList());
 
     public static ProgramFormViewModel From(ProgramInfo p) => new()
@@ -73,7 +76,7 @@ internal sealed class ProgramFormViewModel
         Name = p.Name,
         Entitles = p.Entitles,
         Description = p.Description,
-        Year = p.Year,
+        EventSettingsId = p.EventSettingsId,
         IssuedBy = p.IssuedBy,
         SourceKey = p.SourceKey,
         GrantsExpireOn = p.GrantsExpireOn,

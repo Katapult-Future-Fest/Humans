@@ -1,9 +1,10 @@
+using Humans.Users.Contracts;
 using System.Security.Claims;
 using AwesomeAssertions;
 using Humans.Base.Authorization;
 using Humans.Base.Enums;
 using Humans.Base.Interfaces;
-using Humans.Email.Contracts;
+using Humans.Email.Services;
 using Humans.Email.ViewComponents;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
@@ -14,8 +15,8 @@ using NSubstitute;
 namespace Humans.Email.Tests.ViewComponents;
 
 /// <summary>
-/// The "Email Outbox" card Email contributes to the admin human-detail page (Users decomposition
-/// commit 3): who sees it, and what it shows.
+/// The "Email Outbox" card Email contributes to the admin human-detail page: who sees it, and
+/// what it shows.
 /// </summary>
 public sealed class OutboxCardViewComponentTests
 {
@@ -25,7 +26,7 @@ public sealed class OutboxCardViewComponentTests
     [HumansFact]
     public void Parts_ContributeTheCardToTheAdminDetailSlot()
     {
-        IUserPart contribution = new SectionUserParts();
+        IUserPart contribution = ((IUserPart)new Section());
 
         contribution.Parts().Should().Contain(
             new UserPart(UserPartSlots.AdminDetail, typeof(OutboxCardViewComponent), 200));
@@ -59,7 +60,7 @@ public sealed class OutboxCardViewComponentTests
     private OutboxCardViewComponent Build(bool authorized)
     {
         var authorization = Substitute.For<IAuthorizationService>();
-        authorization.AuthorizeAsync(Arg.Any<ClaimsPrincipal>(), Arg.Any<object?>(), PolicyNames.HumanAdminBoardOrAdmin)
+        authorization.AuthorizeAsync(Arg.Any<ClaimsPrincipal>(), Arg.Any<object?>(), UsersPolicies.Read)
             .Returns(authorized ? AuthorizationResult.Success() : AuthorizationResult.Failed());
         var http = new DefaultHttpContext
         {

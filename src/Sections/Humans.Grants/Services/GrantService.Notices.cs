@@ -6,26 +6,21 @@ using Humans.Users.Contracts;
 
 namespace Humans.Grants.Services;
 
-/// <summary>
-/// Telling the person: an in-app notice and an email, both in their language from the
-/// section's resx. Failures never fail the write: the row and the audit entry are the record,
-/// and a manager can resend.
-/// </summary>
+/// <summary>Failures never fail the write: the row and the audit entry are the record, and a manager can resend.</summary>
 internal sealed partial class GrantService
 {
     private static readonly System.Resources.ResourceManager NoticeResources = new(typeof(GrantsResource));
 
-    /// <summary>The member's own profile, where the "My grants" card lives.</summary>
     internal const string ProfileUrl = "/Profile/Me";
 
     private Task AnnounceIssuedAsync(Grant grant, GrantProgram program, CancellationToken ct) =>
-        AnnounceAsync(grant, program, GrantNoticeKind.Issued, NotificationSource.GrantReceived, ct);
+        AnnounceAsync(grant, program, GrantNoticeKind.Issued, GrantsNotificationSources.GrantReceived, ct);
 
     private Task AnnounceRevokedAsync(Grant grant, GrantProgram program, CancellationToken ct) =>
-        AnnounceAsync(grant, program, GrantNoticeKind.Revoked, NotificationSource.GrantRevoked, ct);
+        AnnounceAsync(grant, program, GrantNoticeKind.Revoked, GrantsNotificationSources.GrantRevoked, ct);
 
     private async Task AnnounceAsync(
-        Grant grant, GrantProgram program, GrantNoticeKind kind, NotificationSource source, CancellationToken ct)
+        Grant grant, GrantProgram program, GrantNoticeKind kind, NotificationSourceDefinition source, CancellationToken ct)
     {
         // Each step is best-effort on its own: one channel's outage never suppresses the other.
         UserInfo? person = null;
@@ -48,7 +43,7 @@ internal sealed partial class GrantService
                 return;
             }
             await email.SendAsync(emailFactory.Notice(new GrantNoticeRequest(
-                address, person?.BurnerName, kind, program.Name, program.Entitles, expiresOn, ProfileUrl,
+                person?.Id ?? grant.UserId, address, person?.BurnerName, kind, program.Name, program.Entitles, expiresOn, ProfileUrl,
                 grant.RevokeReason, culture)), ct);
         }, ct);
     }
@@ -70,7 +65,7 @@ internal sealed partial class GrantService
     }
 
     private async Task NotifyAsync(
-        Guid recipientId, string cultureName, GrantNoticeKind kind, NotificationSource source, GrantProgram program,
+        Guid recipientId, string cultureName, GrantNoticeKind kind, NotificationSourceDefinition source, GrantProgram program,
         NodaTime.LocalDate? expiresOn, string? reason, CancellationToken ct)
     {
         var culture = CultureInfo.GetCultureInfo(cultureName);

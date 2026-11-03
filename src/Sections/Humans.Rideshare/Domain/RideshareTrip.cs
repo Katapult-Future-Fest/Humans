@@ -2,19 +2,21 @@ using NodaTime;
 
 namespace Humans.Rideshare.Domain;
 
-/// <summary>
-/// One driver's leg: their city ↔ the burn, with seats and cargo space on offer.
-/// The burn end comes from <see cref="RideshareSettings"/>; only the member end is stored here.
-/// </summary>
+/// <summary>Only the member end is stored; the burn end comes from <see cref="RideshareSettings"/>.</summary>
 internal sealed class RideshareTrip
 {
     public Guid Id { get; init; }
 
-    /// <summary>The driver. Bare cross-section reference — no FK, no navigation.</summary>
     public Guid UserId { get; set; }
 
-    /// <summary>The burn year the trip belongs to (the active year at creation).</summary>
+    /// <summary>The year of the event at creation.</summary>
     public int Year { get; set; }
+
+    /// <summary>
+    /// The event this row belongs to. Null on rows from before events were tracked, until the
+    /// <c>rideshare.event-ids</c> data migration stamps them; until then they belong to the event that run would pick.
+    /// </summary>
+    public Guid? EventSettingsId { get; set; }
 
     public RideshareDirection Direction { get; set; }
 
@@ -25,10 +27,10 @@ internal sealed class RideshareTrip
 
     public double MemberLongitude { get; set; }
 
-    /// <summary>Ordered vias in travel order as a JSON array of <c>{label, latitude, longitude}</c>; null/empty = direct.</summary>
+    /// <summary>JSON array of <c>{label, latitude, longitude}</c> in travel order; null/empty = direct.</summary>
     public string? WaypointsJson { get; set; }
 
-    /// <summary>Stored GeoJSON geometry (LineString) computed at save; null when routing was unavailable.</summary>
+    /// <summary>LineString computed at save; null when routing was unavailable.</summary>
     public string? RouteGeoJson { get; set; }
 
     /// <summary>First day of travel.</summary>
@@ -55,7 +57,7 @@ internal sealed class RideshareTrip
 
     public string? CostNote { get; set; }
 
-    /// <summary>Soft link to the paired return leg — display only, no FK.</summary>
+    /// <summary>Display-only soft link to the paired return leg.</summary>
     public Guid? LinkedTripId { get; set; }
 
     public TripStatus Status { get; set; }
@@ -63,8 +65,6 @@ internal sealed class RideshareTrip
     public Instant CreatedAt { get; init; }
 
     public Instant UpdatedAt { get; set; }
-
-    // Navigation properties (intra-section)
 
     public ICollection<RideshareInterest> Interests { get; set; } = new List<RideshareInterest>();
 }

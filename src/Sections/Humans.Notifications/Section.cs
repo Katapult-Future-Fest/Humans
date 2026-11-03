@@ -1,39 +1,31 @@
+using Humans.Base.Hosting;
 using Humans.Base.Interfaces;
 using Humans.Gdpr.Contracts;
-using Humans.Base.Hosting;
 using Humans.Notifications.Contracts;
 using Humans.Notifications.Data;
 using Humans.Notifications.Jobs;
 using Humans.Notifications.Services;
+using Humans.Notifications.ViewComponents;
+using Humans.Users.Contracts;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
-using Humans.Users.Contracts;
+using Microsoft.Extensions.Hosting;
 
 namespace Humans.Notifications;
 
-/// <summary>
-/// Notifications' DI entry point, at the project root by convention. Discovered by Shell —
-/// nothing names it, so it needs no section prefix. No caching decorator: the
-/// inbox service owns the per-user badge-count cache and evicts it on every write, and the
-/// meter provider owns the meter-aggregate cache.
-/// </summary>
-public sealed class Section : ISection
+public sealed class Section : ISection, ISectionChrome, ISectionJobs
 {
     public void Register(IServiceCollection services, IConfiguration configuration)
     {
         services.AddSectionDbContext<NotificationsDbContext>(sentinelTable: "notifications");
 
-        // Singleton over IDbContextFactory, so services can inject it directly
-        // while NotificationsDbContext stays Scoped.
         services.AddSingleton<INotificationRepository, NotificationRepository>();
 
-        // DI cycle break: NotificationEmitter is a distinct type from
-        // NotificationService, and injects only this section's repository plus
-        // preferences, clock, cache and logger. TeamService and
-        // RoleAssignmentService depend on INotificationEmitter rather than
-        // INotificationService, so their edge into Notifications terminates
-        // there instead of coming back out through IRoleAssignmentService.
-        // ValidateOnBuild at host startup is what enforces this; no test does.
+        services.AddSingleton<NotificationSourceRegistry>();
+        services.AddSingleton<IHostedService>(sp => sp.GetRequiredService<NotificationSourceRegistry>());
+
+        // A separate type from NotificationService so TeamService and RoleAssignmentService can take
+        // INotificationEmitter without a DI cycle. Only ValidateOnBuild at startup catches a regression.
         services.AddScoped<INotificationEmitter, NotificationEmitter>();
         services.AddScoped<NotificationService>();
         services.AddScoped<INotificationService>(sp => sp.GetRequiredService<NotificationService>());
@@ -46,9 +38,19 @@ public sealed class Section : ISection
         services.AddScoped<IUserDataContributor>(sp => sp.GetRequiredService<NotificationInboxService>());
 
         services.AddScoped<NotificationMeterProvider>();
-        // The one cross-section read: Backdoor serves /api/backdoor/notifications from it.
         services.AddScoped<INotificationInboxRead, NotificationInboxRead>();
 
         services.AddScoped<CleanupNotificationsJob>();
+    }
+
+    IEnumerable<ChromeComponent> ISectionChrome.Components() =>
+        [
+            new(ChromeSlots.HeaderRight, typeof(NotificationBellViewComponent)),
+        ];
+
+    IEnumerable<RecurringJobDescriptor> ISectionJobs.Jobs(IServiceProvider services)
+    {
+        yield return new RecurringJobDescriptor(
+            "notifications-cleanup", typeof(CleanupNotificationsJob), "30 4 * * *");
     }
 }

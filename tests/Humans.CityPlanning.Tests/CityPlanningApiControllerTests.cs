@@ -45,7 +45,7 @@ public sealed class CityPlanningApiControllerTests : CityPlanningTestBase
     private readonly ILogger<CityPlanningApiController> _logger = Substitute.For<ILogger<CityPlanningApiController>>();
     private readonly IClientProxy _allClients = Substitute.For<IClientProxy>();
     private readonly ISettingsService _settings = ActiveEvent(2026);
-    private readonly CityPlanningService _service;
+    private CityPlanningService _service;
     private readonly Guid _userId = Guid.NewGuid();
     private readonly Guid _campSeasonId = Guid.NewGuid();
 
@@ -142,7 +142,8 @@ public sealed class CityPlanningApiControllerTests : CityPlanningTestBase
     [HumansTheory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task PlacementNotes_FormatsOnlyOwnerRefusals(bool dependencyFailure)
+    [InlineData(false, true)]
+    public async Task PlacementNotes_FormatsOnlyOwnerRefusals(bool dependencyFailure, bool overlongNotes = false)
     {
         using var services = new ServiceCollection().AddLogging().AddLocalization().BuildServiceProvider();
         _containersLocalizer = services.GetRequiredService<IStringLocalizer<ContainersResource>>();
@@ -152,20 +153,23 @@ public sealed class CityPlanningApiControllerTests : CityPlanningTestBase
         var id = Guid.NewGuid();
         _containers.GetByIdAsync(id, Arg.Any<CancellationToken>()).Returns(
             new ContainerDto(id, Guid.NewGuid(), "Container", null, [], Instant.MinValue, Instant.MinValue));
-        var operation = _containers.UpdatePlacementNotesAsync(id, 2026, null, null, false, _userId, Arg.Any<CancellationToken>());
+        var notes = overlongNotes ? new string('x', 5001) : null;
+        var key = overlongNotes ? "Containers_Error_PlacementNotesLength" : "Containers_Error_PlacementNotFound";
+        object[] args = overlongNotes ? [5000] : [];
+        var operation = _containers.UpdatePlacementNotesAsync(id, 2026, notes, null, false, _userId, Arg.Any<CancellationToken>());
         if (dependencyFailure)
             operation.ThrowsAsync(new InvalidOperationException("Private database diagnostic"));
         else
-            operation.Returns(new ContainerMutationResult<ContainerPlacementDto>(null, "Containers_Error_PlacementNotFound"));
+            operation.Returns(new ContainerMutationResult<ContainerPlacementDto>(null, key, args));
 
         var act = () => CreateController().UpdateContainerPlacementNotes(
-            id, 2026, new UpdateContainerPlacementNotesRequest(), TestContext.Current.CancellationToken);
+            id, 2026, new UpdateContainerPlacementNotesRequest { PlacementNotes = notes }, TestContext.Current.CancellationToken);
 
         if (dependencyFailure)
             await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("Private database diagnostic");
         else
             (await act()).Should().BeOfType<UnprocessableEntityObjectResult>().Which.Value.Should()
-                .Be(_containersLocalizer["Containers_Error_PlacementNotFound"].Value);
+                .Be(_containersLocalizer[key, args].Value);
     }
 
     [HumansTheory]
@@ -281,7 +285,6 @@ public sealed class CityPlanningApiControllerTests : CityPlanningTestBase
         (await CityPlanningDb.CampPolygonHistories.CountAsync(ct)).Should().Be(1);
     }
 
-    // peterdrier/Humans#2102: the map's state GET used to create the year's settings row.
     [HumansFact]
     public async Task GetState_NoSettingsRow_ReturnsOkAndWritesNothing()
     {
@@ -316,7 +319,7 @@ public sealed class CityPlanningApiControllerTests : CityPlanningTestBase
     {
         var ct = TestContext.Current.CancellationToken;
 
-        var result = await CreateController(RoleNames.CampAdmin).SaveCampPolygon(
+        var result = await CreateController(CampsRoles.CampsAdmin).SaveCampPolygon(
             _campSeasonId, new SaveCampPolygonRequest(Square, 10), ct);
 
         result.Should().BeOfType<OkObjectResult>();
@@ -332,7 +335,7 @@ public sealed class CityPlanningApiControllerTests : CityPlanningTestBase
     [InlineData("""{"type":"Polygon","coordinates":[[]]}""")]
     public async Task SaveCampPolygon_InvalidGeoJson_ReturnsBadRequestWithoutSaving(string geoJson)
     {
-        var result = await CreateController(RoleNames.CampAdmin).SaveCampPolygon(
+        var result = await CreateController(CampsRoles.CampsAdmin).SaveCampPolygon(
             _campSeasonId, new SaveCampPolygonRequest(geoJson, 10),
             TestContext.Current.CancellationToken);
 
@@ -349,7 +352,7 @@ public sealed class CityPlanningApiControllerTests : CityPlanningTestBase
     [HumansFact]
     public async Task SaveCampPolygon_NegativeArea_ReturnsBadRequestWithoutSavingOrBroadcasting()
     {
-        var result = await CreateController(RoleNames.CampAdmin).SaveCampPolygon(
+        var result = await CreateController(CampsRoles.CampsAdmin).SaveCampPolygon(
             _campSeasonId, new SaveCampPolygonRequest(Square, -1),
             TestContext.Current.CancellationToken);
 
@@ -389,7 +392,7 @@ public sealed class CityPlanningApiControllerTests : CityPlanningTestBase
         _allClients.SendCoreAsync(default!, default!)
             .ThrowsAsyncForAnyArgs(new InvalidOperationException("hub down"));
 
-        var result = await CreateController(RoleNames.CampAdmin).SaveCampPolygon(
+        var result = await CreateController(CampsRoles.CampsAdmin).SaveCampPolygon(
             _campSeasonId, new SaveCampPolygonRequest(Square, 10), ct);
 
         result.Should().BeOfType<OkObjectResult>();
@@ -410,7 +413,7 @@ public sealed class CityPlanningApiControllerTests : CityPlanningTestBase
         }
         _campService.GetCampSeasonByIdAsync(_campSeasonId, Arg.Any<CancellationToken>())
             .ThrowsAsync(new IOException("Camp directory unavailable"));
-        var controller = CreateController(RoleNames.CampAdmin);
+        var controller = CreateController(CampsRoles.CampsAdmin);
 
         var result = restore
             ? await controller.RestoreCampPolygon(_campSeasonId, historyId, ct)
@@ -423,6 +426,34 @@ public sealed class CityPlanningApiControllerTests : CityPlanningTestBase
             Arg.Any<string>(), Arg.Any<object?[]>(), Arg.Any<CancellationToken>());
     }
 
+    [HumansTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PolygonWrite_DependencyArgumentFailure_PropagatesWithoutBadRequest(bool restore)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var repo = Substitute.For<ICityPlanningRepository>();
+        var failure = new ArgumentException("Private persistence failure", nameof(restore));
+        repo.SavePolygonAndAppendHistoryAsync(default, default!, default, default, default!, default, default)
+            .ThrowsAsyncForAnyArgs(failure);
+        repo.GetHistoryEntryAsync(default, default, default).ThrowsAsyncForAnyArgs(failure);
+        _service = new CityPlanningService(repo, Clock,
+            Options.Create(new CityPlanningOptions { CityPlanningTeamSlug = "city-planning" }),
+            _campService, _teamService, Substitute.For<IUserService>(), Substitute.For<IAuditLogService>(), _settings);
+        var controller = CreateController(CampsRoles.CampsAdmin);
+        Func<Task> act = async () =>
+        {
+            if (restore)
+                await controller.RestoreCampPolygon(_campSeasonId, Guid.NewGuid(), ct);
+            else
+                await controller.SaveCampPolygon(_campSeasonId, new SaveCampPolygonRequest(Square, 10), ct);
+        };
+
+        (await act.Should().ThrowAsync<ArgumentException>()).Which.Should().BeSameAs(failure);
+        _logger.ReceivedCalls().Should().BeEmpty();
+        await _allClients.DidNotReceiveWithAnyArgs().SendCoreAsync(default!, default!, default);
+    }
+
     [HumansFact]
     public async Task SaveCampPolygon_CancelledBroadcast_PropagatesCancellationAfterSave()
     {
@@ -430,7 +461,7 @@ public sealed class CityPlanningApiControllerTests : CityPlanningTestBase
         _allClients.SendCoreAsync(default!, default!, cancellation.Token)
             .ReturnsForAnyArgs(_ => CancelBroadcastAsync(cancellation));
 
-        var act = () => CreateController(RoleNames.CampAdmin).SaveCampPolygon(
+        var act = () => CreateController(CampsRoles.CampsAdmin).SaveCampPolygon(
             _campSeasonId, new SaveCampPolygonRequest(Square, 10), cancellation.Token);
 
         await act.Should().ThrowAsync<OperationCanceledException>();

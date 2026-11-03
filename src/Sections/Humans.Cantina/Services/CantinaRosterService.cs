@@ -7,33 +7,21 @@ using Humans.Cantina.Contracts;
 using Humans.Cantina.Services.Dtos;
 using NodaTime;
 using Humans.Users.Contracts;
+using static Humans.Cantina.Services.CantinaRosterCalculation;
 
 namespace Humans.Cantina.Services;
 
 /// <summary>
-/// Application-layer implementation of <see cref="ICantinaRosterService"/>.
-/// The on-site cohort (who is around each day) comes from
-/// <see cref="IShiftService.GetOnSiteUserIdsForDayAsync"/>; the display
-/// name comes off the cross-section <see cref="IUserService"/>'s <see cref="UserInfo"/>,
-/// already resolved, and the dietary data (preference, allergies, intolerances) from this
-/// section's own <see cref="ICantinaService"/>. The service unions the days into a
-/// unique-humans cohort and computes the weekly aggregates the Cantina UI needs.
-/// <c>MedicalConditions</c> is never read here — the cantina plans around food, not medical history.
+/// <c>MedicalConditions</c> is never read here: the cantina plans around food, not medical history.
 /// </summary>
 internal sealed class CantinaRosterService : ICantinaRosterService
 {
-    private const int DaysPerWeek = 7;
-
     private readonly IShiftService _shiftMgmt;
     private readonly ISettingsService _settingsService;
     private readonly IUserService _userRead;
     private readonly ICantinaService _dietary;
     private readonly IClock _clock;
     private readonly IAuditLogService _audit;
-
-    // Must stay in step with the last entry of Roster.cshtml's dietaryOrder array,
-    // its only lookup; the service tests pin the literal as the rename tripwire.
-    private static readonly string UnansweredKey = "Unanswered";
 
     public CantinaRosterService(
         IShiftService shiftMgmt,
@@ -51,15 +39,22 @@ internal sealed class CantinaRosterService : ICantinaRosterService
         _audit = audit;
     }
 
-    public async Task<WeeklyRosterDto> GetWeeklyRosterAsync(int? weekStartOffset = null, Guid? exportActorUserId = null, CancellationToken ct = default)
+    public async Task<WeeklyRosterDto> GetWeeklyRosterAsync(int? weekStartOffset = null, RosterDisclosure? disclosure = null, CancellationToken ct = default)
     {
         var burn = await _settingsService.GetActiveEventSettingsAsync(ct).ConfigureAwait(false);
         var roster = await BuildWeeklyRosterAsync(
             burn, weekStartOffset ?? CurrentWeekStartOffset(burn), ct).ConfigureAwait(false);
-        if (exportActorUserId is { } actor)
-            await _audit.LogAsync(AuditAction.CantinaRosterExported, "EventSettings", burn?.Id ?? Guid.Empty,
-                $"Weekly Cantina roster exported: {roster.People.Count} people rows, week of {roster.WeekStartDate.ToInvariantDate() ?? "no active event"}",
-                actor).ConfigureAwait(false);
+        if (disclosure is not null)
+        {
+            var scope = $"week of {roster.WeekStartDate.ToInvariantDate() ?? "no active event"}";
+            await _audit.LogAsync(disclosure.Action, "EventSettings", burn?.Id ?? Guid.Empty,
+                $"Weekly Cantina roster {disclosure.Verb}: {roster.People.Count} people rows, {scope}",
+                disclosure.ActorUserId).ConfigureAwait(false);
+            // The weekly page discloses only the free-text entries, so only their authors get a row.
+            await AuditSubjectsAsync(disclosure, burn,
+                roster.People.Where(p => HasText(p.AllergyOtherText) || HasText(p.IntoleranceOtherText)).Select(p => p.UserId),
+                $"weekly roster, {scope}").ConfigureAwait(false);
+        }
         return roster;
     }
 
@@ -72,48 +67,34 @@ internal sealed class CantinaRosterService : ICantinaRosterService
         var weekEndDate = weekStartDate?.PlusDays(DaysPerWeek - 1);
         var eventName = burn?.EventName;
 
-        // "Today" must be computed in the event timezone — the view uses this
-        // to highlight the current row in the per-day mini-table. Falling back
-        // to view-side DateTime.UtcNow caused a Madrid coordinator to see
-        // tomorrow highlighted late in the evening (CET is ahead of UTC).
+        // In the event timezone: a UTC "today" highlighted tomorrow for a Madrid coordinator late in the evening.
         var eventTodayDate = GetEventTodayDate(burn);
 
-        // One day's on-site cohort is asked for by both loads below — the visible
-        // week, and the arrival scan that runs from build start through it. Fetch
-        // each offset once per request.
+        // The visible week and the arrival scan overlap; fetch each offset once per request.
         var onSiteByOffset = new Dictionary<int, IReadOnlyList<Guid>>();
 
-        // Per-day cohort: 7 sequential queries for the on-site user ids. At ~500
-        // users this is fine — one server, dataset in RAM, no query cleverness
-        // bought by an imagined scale (AGENTS.md, "Small scale, simple systems").
         var perDay = await LoadWeeklyOnSiteUsersAsync(burn, weekStartOffset, onSiteByOffset, ct).ConfigureAwait(false);
 
-        // Build the union of unique on-site user IDs across the week, and
-        // map each user id to the set of calendar dates they were on-site.
         var daysOnSiteByUserId = BuildDaysOnSiteByUserId(perDay, weekStartOffset, weekStartDate);
 
-        // Arrival-day feeding: each human is fed (present, but with no shift)
-        // the day before their FIRST confirmed shift across the whole event,
-        // not just this week. Scan the full build→strike range once, then inject
-        // the day-before-first-shift into this week's on-site set when it lands
-        // inside the visible 7 days. This pulls in humans whose only relation to
-        // the week is their arrival day (no confirmed shift inside the week).
-        // Guarded on an active event — the no-event branch leaves the map empty.
+        // Arrival day: the day before a human's FIRST confirmed shift of the whole event, not just this week, so scan
+        // from build start. It is every cohort member's ArrivesOn, and is fed as an on-site day when it lands in the week.
+        var arrivesOnByUser = new Dictionary<Guid, LocalDate>();
         if (burn is not null && weekStartDate is { } anchor)
         {
-            // Only arrivals landing in [weekStartOffset, weekStartOffset+6] are
-            // injected below, so a first confirmed shift past weekStartOffset+7
-            // can't produce an in-week arrival — cap the scan there.
+            // Every cohort member has a confirmed shift by weekStartOffset+7 (an arrival-only human's first shift is
+            // that day), so a later first shift belongs to nobody on this roster.
             var firstConfirmedOffsetByUser =
                 await BuildFirstConfirmedOffsetByUserAsync(
                     burn, weekStartOffset + DaysPerWeek, onSiteByOffset, ct).ConfigureAwait(false);
             foreach (var (userId, minOffset) in firstConfirmedOffsetByUser)
             {
                 var arrivalOffset = minOffset - 1;
+                var arrivalDate = anchor.PlusDays(arrivalOffset - weekStartOffset);
+                arrivesOnByUser[userId] = arrivalDate;
                 if (arrivalOffset < weekStartOffset || arrivalOffset > weekStartOffset + DaysPerWeek - 1)
                     continue;
 
-                var arrivalDate = anchor.PlusDays(arrivalOffset - weekStartOffset);
                 if (!daysOnSiteByUserId.TryGetValue(userId, out var list))
                 {
                     list = new List<LocalDate>(capacity: DaysPerWeek);
@@ -126,50 +107,21 @@ internal sealed class CantinaRosterService : ICantinaRosterService
 
         var uniqueUserIds = daysOnSiteByUserId.Keys.ToList();
 
-        // One batched, cache-friendly read of names for the whole on-site cohort (UserInfo,
-        // already resolved by Users) and one of their dietary profiles.
         var userInfoById = uniqueUserIds.Count == 0
             ? new Dictionary<Guid, UserInfo>()
             : await _userRead.GetUserInfosAsync(uniqueUserIds, ct).ConfigureAwait(false);
         var dietById = await _dietary.GetDietaryProfilesAsync(uniqueUserIds, ct).ConfigureAwait(false);
 
-        // Build per-day summaries (counts only) from the POST-injection on-site
-        // map so arrival-day people are counted on their arrival date — keeping
-        // the weekly strip consistent with the daily drill-down. Dietary is
-        // per-user, so a day's "unanswered" count is over that day's user ids.
+        // From the post-injection map, so arrival-day people count on their arrival date, consistent with the daily
+        // drill-down.
         var days = BuildDaySummaries(daysOnSiteByUserId, weekStartOffset, weekStartDate, dietById);
 
-        if (uniqueUserIds.Count == 0)
-        {
-            return new WeeklyRosterDto(
-                WeekStartOffset: weekStartOffset,
-                WeekStartDate: weekStartDate,
-                WeekEndDate: weekEndDate,
-                EventName: eventName,
-                TotalUniqueOnSite: 0,
-                UnansweredCount: 0,
-                DietaryBreakdown: EmptyDietaryBreakdown(),
-                AllergyRollup: EmptyRollup(DietaryOptions.AllergyOptions),
-                AllergyOtherEntries: Array.Empty<string>(),
-                IntoleranceRollup: EmptyRollup(DietaryOptions.IntoleranceOptions),
-                IntoleranceOtherEntries: Array.Empty<string>(),
-                Days: days,
-                People: Array.Empty<RosterPersonDto>(),
-                EventTodayDate: eventTodayDate);
-        }
-
-        // Unique-humans dietary cohort — every aggregate below is computed over
-        // this list so a person on-site multiple days contributes exactly once.
+        // Every aggregate below is over unique humans: a person on site several days counts once.
         var uniqueProfiles = BuildUniqueProfiles(uniqueUserIds, dietById);
 
-        // The 7 calendar dates of the week, used to compute NoShift as the
-        // complement of each person's on-site days.
         var weekDays = BuildWeekDays(weekStartDate);
 
-        // People are returned in unspecified order. The controller sorts, via
-        // CantinaRosterAssembler in this section's Models/ (see
-        // memory/architecture/display-sort-in-controllers.md).
-        var people = BuildWeeklyPeople(uniqueUserIds, userInfoById, dietById, daysOnSiteByUserId, weekDays);
+        var people = BuildWeeklyPeople(uniqueUserIds, userInfoById, dietById, daysOnSiteByUserId, arrivesOnByUser, weekDays);
 
         var dietaryBreakdown = BuildDietaryBreakdown(uniqueProfiles, uniqueUserIds.Count);
         var (allergyRollup, allergyOther) = BuildRollup(
@@ -183,9 +135,7 @@ internal sealed class CantinaRosterService : ICantinaRosterService
             p => p.IntoleranceOtherText,
             DietaryOptions.IntoleranceOptions);
 
-        // "Unanswered" = unique on-site humans whose DietaryPreference is
-        // null/empty (no profile, or a profile with blank DietaryPreference).
-        var answeredCount = uniqueProfiles.Count(p => !string.IsNullOrEmpty(p.DietaryPreference));
+        var answeredCount = uniqueProfiles.Count(p => p.HasPreference);
         var unansweredTotal = uniqueUserIds.Count - answeredCount;
 
         return new WeeklyRosterDto(
@@ -205,37 +155,56 @@ internal sealed class CantinaRosterService : ICantinaRosterService
             EventTodayDate: eventTodayDate);
     }
 
-    /// <summary>
-    /// The offset of the Monday of the week containing today, in the event's
-    /// timezone. Zero without an active event — nothing to be relative to.
-    /// </summary>
+    /// <summary>Zero without an active event: nothing to be relative to.</summary>
     private int CurrentWeekStartOffset(EventSettingsInfo? burn)
     {
         if (burn is null || GetEventTodayDate(burn) is not { } today)
             return 0;
 
-        // NodaTime: IsoDayOfWeek.Monday = 1; LocalDate.DayOfWeek is an IsoDayOfWeek.
-        var daysSinceMonday = ((int)today.DayOfWeek - 1 + DaysPerWeek) % DaysPerWeek;
-        return Period.Between(burn.GateOpeningDate, today.PlusDays(-daysSinceMonday), PeriodUnits.Days).Days;
+        return Period.Between(burn.GateOpeningDate, today.PlusDays(-DaysSinceMonday(today)), PeriodUnits.Days).Days;
     }
 
-    /// <summary>Today's offset in the event's timezone; zero without an active event.</summary>
+    private static int DaysSinceMonday(LocalDate date) => (int)date.DayOfWeek - (int)IsoDayOfWeek.Monday;
+
+    /// <summary>Zero without an active event.</summary>
     private int CurrentDayOffset(EventSettingsInfo? burn)
         => burn is not null && GetEventTodayDate(burn) is { } today
             ? Period.Between(burn.GateOpeningDate, today, PeriodUnits.Days).Days
             : 0;
 
-    public async Task<DailyMatrixDto> GetDailyRosterAsync(int? dayOffset = null, Guid? exportActorUserId = null, CancellationToken ct = default)
+    public async Task<DailyMatrixDto> GetDailyRosterAsync(int? dayOffset = null, RosterDisclosure? disclosure = null, CancellationToken ct = default)
     {
         var burn = await _settingsService.GetActiveEventSettingsAsync(ct).ConfigureAwait(false);
         var matrix = await BuildDailyRosterAsync(
             burn, dayOffset ?? CurrentDayOffset(burn), ct).ConfigureAwait(false);
-        if (exportActorUserId is { } actor)
-            await _audit.LogAsync(AuditAction.CantinaRosterExported, "EventSettings", burn?.Id ?? Guid.Empty,
-                $"Daily Cantina roster exported: {matrix.People.Count} people rows, day {matrix.CalendarDate.ToInvariantDate() ?? "no active event"}",
-                actor).ConfigureAwait(false);
+        if (disclosure is not null)
+        {
+            var scope = $"day {matrix.CalendarDate.ToInvariantDate() ?? "no active event"}";
+            await _audit.LogAsync(disclosure.Action, "EventSettings", burn?.Id ?? Guid.Empty,
+                $"Daily Cantina roster {disclosure.Verb}: {matrix.People.Count} people rows, {scope}",
+                disclosure.ActorUserId).ConfigureAwait(false);
+            await AuditSubjectsAsync(disclosure, burn,
+                matrix.People.Where(p => p.Allergies.Count > 0 || p.Intolerances.Count > 0
+                    || HasText(p.AllergyOtherText) || HasText(p.IntoleranceOtherText)).Select(p => p.UserId),
+                $"daily roster, {scope}").ConfigureAwait(false);
+        }
         return matrix;
     }
+
+    /// <summary>
+    /// A health reveal is recorded against every member whose allergy or intolerance data it showed, so each of them
+    /// sees it on their own dietary page; the scope row above stays for the Board's view. Exports keep the one row.
+    /// </summary>
+    private async Task AuditSubjectsAsync(RosterDisclosure disclosure, EventSettingsInfo? burn, IEnumerable<Guid> subjectIds, string scope)
+    {
+        if (disclosure.Action != CantinaAuditActions.CantinaHealthDetailsRevealed) return;
+        foreach (var userId in subjectIds.Distinct())
+            await _audit.LogAsync(disclosure.Action, "User", userId,
+                $"Allergy and intolerance details revealed on the Cantina {scope}",
+                disclosure.ActorUserId, burn?.Id, "EventSettings").ConfigureAwait(false);
+    }
+
+    private static bool HasText(string? value) => !string.IsNullOrWhiteSpace(value);
 
     private async Task<DailyMatrixDto> BuildDailyRosterAsync(
         EventSettingsInfo? burn, int dayOffset, CancellationToken ct)
@@ -245,51 +214,32 @@ internal sealed class CantinaRosterService : ICantinaRosterService
             : burn.GateOpeningDate.PlusDays(dayOffset);
         var eventName = burn?.EventName;
 
-        // "Today" must be in event timezone (same rationale as the weekly view —
-        // a Madrid coordinator late in the evening must not see tomorrow flagged).
+        // Event timezone, same reason as the weekly view.
         var eventTodayDate = GetEventTodayDate(burn);
 
-        // Monday-of-week containing this day. With active event use NodaTime
-        // day-of-week so the result respects ISO Monday=1. Fallback when no
-        // active event: pure offset arithmetic so the "← back to weekly"
-        // link still routes to a valid week. Both branches return the
-        // gate-opening-relative offset of that Monday.
         int weekStartOffset;
         if (calendarDate is { } cd)
         {
-            var daysSinceMonday = ((int)cd.DayOfWeek - 1 + DaysPerWeek) % DaysPerWeek;
-            weekStartOffset = dayOffset - daysSinceMonday;
+            weekStartOffset = dayOffset - DaysSinceMonday(cd);
         }
         else
         {
-            // Without an event we don't know which day-offset is a Monday;
-            // bucket on the integer offset modulo 7 so prev/next-week links
-            // still partition cleanly.
+            // Without an event no offset is known to be a Monday; bucket modulo 7 so prev/next links still partition.
             weekStartOffset = dayOffset - ((dayOffset % DaysPerWeek + DaysPerWeek) % DaysPerWeek);
         }
 
-        // The arrival scan below re-reads this same day, so both go through one
-        // per-request cache of the on-site cohort by offset.
+        // The arrival scan re-reads this day, so both share one per-request cache.
         var onSiteByOffset = new Dictionary<int, IReadOnlyList<Guid>>();
 
         var shiftUserIds = burn is null
             ? Array.Empty<Guid>()
             : await GetOnSiteUserIdsAsync(burn.Id, dayOffset, onSiteByOffset, ct).ConfigureAwait(false);
 
-        // Arrival-day feeding: a human is fed (present, no shift) the day before
-        // their FIRST confirmed shift across the whole event. For day N that
-        // means anyone whose first confirmed shift offset == N+1 arrives today.
-        // Union them with the day-N shift cohort so the drill-down stays
-        // consistent with the weekly strip (which injects the same arrival day).
-        // CRITICAL: compute the union BEFORE the empty-check — a day can have
-        // zero shifts but still have arrivals, so the early-return must be
-        // evaluated on the unioned set. Guarded on an active event; the no-event
-        // branch leaves the set as the (empty) shift cohort.
+        // Arrival-day feeding: anyone whose first confirmed shift is day N+1 arrives today. A day with zero shifts can
+        // still have arrivals.
         var unionedUserIds = new HashSet<Guid>(shiftUserIds);
         if (burn is not null)
         {
-            // Only users whose first confirmed shift is exactly dayOffset+1 are
-            // pulled in, so the scan never needs to look past dayOffset+1.
             var firstConfirmedOffsetByUser =
                 await BuildFirstConfirmedOffsetByUserAsync(
                     burn, dayOffset + 1, onSiteByOffset, ct).ConfigureAwait(false);
@@ -302,52 +252,28 @@ internal sealed class CantinaRosterService : ICantinaRosterService
 
         var userIds = unionedUserIds.ToList();
 
-        if (userIds.Count == 0)
-        {
-            return new DailyMatrixDto(
-                DayOffset: dayOffset,
-                CalendarDate: calendarDate,
-                EventTodayDate: eventTodayDate,
-                EventName: eventName,
-                WeekStartOffset: weekStartOffset,
-                TotalOnSite: 0,
-                UnansweredCount: 0,
-                People: Array.Empty<DailyPersonRowDto>());
-        }
-
-        // Names from the cached UserInfo, dietary from this section's profiles, for the day's cohort.
-        var userInfoById = await _userRead.GetUserInfosAsync(userIds, ct).ConfigureAwait(false);
+        var userInfoById = userIds.Count == 0
+            ? new Dictionary<Guid, UserInfo>()
+            : await _userRead.GetUserInfosAsync(userIds, ct).ConfigureAwait(false);
         var dietById = await _dietary.GetDietaryProfilesAsync(userIds, ct).ConfigureAwait(false);
 
-        // People — built in the order the cohort read returned (caller is expected
-        // to sort for display via CantinaRosterAssembler.WithSortedPeople; see
-        // memory/architecture/display-sort-in-controllers.md).
         var people = new List<DailyPersonRowDto>(userIds.Count);
         foreach (var id in userIds)
         {
             userInfoById.TryGetValue(id, out var info);
             dietById.TryGetValue(id, out var profile);
 
-            IReadOnlySet<string> allergies = profile?.Allergies is { Count: > 0 } a
-                ? new HashSet<string>(a, StringComparer.Ordinal)
-                : new HashSet<string>(StringComparer.Ordinal);
-            IReadOnlySet<string> intolerances = profile?.Intolerances is { Count: > 0 } i
-                ? new HashSet<string>(i, StringComparer.Ordinal)
-                : new HashSet<string>(StringComparer.Ordinal);
-
             people.Add(new DailyPersonRowDto(
                 UserId: id,
                 BurnerName: ResolveBurnerName(info),
                 DietaryPreference: profile?.DietaryPreference,
-                Allergies: allergies,
+                Allergies: new HashSet<string>(profile?.Allergies ?? [], StringComparer.Ordinal),
                 AllergyOtherText: profile?.AllergyOtherText,
-                Intolerances: intolerances,
+                Intolerances: new HashSet<string>(profile?.Intolerances ?? [], StringComparer.Ordinal),
                 IntoleranceOtherText: profile?.IntoleranceOtherText));
         }
 
-        // The chip rollups the daily page shows are counted from People by the
-        // view and the CSV writer, so the only day-scoped aggregate the service
-        // still owes is the unanswered headline count.
+        // The view and CSV writer count the chip totals from People; only the unanswered headline is owed here.
         var answeredCount = people.Count(p => !string.IsNullOrEmpty(p.DietaryPreference));
         var unanswered = userIds.Count - answeredCount;
 
@@ -381,11 +307,7 @@ internal sealed class CantinaRosterService : ICantinaRosterService
         return perDay;
     }
 
-    /// <summary>
-    /// One on-site cohort read, memoized by day offset for the life of the
-    /// request. The visible week and the arrival scan cover overlapping ranges;
-    /// without this the overlap is fetched twice per render.
-    /// </summary>
+    /// <summary>Memoized per request: the visible week and the arrival scan overlap.</summary>
     private async Task<IReadOnlyList<Guid>> GetOnSiteUserIdsAsync(
         Guid burnId,
         int dayOffset,
@@ -401,15 +323,8 @@ internal sealed class CantinaRosterService : ICantinaRosterService
     }
 
     /// <summary>
-    /// Scans from build start up through <paramref name="scanThroughOffset"/>
-    /// (clamped to strike end, inclusive) and records, per human, the earliest
-    /// day offset on which they have a confirmed on-site signup. Used to feed
-    /// each human the day before their first confirmed shift. Kept separate from
-    /// <see cref="LoadWeeklyOnSiteUsersAsync"/> — that load stays scoped to the
-    /// visible week; this one scans from the start of the event so a true first
-    /// day is never missed. The upper bound is the caller's window end: a first
-    /// confirmed shift later than that yields an arrival day outside the window,
-    /// which the caller discards anyway, so scanning past it is wasted DB work.
+    /// Earliest confirmed on-site day per human, from build start: a week-scoped load would miss a true first day.
+    /// Stops at <paramref name="scanThroughOffset"/>, since a later first shift yields an arrival the caller discards.
     /// </summary>
     private async Task<Dictionary<Guid, int>> BuildFirstConfirmedOffsetByUserAsync(
         EventSettingsInfo burn,
@@ -432,139 +347,6 @@ internal sealed class CantinaRosterService : ICantinaRosterService
         return firstOffsetByUser;
     }
 
-    private static Dictionary<Guid, List<LocalDate>> BuildDaysOnSiteByUserId(
-        IReadOnlyList<(int DayOffset, IReadOnlyList<Guid> UserIds)> perDay,
-        int weekStartOffset,
-        LocalDate? weekStartDate)
-    {
-        var daysOnSiteByUserId = new Dictionary<Guid, List<LocalDate>>();
-        foreach (var (dayOffset, userIds) in perDay)
-        {
-            var calendarDate = weekStartDate?.PlusDays(dayOffset - weekStartOffset);
-            foreach (var id in userIds)
-            {
-                if (!daysOnSiteByUserId.TryGetValue(id, out var list))
-                {
-                    list = new List<LocalDate>(capacity: DaysPerWeek);
-                    daysOnSiteByUserId[id] = list;
-                }
-
-                if (calendarDate is not null)
-                    list.Add(calendarDate.Value);
-            }
-        }
-
-        return daysOnSiteByUserId;
-    }
-
-    private static List<DayRosterSummaryDto> BuildDaySummaries(
-        IReadOnlyDictionary<Guid, List<LocalDate>> daysOnSiteByUserId,
-        int weekStartOffset,
-        LocalDate? weekStartDate,
-        IReadOnlyDictionary<Guid, DietaryProfileInfo> dietById)
-    {
-        var days = new List<DayRosterSummaryDto>(DaysPerWeek);
-        for (var i = 0; i < DaysPerWeek; i++)
-        {
-            var calendarDate = weekStartDate?.PlusDays(i);
-
-            // Count users on-site this calendar date from the post-injection map
-            // (includes arrival-day people). Without an anchor date the map holds
-            // no dates, so every day is correctly zero.
-            var total = 0;
-            var unanswered = 0;
-            if (calendarDate is { } day)
-            {
-                foreach (var (id, dates) in daysOnSiteByUserId)
-                {
-                    if (!dates.Contains(day))
-                        continue;
-
-                    total++;
-                    if (!dietById.TryGetValue(id, out var diet) || !diet.HasPreference)
-                        unanswered++;
-                }
-            }
-
-            days.Add(new DayRosterSummaryDto(
-                DayOffset: weekStartOffset + i,
-                CalendarDate: calendarDate,
-                TotalOnSite: total,
-                UnansweredOnDay: unanswered));
-        }
-
-        return days;
-    }
-
-    private static List<DietaryProfileInfo> BuildUniqueProfiles(
-        IReadOnlyList<Guid> uniqueUserIds,
-        IReadOnlyDictionary<Guid, DietaryProfileInfo> dietById)
-    {
-        var uniqueProfiles = new List<DietaryProfileInfo>(uniqueUserIds.Count);
-        foreach (var id in uniqueUserIds)
-        {
-            if (dietById.TryGetValue(id, out var diet))
-                uniqueProfiles.Add(diet);
-        }
-
-        return uniqueProfiles;
-    }
-
-    private static LocalDate[] BuildWeekDays(LocalDate? weekStartDate)
-        => weekStartDate is null
-            ? Array.Empty<LocalDate>()
-            : Enumerable.Range(0, DaysPerWeek)
-                .Select(i => weekStartDate.Value.PlusDays(i))
-                .ToArray();
-
-    private static List<RosterPersonDto> BuildWeeklyPeople(
-        IReadOnlyList<Guid> uniqueUserIds,
-        IReadOnlyDictionary<Guid, UserInfo> userInfoById,
-        IReadOnlyDictionary<Guid, DietaryProfileInfo> dietById,
-        IReadOnlyDictionary<Guid, List<LocalDate>> daysOnSiteByUserId,
-        IReadOnlyList<LocalDate> weekDays)
-    {
-        var people = new List<RosterPersonDto>(uniqueUserIds.Count);
-        foreach (var id in uniqueUserIds)
-        {
-            userInfoById.TryGetValue(id, out var info);
-            dietById.TryGetValue(id, out var profile);
-            var daysList = daysOnSiteByUserId[id];
-            daysList.Sort();
-
-            people.Add(new RosterPersonDto(
-                UserId: id,
-                BurnerName: ResolveBurnerName(info),
-                ArrivesOn: daysList[0],
-                NoShift: BuildNoShiftDays(daysList, weekDays),
-                DietaryPreference: profile?.DietaryPreference,
-                Allergies: profile?.Allergies is { Count: > 0 } a ? a.ToArray() : Array.Empty<string>(),
-                AllergyOtherText: profile?.AllergyOtherText,
-                Intolerances: profile?.Intolerances is { Count: > 0 } i ? i.ToArray() : Array.Empty<string>(),
-                IntoleranceOtherText: profile?.IntoleranceOtherText));
-        }
-
-        return people;
-    }
-
-    private static IReadOnlyList<LocalDate> BuildNoShiftDays(
-        IReadOnlyCollection<LocalDate> daysOnSite,
-        IReadOnlyCollection<LocalDate> weekDays)
-    {
-        if (weekDays.Count == 0)
-            return Array.Empty<LocalDate>();
-
-        var onSiteSet = new HashSet<LocalDate>(daysOnSite);
-        var noShift = new List<LocalDate>(DaysPerWeek);
-        foreach (var day in weekDays)
-        {
-            if (!onSiteSet.Contains(day))
-                noShift.Add(day);
-        }
-
-        return noShift;
-    }
-
     private LocalDate? GetEventTodayDate(EventSettingsInfo? burn)
     {
         if (burn is null)
@@ -573,104 +355,5 @@ internal sealed class CantinaRosterService : ICantinaRosterService
         var zone = DateTimeZoneProviders.Tzdb.GetZoneOrNull(burn.TimeZoneId)
             ?? DateTimeZoneProviders.Tzdb["Europe/Madrid"];
         return _clock.GetCurrentInstant().InZone(zone).Date;
-    }
-
-    /// <summary>
-    /// The display name Users already resolved (<c>User.BurnerName</c> →
-    /// <c>Profile.BurnerName</c> → legacy display name, nobodies-collective/Humans#1097).
-    /// Reading <c>ProfileInfo.BurnerName</c> instead would show <c>"(unknown)"</c> for a
-    /// human whose name lives only on the user row. The fallback covers a user id the cohort
-    /// read did not return.
-    /// </summary>
-    private static string ResolveBurnerName(UserInfo? info) =>
-        info is not null && !string.IsNullOrWhiteSpace(info.BurnerName)
-            ? info.BurnerName
-            : "(unknown)";
-
-    private static IReadOnlyDictionary<string, int> EmptyDietaryBreakdown()
-    {
-        var dict = new Dictionary<string, int>(DietaryOptions.DietaryPreferences.Count + 1, StringComparer.Ordinal);
-        foreach (var pref in DietaryOptions.DietaryPreferences)
-            dict[pref] = 0;
-        dict[UnansweredKey] = 0;
-        return dict;
-    }
-
-    private static IReadOnlyList<RollupItemDto> EmptyRollup(IReadOnlyList<string> labels)
-    {
-        var rows = new List<RollupItemDto>(labels.Count);
-        foreach (var label in labels)
-            rows.Add(new RollupItemDto(label, 0));
-        return rows;
-    }
-
-    private static IReadOnlyDictionary<string, int> BuildDietaryBreakdown(
-        IReadOnlyList<DietaryProfileInfo> uniqueProfiles, int totalUniqueOnSite)
-    {
-        var dict = new Dictionary<string, int>(DietaryOptions.DietaryPreferences.Count + 1, StringComparer.Ordinal);
-        foreach (var pref in DietaryOptions.DietaryPreferences)
-            dict[pref] = 0;
-
-        var answered = 0;
-        foreach (var profile in uniqueProfiles)
-        {
-            if (string.IsNullOrEmpty(profile.DietaryPreference))
-                continue;
-
-            answered++;
-            // An unknown value counts as answered but matches no bucket, so the returned
-            // counts sum to less than totalUniqueOnSite. Which bucket it belongs in is
-            // undecided — nobodies-collective/Humans#1113.
-            if (dict.ContainsKey(profile.DietaryPreference))
-                dict[profile.DietaryPreference]++;
-        }
-
-        dict[UnansweredKey] = totalUniqueOnSite - answered;
-        return dict;
-    }
-
-    private static (IReadOnlyList<RollupItemDto> Rollup, IReadOnlyList<string> OtherEntries) BuildRollup(
-        IReadOnlyList<DietaryProfileInfo> uniqueProfiles,
-        Func<DietaryProfileInfo, IReadOnlyList<string>> pickChips,
-        Func<DietaryProfileInfo, string?> pickOtherText,
-        IReadOnlyList<string> canonicalLabels)
-    {
-        var counts = new Dictionary<string, int>(canonicalLabels.Count, StringComparer.Ordinal);
-        foreach (var label in canonicalLabels)
-            counts[label] = 0;
-
-        // Dedup other-text entries by trimmed value across the week.
-        var otherSet = new HashSet<string>(StringComparer.Ordinal);
-        var otherEntries = new List<string>();
-
-        foreach (var profile in uniqueProfiles)
-        {
-            var chips = pickChips(profile);
-            if (chips is null) continue;
-
-            foreach (var chip in chips)
-            {
-                if (counts.ContainsKey(chip))
-                    counts[chip]++;
-            }
-
-            if (chips.Contains(DietaryOptions.OtherOption, StringComparer.Ordinal))
-            {
-                var text = pickOtherText(profile);
-                if (!string.IsNullOrWhiteSpace(text))
-                {
-                    var trimmed = text.Trim();
-                    if (otherSet.Add(trimmed))
-                        otherEntries.Add(trimmed);
-                }
-            }
-        }
-
-        // Preserve canonical ordering of the rollup rows.
-        var rollup = new List<RollupItemDto>(canonicalLabels.Count);
-        foreach (var label in canonicalLabels)
-            rollup.Add(new RollupItemDto(label, counts[label]));
-
-        return (rollup, otherEntries);
     }
 }

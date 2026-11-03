@@ -8,12 +8,7 @@ using Humans.Users.Contracts;
 
 namespace Humans.Preapprovals.Services;
 
-/// <summary>
-/// The audit, in-app notification and email helpers every transition calls. In-app copy is
-/// rendered per recipient language from the section's resx; emails go through
-/// <see cref="PreapprovalsEmails"/>. Email and notification failures never fail the write:
-/// the row and the audit entry are the record.
-/// </summary>
+/// <summary>Email and notification failures never fail the write: the row and the audit entry are the record.</summary>
 internal sealed partial class PreapprovalService
 {
     private static readonly System.Resources.ResourceManager NoticeResources = new(typeof(PreapprovalsResource));
@@ -24,53 +19,46 @@ internal sealed partial class PreapprovalService
     private static string MemberUrl(Guid programId) => $"/Preapprovals/{programId}";
     private static string ManageUrl(Guid programId) => $"/Preapprovals/Admin/{programId}";
 
-    // ── Audit ─────────────────────────────────────────────────────────────
-
     private Task AuditGrantAsync(
-        AuditAction action, Domain.PreapprovalGrant grant, string description, Guid actorUserId,
+        AuditActionDefinition action, Domain.PreapprovalGrant grant, string description, Guid actorUserId,
         Guid? expenseReportId = null) =>
         auditLog.LogAsync(action, AuditEntityTypes.Grant, grant.Id, description, actorUserId,
             relatedEntityId: expenseReportId ?? grant.ProgramId,
             relatedEntityType: expenseReportId is null ? AuditEntityTypes.Program : AuditEntityTypes.ExpenseReport);
 
     private Task AuditProgramAsync(
-        AuditAction action, Domain.PreapprovalProgram program, string description, Guid actorUserId,
+        AuditActionDefinition action, Domain.PreapprovalProgram program, string description, Guid actorUserId,
         Guid? relatedUserId = null) =>
         auditLog.LogAsync(action, AuditEntityTypes.Program, program.Id, description, actorUserId,
             relatedEntityId: relatedUserId,
             relatedEntityType: relatedUserId is null ? null : AuditEntityTypes.User);
 
-    // ── In-app notifications ──────────────────────────────────────────────
-
     /// <summary>Clears the beneficiary's standing "file by" prompt (issued, released, reminders, deadline moved).</summary>
     private Task ResolveFileByAsync(Guid grantId, Guid? actorUserId, CancellationToken ct) =>
         SafeAsync(() => notificationResolve.ResolveBySourceKeyAsync(
-            NotificationSource.PreapprovalFileBy, FileBySourceKey(grantId), actorUserId, ct), "resolve file-by", grantId);
+            PreapprovalsNotificationSources.PreapprovalFileBy, FileBySourceKey(grantId), actorUserId, ct), "resolve file-by", grantId);
 
     /// <summary>Clears the managers' "application received" prompt (approved, declined, dropped).</summary>
     private Task ResolveRequestAsync(Guid grantId, Guid? actorUserId, CancellationToken ct) =>
         SafeAsync(() => notificationResolve.ResolveBySourceKeyAsync(
-            NotificationSource.PreapprovalApplicationReceived, RequestSourceKey(grantId), actorUserId, ct),
+            PreapprovalsNotificationSources.PreapprovalApplicationReceived, RequestSourceKey(grantId), actorUserId, ct),
             "resolve application-received", grantId);
 
-    /// <summary>
-    /// The beneficiary's actionable "file by" prompt, keyed by the grant so one resolve clears
-    /// every variant (issued, released, reminder, deadline moved). Body: program, label, amount, date.
-    /// </summary>
+    /// <summary>Keyed by the grant, so one resolve clears every variant (issued, released, reminder, deadline moved).</summary>
     private Task NotifyFileByAsync(GrantInfo info, string titleKey, NotificationPriority priority, CancellationToken ct) =>
-        NotifyAsync([info.BeneficiaryUserId], NotificationSource.PreapprovalFileBy, NotificationClass.Actionable,
+        NotifyAsync([info.BeneficiaryUserId], PreapprovalsNotificationSources.PreapprovalFileBy, NotificationClass.Actionable,
             priority, titleKey, info, "Preapprovals_Notice_FileBy_Body", MemberUrl(info.ProgramId),
             FileBySourceKey(info.Id), ct);
 
-    /// <summary>Declined, revoked, amount changed: informational, no source key.</summary>
+    /// <summary>Informational unless revocation affects a holding report; no source key.</summary>
     private Task NotifyDecidedAsync(GrantInfo info, string titleKey, string? detail, CancellationToken ct,
-        decimal? previousAmount = null) =>
-        NotifyAsync([info.BeneficiaryUserId], NotificationSource.PreapprovalGrantDecided,
-            info.Status == GrantStatus.Revoked && info.ExpenseReportId is not null
+        decimal? previousAmount = null, Guid? holdingReportId = null) =>
+        NotifyAsync([info.BeneficiaryUserId], PreapprovalsNotificationSources.PreapprovalGrantDecided,
+            holdingReportId is not null
                 ? NotificationClass.Actionable
                 : NotificationClass.Informational,
             NotificationPriority.Normal, titleKey, info, "Preapprovals_Notice_Decided_Body",
-            info.Status == GrantStatus.Revoked && info.ExpenseReportId is { } reportId
+            holdingReportId is { } reportId
                 ? $"/Expenses/{reportId}"
                 : MemberUrl(info.ProgramId),
             sourceKey: null, ct, detail, previousAmount);
@@ -79,14 +67,14 @@ internal sealed partial class PreapprovalService
     private async Task NotifyManagersAsync(ProgramInfo program, GrantInfo info, CancellationToken ct)
     {
         var applicant = await users.GetUserInfoAsync(info.BeneficiaryUserId, ct);
-        await NotifyAsync(program.ManagerUserIds, NotificationSource.PreapprovalApplicationReceived,
+        await NotifyAsync(program.ManagerUserIds, PreapprovalsNotificationSources.PreapprovalApplicationReceived,
             NotificationClass.Actionable, NotificationPriority.Normal, "Preapprovals_Notice_ApplicationReceived",
             info, "Preapprovals_Notice_ApplicationReceived_Body", ManageUrl(info.ProgramId),
             RequestSourceKey(info.Id), ct, detail: applicant?.BurnerName ?? "A member");
     }
 
     private async Task NotifyAsync(
-        IReadOnlyList<Guid> recipientUserIds, NotificationSource source, NotificationClass notificationClass,
+        IReadOnlyList<Guid> recipientUserIds, NotificationSourceDefinition source, NotificationClass notificationClass,
         NotificationPriority priority, string titleKey, GrantInfo info, string bodyKey, string actionUrl,
         string? sourceKey, CancellationToken ct, string? detail = null, decimal? previousAmount = null)
     {
@@ -124,9 +112,6 @@ internal sealed partial class PreapprovalService
         }
     }
 
-    // ── Email ─────────────────────────────────────────────────────────────
-
-    /// <summary>One email to the beneficiary in their language.</summary>
     private Task EmailAsync(GrantInfo info, PreapprovalNoticeKind kind, string? detail, CancellationToken ct,
         decimal? previousAmount = null) =>
         EmailAsync([info.BeneficiaryUserId], info, kind, detail, MemberUrl(info.ProgramId), ct, previousAmount);
@@ -162,7 +147,7 @@ internal sealed partial class PreapprovalService
                 infos.TryGetValue(id, out var person);
                 var language = person?.PreferredLanguage;
                 await email.SendAsync(emailFactory.Notice(new PreapprovalNoticeRequest(
-                    address, person?.BurnerName, kind, info.ProgramName, info.Label, info.MaxAmount, info.ClaimBy,
+                    id, address, person?.BurnerName, kind, info.ProgramName, info.Label, info.MaxAmount, info.ClaimBy,
                     url, detail, language.IsSupportedCultureCode() ? language : CultureCatalog.DefaultCultureCode, previousAmount)), ct);
             }
         }

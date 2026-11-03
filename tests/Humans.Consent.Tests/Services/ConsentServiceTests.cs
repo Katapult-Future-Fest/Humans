@@ -26,7 +26,6 @@ public sealed class ConsentServiceTests : ConsentTestHarness
     private readonly CachingConsentService _cache;
     private readonly IMembershipCalculator _membershipCalculator = Substitute.For<IMembershipCalculator>();
     private readonly ILegalDocumentSyncManagement _legalDocumentSyncService = Substitute.For<ILegalDocumentSyncManagement>();
-    private readonly INotificationAutoResolve _notificationInboxService = Substitute.For<INotificationAutoResolve>();
     private readonly IHumanLifecycleService _humanLifecycleService = Substitute.For<IHumanLifecycleService>();
     private readonly IUserService _userService = Substitute.For<IUserService>();
     private readonly IHumansMetrics _metrics = Substitute.For<IHumansMetrics>();
@@ -92,10 +91,14 @@ public sealed class ConsentServiceTests : ConsentTestHarness
                     lastName: "Last",
                     createdAt: Clock.GetCurrentInstant())));
 
+        _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(call => ResolveUserInfosAsync(
+                call.ArgAt<IReadOnlyCollection<Guid>>(0), call.ArgAt<CancellationToken>(1)));
+
         var services = new ServiceCollection();
         services.AddKeyedScoped<IConsentManagement>(CachingConsentService.InnerServiceKey, (_, _) =>
             _service ?? throw new InvalidOperationException("ConsentService is built below, before any test runs."));
-        _cache = new CachingConsentService(_legalDocumentSyncService, _userService, Clock,
+        _cache = new CachingConsentService(
             services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>(),
             NullLogger<CachingConsentService>.Instance);
 
@@ -103,13 +106,24 @@ public sealed class ConsentServiceTests : ConsentTestHarness
             consentRepository,
             _cache,
             _legalDocumentSyncService,
-            _notificationInboxService,
             _humanLifecycleService,
             _userService,
             serviceProvider,
             _metrics,
             Clock,
             NullLogger<ConsentService>.Instance);
+    }
+
+    private async ValueTask<IReadOnlyDictionary<Guid, UserInfo>> ResolveUserInfosAsync(
+        IReadOnlyCollection<Guid> ids, CancellationToken ct)
+    {
+        var infos = new Dictionary<Guid, UserInfo>();
+        foreach (var id in ids)
+        {
+            if (await _userService.GetUserInfoAsync(id, ct) is { } info)
+                infos[id] = info;
+        }
+        return infos;
     }
 
     private static UserInfo WrapInUserInfo(Guid userId, ProfileInfo profile) => UserInfo.Create(
@@ -149,8 +163,6 @@ public sealed class ConsentServiceTests : ConsentTestHarness
             .Should().Contain(versionId);
         await _membershipCalculator.Received(1).HasAllRequiredConsentsAsync(userId, CancellationToken.None);
         await _humanLifecycleService.Received(1).RestoreConsentSuspensionAsync(userId, CancellationToken.None);
-        await _notificationInboxService.Received(1)
-            .ResolveBySourceAsync(userId, NotificationSource.AccessSuspended, CancellationToken.None);
     }
 
     [HumansTheory]
@@ -180,8 +192,6 @@ public sealed class ConsentServiceTests : ConsentTestHarness
         record.UserAgent.Should().Be("TestAgent");
         record.ExplicitConsent.Should().BeTrue();
         record.ConsentedAt.Should().Be(Clock.GetCurrentInstant());
-        await _notificationInboxService.Received(1)
-            .ResolveBySourceAsync(userId, NotificationSource.AccessSuspended, CancellationToken.None);
         await _humanLifecycleService.Received(1)
             .RestoreConsentSuspensionAsync(userId, CancellationToken.None);
     }
@@ -233,7 +243,6 @@ public sealed class ConsentServiceTests : ConsentTestHarness
             result.Success.Should().BeFalse();
             result.ErrorKey.Should().Be("ContentUnavailable");
             _metrics.DidNotReceive().RecordConsentGiven();
-            await _notificationInboxService.DidNotReceiveWithAnyArgs().ResolveBySourceAsync(default, default);
         }
         (await LegalDb.ConsentRecords.CountAsync(TestContext.Current.CancellationToken)).Should().Be(0);
     }
@@ -390,8 +399,6 @@ public sealed class ConsentServiceTests : ConsentTestHarness
         LegalDb.ConsentRecords.Should().Contain(record => record.UserId == userId && record.DocumentVersionId == versionId);
         await _membershipCalculator.Received(1)
             .HasAllRequiredConsentsAsync(userId, CancellationToken.None);
-        await _notificationInboxService.Received(1)
-            .ResolveBySourceAsync(userId, NotificationSource.AccessSuspended, CancellationToken.None);
         await _humanLifecycleService.Received(1)
             .RestoreConsentSuspensionAsync(userId, CancellationToken.None);
     }
@@ -407,8 +414,6 @@ public sealed class ConsentServiceTests : ConsentTestHarness
 
         await _service.SubmitConsentAsync(userId, versionId, true, "127.0.0.1", "Agent", TestContext.Current.CancellationToken);
 
-        await _notificationInboxService.DidNotReceiveWithAnyArgs()
-            .ResolveBySourceAsync(Guid.Empty, default, Arg.Any<CancellationToken>());
         await _humanLifecycleService.DidNotReceiveWithAnyArgs()
             .RestoreConsentSuspensionAsync(Guid.Empty, Arg.Any<CancellationToken>());
     }
@@ -453,8 +458,6 @@ public sealed class ConsentServiceTests : ConsentTestHarness
         result.Success.Should().BeTrue();
         (await LegalDb.ConsentRecords.CountAsync(TestContext.Current.CancellationToken)).Should().Be(1);
     }
-
-    // --- GetConsentDashboardAsync ---
 
     [HumansFact]
     public async Task GetConsentDashboardAsync_ReturnsDocumentsGroupedByTeam()
@@ -640,8 +643,6 @@ public sealed class ConsentServiceTests : ConsentTestHarness
         history.Should().BeEmpty();
     }
 
-    // --- GetConsentReviewDetailAsync ---
-
     [HumansFact]
     public async Task GetConsentReviewDetailAsync_ReturnsVersionWithDocumentAndConsent()
     {
@@ -712,8 +713,7 @@ public sealed class ConsentServiceTests : ConsentTestHarness
     [HumansFact]
     public async Task GetConsentMapForUsersAsync_InputContainsBothSourceAndTarget_DoesNotThrow()
     {
-        // Regression for peterdrier#382 finding 3175264064 (Codex P1):
-        // when input list contains both a source tombstone id and its merge
+        // Regression: when the input list contains both a source tombstone id and its merge
         // target, the chain-follow path used to append the source id again
         // without dedup. The downstream repo's `userIds.ToDictionary(id =>
         // id, ...)` then threw ArgumentException on the duplicate key.
@@ -726,7 +726,7 @@ public sealed class ConsentServiceTests : ConsentTestHarness
         await SaveAllAsync(TestContext.Current.CancellationToken);
 
         // The source was merged into the target, so the target's record lists it. The source
-        // id still resolves to the target's record — that is the redirect (#1704) — and the
+        // id still resolves to the target's record (the redirect), and the
         // unrelated id lists nothing.
         var target = WrapInUserInfo(targetId, UserFixtures.Profile(
             burnerName: "Burner", firstName: "First", lastName: "Last",
@@ -778,8 +778,6 @@ public sealed class ConsentServiceTests : ConsentTestHarness
         result[targetId].Should().Contain(versionId,
             "the survivor keeps the consent signed under the id merged into it, whatever the batch order");
     }
-
-    // --- Helpers ---
 
     private Guid SeedDocument(Guid teamId, string name, bool isActive = true, bool isRequired = true, Instant? effectiveFrom = null)
     {
@@ -857,7 +855,7 @@ public sealed class ConsentServiceTests : ConsentTestHarness
     [HumansFact]
     public async Task GetConsentMapForUsersAsync_ThroughAMergedAwayId_IncludesTheSurvivorsOwnConsent()
     {
-        // #1704: a caller still holding the archived id gets the survivor's record, and the
+        // A caller still holding the archived id gets the survivor's record, and the
         // chain to union is that record's AllUserIds, survivor first. A union over
         // [archived, ..MergedUserIds] would miss what the survivor signed after the merge.
         var sourceId = Guid.NewGuid();

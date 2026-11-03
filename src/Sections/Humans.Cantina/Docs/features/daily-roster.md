@@ -15,7 +15,7 @@
 
 Cantina coordinators feed everyone on site during the build and event week. They need a week-at-a-glance view of who's on site so they can plan meals, batch-buy ingredients across multiple days, and account for dietary restrictions, allergies, and intolerances.
 
-Until now, the data was collected via the [Dietary Nudge](dietary-nudge.md) (#279) but had no aggregated read path — coordinators had to ask each volunteer individually, or chase down the data through per-profile badges. This feature surfaces a printable per-week roster behind a single URL, with a CSV download for offline planning, and tightens the GDPR boundary by excluding medical-condition data that the cantina doesn't need.
+The data is collected via the [Dietary Nudge](dietary-nudge.md) (nobodies-collective/Humans#279). This feature surfaces a printable per-week roster behind a single URL, with a CSV download for offline planning, and tightens the GDPR boundary by excluding medical-condition data that the cantina doesn't need.
 
 The two views split by the job in hand. The weekly view is **overview-only** — week-level aggregates plus a per-day mini-summary (counts only) — because shopping and batch-prep are planned on totals, not on names. The per-day drill-down carries the person-by-person detail, because cooking a specific meal means knowing who is at that meal. Each day's row in the mini-summary links straight into it.
 
@@ -23,7 +23,7 @@ The two views split by the job in hand. The weekly view is **overview-only** —
 
 View access to `/Cantina/Roster*`:
 
-- **Access:** `Admin` or the grantable `CantinaAdmin` role, via the `CantinaAdminOrAdmin` authorization policy — aligned with every other per-area `<Area>AdminOrAdmin` policy. `CantinaAdmin` is granted on the permissions page like any other admin role (no team-name heuristic).
+- **Access:** `Admin` or the grantable `CantinaAdmin` role, via the `CantinaPolicies.Read` authorization policy — aligned with every other per-area `<Area>AdminOrAdmin` policy. `CantinaAdmin` is granted on the permissions page like any other admin role (no team-name heuristic).
 - **Other authenticated users:** redirected to `/Account/AccessDenied` (cookie authentication's `AccessDeniedPath`) — not a bare 403.
 - **Unauthenticated:** redirected to login per the global `[Authorize]` policy.
 
@@ -103,10 +103,10 @@ If there is no active event, the service returns an empty DTO with `WeekStartDat
 - One row per unique human across the week; columns:
   ```
   Name,ArrivesOn,NoShift,Dietary,Allergies,AllergyOther,Intolerances,IntoleranceOther
-  "Dev Human 007","Mon 27 May","Wed 29 May, Sat 1 Jun",Vegetarian,"Peanut, Tree nut","","Other","MSG"
+  "Dev Human 007","2024-05-27","2024-05-29, 2024-06-01",Vegetarian,"Peanut, Tree nut","","Other","MSG"
   ```
-- `ArrivesOn` is a single short calendar label (e.g. `Mon 27 May`) for the human's earliest on-site day within the week.
-- `NoShift` lists the calendar dates within the week on which the human had no scheduled shift — formatted as short weekday + day + short month (e.g. `Wed 29 May`), comma-and-space-separated, wrapped in double quotes. Empty when the human has a scheduled shift every day of the week.
+- `ArrivesOn` is an ISO date (e.g. `2024-05-27`) for the human's arrival day: the day before their first confirmed shift of the event, even when that is before the week.
+- `NoShift` lists the calendar dates within the week on which the human had no scheduled shift — formatted as ISO dates (e.g. `2024-05-29`), comma-and-space-separated, wrapped in double quotes. Empty when the human has a scheduled shift every day of the week.
 - UTF-8 BOM (`﻿`) prepended for Excel-friendliness.
 - RFC 4180 quoting: fields containing commas, quotes, or newlines are wrapped in double quotes; embedded double quotes are escaped by doubling.
 - `Allergies` / `Intolerances` cells contain the chip values comma-and-space-separated.
@@ -120,7 +120,7 @@ If there is no active event, the service returns an empty DTO with `WeekStartDat
 **So that** other volunteers' dietary data isn't broadcast to anyone who guesses the URL
 
 **Acceptance Criteria:**
-- Authenticated user without `Admin` or `CantinaAdmin` is redirected to `/Account/AccessDenied` on the `/Cantina/Roster*` routes (the `CantinaAdminOrAdmin` policy fails; cookie authentication's `AccessDeniedPath`, not a bare 403).
+- Authenticated user without `Admin` or `CantinaAdmin` is redirected to `/Account/AccessDenied` on the `/Cantina/Roster*` routes (the `CantinaPolicies.Read` policy fails; cookie authentication's `AccessDeniedPath`, not a bare 403).
 - Unauthenticated user is redirected to the login page (global `[Authorize]` policy).
 - The access-denied redirect must **not** leak any data (no headcount, no week label) — only the standard redirect.
 
@@ -145,7 +145,7 @@ A volunteer is **on-site for day X** iff they have at least one `ShiftSignup` wi
 
 - **Statuses that count:** `Confirmed`.
 - **Statuses that do NOT count:** `Pending`, `Refused`, `Bailed`, `NoShow`, `Cancelled`.
-- **Arrival-day rule:** each human is also fed (counted on-site, with no shift) on the day before their **first confirmed shift across the whole event**: `arrivalDay = firstConfirmedShiftDay − 1`. The service scans from build start to find the true first confirmed shift, so a human whose only relation to the requested week is their arrival day still appears. The rule applies to the weekly roster, the per-day mini-summary, the daily drill-down, and both CSVs. The arrival day is a real on-site day, so it feeds `ArrivesOn` and is not listed under `NoShift`.
+- **Arrival-day rule:** each human is also fed (counted on-site, with no shift) on the day before their **first confirmed shift across the whole event**: `arrivalDay = firstConfirmedShiftDay − 1`. The service scans from build start to find the true first confirmed shift, so a human whose only relation to the requested week is their arrival day still appears. The rule applies to the weekly roster, the per-day mini-summary, the daily drill-down, and both CSVs. The arrival day is every human's `ArrivesOn`; when it falls in the week it is a real on-site day and is not listed under `NoShift`.
 - **All-day shifts are single-day** (08:00–18:00 per existing `Shift.AllDayWindowStart/End`). There is **no multi-day expansion** — an all-day shift on `DayOffset = 3` contributes to day 3 only, never to day 2 or day 4.
 - **Past days are NOT excluded** — the cantina may need historical lookups. Future days ARE included.
 - **Active event only.** The query filters to signups whose `Shift` belongs to the currently active event.
@@ -219,11 +219,11 @@ Header:
 Name,ArrivesOn,NoShift,Dietary,Allergies,AllergyOther,Intolerances,IntoleranceOther
 ```
 
-`ArrivesOn` is the human's earliest on-site day within the requested week, formatted with NodaTime pattern `ddd d MMM` (invariant culture), e.g. `Mon 27 May`. `NoShift` lists the calendar dates within the same week on which the human had no scheduled shift, same format, comma-and-space-separated, wrapped in double quotes whenever the cell contains a comma. `NoShift` is empty when the human has a scheduled shift every day of the week.
+`ArrivesOn` is the human's arrival day (the day before their first confirmed shift of the event, even when that is before the requested week), formatted as an ISO `yyyy-MM-dd` date, e.g. `2024-05-27`. `NoShift` lists the calendar dates within the same week on which the human had no scheduled shift, same format, comma-and-space-separated, wrapped in double quotes whenever the cell contains a comma. `NoShift` is empty when the human has a scheduled shift every day of the week.
 
-(Note: "no shift" is the cantina semantic — the human could still be on-site that day, working informally or at barrio. The earlier "off-site / days off" wording was renamed to avoid that misread.)
+(Note: "no shift" is the cantina semantic — the human could still be on-site that day, working informally or at barrio.)
 
-One row per unique human. Otherwise the same RFC 4180 quoting rules, UTF-8 BOM, and chip-join behaviour as before.
+One row per unique human. Otherwise the same RFC 4180 quoting rules, UTF-8 BOM, and chip-join behaviour.
 
 Filename: `cantina-roster-week-of-<yyyy-MM-dd>.csv`, where `<yyyy-MM-dd>` is the ISO date of the week's Monday.
 
@@ -237,7 +237,7 @@ This feature lives in the `Cantina/` section and reads **only through section se
 - **Cantina (read, dietary):** `ICantinaService.GetDietaryProfilesAsync` — batched; the DTO has no medical field, so `CantinaRosterService` never sees `MedicalConditions`.
 - **Users/Identity (read, burner names):** `IUserService.GetUserInfosAsync` — batched, cached `UserInfo`. No entity reads, no new surface.
 - **Event settings:** `ISettingsService.GetActiveEventSettingsAsync` for `GateOpeningDate` / `TimeZoneId` (week-boundary computation and per-day calendar labels).
-- **Authorization:** the `CantinaAdminOrAdmin` policy (Admin or the grantable `CantinaAdmin` role). No team-name heuristic, no bespoke access service.
+- **Authorization:** the `CantinaPolicies.Read` policy (Admin or the grantable `CantinaAdmin` role). No team-name heuristic, no bespoke access service.
 - **No roster-specific entity or migration** (the dietary table belongs to the [Dietary Nudge](dietary-nudge.md)).
 
 New / updated components:
@@ -246,8 +246,8 @@ New / updated components:
 |---|---|---|
 | Application | `CantinaRosterService` | Build weekly aggregates + per-day mini-summary + unique-humans table; reads via `IShiftService`, `ISettingsService`, `IUserService` + `ICantinaService` |
 | Application | `WeeklyRosterDto`, `DailyMatrixDto`, `DayRosterSummaryDto`, `RosterPersonDto`, `DailyPersonRowDto`, `RollupItemDto` | Payload contracts; no `MedicalConditions` field |
-| Base | `RoleNames.CantinaAdmin` | Grantable admin role; wired into `RoleNames.All` + `AnyAdminRole` + the `CantinaAdminOrAdmin` policy |
-| Section | `CantinaController` | `[Authorize(Policy = CantinaAdminOrAdmin)]`; `GET /Cantina/Roster(/Csv)` + `/Roster/Day(/Csv)` |
+| Cantina.Contracts | `CantinaRoles.CantinaAdmin` | Grantable admin role, declared through `ISectionRoles` (so it joins `AnyAdminRole`) and gated by the `CantinaPolicies.Read` policy |
+| Section | `CantinaController` | `[Authorize(Policy = CantinaPolicies.Read)]`; `GET /Cantina/Roster(/Csv)` + `/Roster/Day(/Csv)` |
 | Section | `Roster.cshtml`, `Day.cshtml` | Weekly overview (aggregates + per-day mini-table) and the per-day matrix |
 
 ## Negative access rules
@@ -265,7 +265,7 @@ New / updated components:
 - **Per-meal granularity** (lunch vs. dinner vs. breakfast). Cantina plans per-day in v1.
 - **Historical export** (last year's data, multi-event archive). The freshness:flag-on-change covers shape changes; archival export is a separate concern.
 - **Multi-event scope.** Reads only the active event's signups.
-- **Editing dietary data from the roster.** Coordinators who need to correct an entry go through the volunteer's profile.
+- **Editing dietary data from the roster.** Nobody edits another member's answers; a member corrects their own at `/Cantina/Dietary`.
 - **Printable PDF layout.** The HTML view is browser-print-friendly; a dedicated PDF generator is not in scope.
 - **Real-time push updates.** The page is a normal request/response; coordinators refresh to pick up new signups.
 

@@ -4,6 +4,7 @@ using Humans.Grants.Data;
 using Humans.Grants.Domain;
 using Humans.Grants.Services;
 using Humans.Notifications.Contracts;
+using Humans.Settings.Contracts;
 using Humans.Users.Contracts;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
@@ -23,6 +24,9 @@ public abstract class GrantsTestHarness : IDisposable
 {
     /// <summary>The harness "today" in Europe/Madrid: 2027-03-01.</summary>
     protected static readonly LocalDate Today = new(2027, 3, 1);
+
+    /// <summary>The 2027 event. Seeded programs carry no event id, so they reach it through the year fallback.</summary>
+    private protected static readonly EventSettingsInfo Event2027 = BurnFixtures.Burn(eventName: "Nowhere 2027", year: 2027);
 
     private readonly Dictionary<Guid, UserInfo> _users = [];
     private bool _disposed;
@@ -56,6 +60,8 @@ public abstract class GrantsTestHarness : IDisposable
         Email = Substitute.For<IEmailService>();
         EmailFactory = TestGrantsEmails.Create();
         AuditLog = Substitute.For<IAuditLogService>();
+        Settings = Substitute.For<ISettingsService>();
+        Settings.GetAllEventSettingsAsync(Arg.Any<CancellationToken>()).Returns([Event2027]);
         Logger = new CapturingLogger<GrantService>();
     }
 
@@ -68,13 +74,14 @@ public abstract class GrantsTestHarness : IDisposable
     private protected IEmailService Email { get; }
     private protected GrantsEmails EmailFactory { get; }
     private protected IAuditLogService AuditLog { get; }
+    private protected ISettingsService Settings { get; }
     private protected CapturingLogger<GrantService> Logger { get; }
 
     private protected static CancellationToken Ct => Xunit.TestContext.Current.CancellationToken;
 
     /// <summary>The service over the real repository and the substitutes above.</summary>
     private protected GrantService NewService() => new(
-        new GrantRepository(DbFactory), Users, UserEmails, Notifications, Email, EmailFactory, AuditLog, Clock, Logger);
+        new GrantRepository(DbFactory), Users, UserEmails, Notifications, Email, EmailFactory, AuditLog, Settings, Clock, Logger);
 
     /// <summary>A fresh context over the same store — what a test reads back through.</summary>
     private protected GrantsDbContext OpenContext() => DbFactory.CreateDbContext();
@@ -82,17 +89,15 @@ public abstract class GrantsTestHarness : IDisposable
     /// <summary>Moves the clock so that "today" in Madrid is <paramref name="date"/>.</summary>
     private protected void SetToday(LocalDate date) => Clock.Reset(date.AtMidnight().InUtc().ToInstant().Plus(Duration.FromHours(12)));
 
-    // ── Seeders ───────────────────────────────────────────────────────────
-
     /// <summary>Registers a human the <see cref="IUserService"/> substitute knows by burner name.</summary>
     protected Guid SeedUser(string burnerName = "Test Human", Guid? id = null, string language = "en", IReadOnlyList<Guid>? mergedIds = null)
     {
         var userId = id ?? Guid.NewGuid();
         _users[userId] = new UserInfo(
             userId, burnerName, false, language, null, Instant.FromUtc(2026, 1, 1, 0, 0),
-            null, null, null, null, null, null, null,
+            null, null, null, null, null, null,
             null, null, null, [], [], [],
-            UserFixtures.Profile(burnerName: burnerName, membershipTier: LegacyMembershipTier.Volunteer), [])
+            UserFixtures.Profile(burnerName: burnerName), [])
         { MergedUserIds = mergedIds ?? [] };
         return userId;
     }

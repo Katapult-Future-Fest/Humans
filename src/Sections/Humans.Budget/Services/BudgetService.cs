@@ -1,18 +1,18 @@
 using System.Globalization;
+using System.Resources;
 using Humans.Base.Extensions;
 using Humans.Budget.Contracts;
 using Humans.Budget.Data;
 using Humans.Teams.Contracts;
 using Humans.Budget.Domain;
 using Humans.Gdpr.Contracts;
+using Humans.Finance.Contracts;
 using NodaTime;
 using Humans.Users.Contracts;
 
 namespace Humans.Budget.Services;
 
-/// <summary>
-/// Budget service. Cross-section reads (teams) via ITeamService. budget_audit_logs is append-only (§12).
-/// </summary>
+/// <summary>budget_audit_logs is append-only.</summary>
 internal sealed class BudgetService(
     IBudgetRepository repository,
     ITeamService teamService,
@@ -20,7 +20,9 @@ internal sealed class BudgetService(
     IClock clock,
     ILogger<BudgetService> logger) : IBudgetManagement, IUserDataContributor
 {
-    /// <summary>GDPR export JSON key for this contributor's data.</summary>
+    private static readonly ResourceManager Resources = new(typeof(BudgetResource));
+
+    /// <summary>GDPR export JSON key.</summary>
     internal const string BudgetAuditLog = "BudgetAuditLog";
 
     public async Task<IReadOnlyList<BudgetYearSummarySnapshot>> GetAllYearsAsync(bool includeArchived = false, CancellationToken ct = default)
@@ -162,41 +164,39 @@ internal sealed class BudgetService(
             Groups: []);
     }
 
-    public async Task UpdateYearStatusAsync(Guid yearId, BudgetYearStatus status, Guid actorUserId)
+    public async Task<BudgetYearMutationResult> UpdateYearStatusAsync(Guid yearId, BudgetYearStatus status, Guid actorUserId)
     {
         var now = clock.GetCurrentInstant();
 
-        var ok = await repository.UpdateYearStatusAsync(yearId, status, actorUserId, now);
-        if (!ok)
-            throw new InvalidOperationException($"Budget year {yearId} not found");
+        var result = await repository.UpdateYearStatusAsync(yearId, status, actorUserId, now);
+        if (!result.Succeeded) return result;
 
         logger.LogInformation(
             "Updated budget year {YearId} status to {NewStatus}",
             yearId, status);
+        return result;
     }
 
-    public async Task UpdateYearAsync(Guid yearId, string year, string name, string? vendorEventId, Guid actorUserId)
+    public async Task<BudgetYearMutationResult> UpdateYearAsync(Guid yearId, string year, string name, string? vendorEventId, Guid actorUserId)
     {
         var now = clock.GetCurrentInstant();
 
-        var ok = await repository.UpdateYearAsync(
+        var result = await repository.UpdateYearAsync(
             yearId, year, name, string.IsNullOrWhiteSpace(vendorEventId) ? null : vendorEventId.Trim(), actorUserId, now);
-        if (!ok)
-            throw new InvalidOperationException($"Budget year {yearId} not found");
+        return result;
     }
 
-    public async Task DeleteYearAsync(Guid yearId, Guid actorUserId)
+    public async Task<BudgetYearMutationResult> DeleteYearAsync(Guid yearId, Guid actorUserId)
     {
         var now = clock.GetCurrentInstant();
 
-        var ok = await repository.SoftDeleteYearAsync(yearId, actorUserId, now);
-        if (!ok)
-            throw new InvalidOperationException($"Budget year {yearId} not found");
+        var result = await repository.SoftDeleteYearAsync(yearId, actorUserId, now);
+        if (!result.Succeeded) return result;
 
         logger.LogInformation("Archived budget year {YearId}", yearId);
+        return result;
     }
 
-    // Resolve budgetable teams via Teams service (§2c).
     private async Task<List<BudgetableTeamRef>> GetBudgetableTeamsAsync() =>
         (await teamService.GetTeamsAsync()).Values
             .Where(t => t.IsActive && t.HasBudget)
@@ -363,10 +363,13 @@ internal sealed class BudgetService(
                     item.SortOrder))
                 .ToList());
 
-    public async Task<BudgetCategoryDetail> CreateCategoryAsync(
+    public async Task<BudgetSaveResult<BudgetCategoryDetail>> CreateCategoryAsync(
         Guid budgetGroupId, string name, decimal allocatedAmount,
         ExpenditureType expenditureType, Guid? teamId, Guid actorUserId)
     {
+        if (ValidateMoneyAmount(allocatedAmount) is { } refusal)
+            return new(Refusal: refusal);
+
         var now = clock.GetCurrentInstant();
 
         var category = await repository.CreateCategoryAsync(
@@ -375,19 +378,23 @@ internal sealed class BudgetService(
         logger.LogInformation(
             "Created budget category '{Name}' in group {GroupId}", name, budgetGroupId);
 
-        return ToCategoryDetail(category);
+        return new(ToCategoryDetail(category));
     }
 
-    public async Task UpdateCategoryAsync(
+    public async Task<BudgetSaveResult<BudgetCategoryDetail>> UpdateCategoryAsync(
         Guid categoryId, string name, decimal allocatedAmount,
         ExpenditureType expenditureType, Guid actorUserId)
     {
+        if (ValidateMoneyAmount(allocatedAmount) is { } refusal)
+            return new(Refusal: refusal);
+
         var now = clock.GetCurrentInstant();
 
         var ok = await repository.UpdateCategoryAsync(
             categoryId, name, allocatedAmount, expenditureType, actorUserId, now);
         if (!ok)
             throw new InvalidOperationException($"Budget category {categoryId} not found");
+        return new();
     }
 
     public async Task DeleteCategoryAsync(Guid categoryId, Guid actorUserId)
@@ -421,11 +428,14 @@ internal sealed class BudgetService(
             lineItem.IsCashflowOnly,
             lineItem.SortOrder);
 
-    public async Task<BudgetLineItemSnapshot> CreateLineItemAsync(
+    public async Task<BudgetSaveResult<BudgetLineItemSnapshot>> CreateLineItemAsync(
         Guid budgetCategoryId, string description, decimal amount,
         Guid? responsibleTeamId, string? notes, LocalDate? expectedDate,
         int vatRate, Guid actorUserId)
     {
+        if (ValidateMoneyAmount(amount) is { } refusal)
+            return new(Refusal: refusal);
+
         ValidateVatRate(vatRate);
 
         var now = clock.GetCurrentInstant();
@@ -445,14 +455,17 @@ internal sealed class BudgetService(
             "Created line item '{Description}' in category {CategoryId}",
             description, budgetCategoryId);
 
-        return ToLineItemSnapshot(lineItem);
+        return new(ToLineItemSnapshot(lineItem));
     }
 
-    public async Task UpdateLineItemAsync(
+    public async Task<BudgetSaveResult<BudgetLineItemSnapshot>> UpdateLineItemAsync(
         Guid lineItemId, string description, decimal amount,
         Guid? responsibleTeamId, string? notes, LocalDate? expectedDate,
         int vatRate, Guid actorUserId)
     {
+        if (ValidateMoneyAmount(amount) is { } refusal)
+            return new(Refusal: refusal);
+
         ValidateVatRate(vatRate);
 
         var now = clock.GetCurrentInstant();
@@ -469,6 +482,15 @@ internal sealed class BudgetService(
         var ok = await repository.UpdateLineItemAsync(update, actorUserId, now);
         if (!ok)
             throw new InvalidOperationException($"Budget line item {lineItemId} not found");
+        return new();
+    }
+
+    private static string? ValidateMoneyAmount(decimal amount)
+    {
+        const decimal maxAmount = 9_999_999_999_999_999.99m;
+        return amount < -maxAmount || amount > maxAmount || decimal.Round(amount, 2) != amount
+            ? "Amounts must fit within 16 whole digits and two decimal places."
+            : null;
     }
 
     private static void ValidateVatRate(int vatRate)
@@ -545,7 +567,7 @@ internal sealed class BudgetService(
             .Where(li => li.VatRate > 0 && li.ExpectedDate.HasValue)
             .Select(li => new
             {
-                VatAmount = ComputeVatPortion(li.Amount, li.VatRate),
+                VatAmount = VatCalculation.ComputePortion(li.Amount, li.VatRate),
                 IsExpense = li.Amount > 0 // Income generates VAT liability (expense).
             })
             .ToList();
@@ -561,50 +583,34 @@ internal sealed class BudgetService(
 
         var incomeCategories = groups
             .SelectMany(g => g.Categories)
-            .Select(c => new { c.Name, Total = c.LineItems.Where(li => li.Amount > 0 && !li.IsCashflowOnly).Sum(li => li.Amount) })
-            .Where(c => c.Total > 0)
-            .OrderByDescending(c => c.Total)
+            .Select(c => (c.Name, Amount: c.LineItems.Where(li => li.Amount > 0 && !li.IsCashflowOnly).Sum(li => li.Amount)))
+            .Where(c => c.Amount > 0)
+            .OrderByDescending(c => c.Amount)
             .ToList();
 
         if (vatCredits > 0)
-            incomeCategories.Add(new { Name = "VAT Credits", Total = vatCredits });
+            incomeCategories.Add((Resources.GetString("Budget_VatCredit", CultureInfo.CurrentUICulture)!, vatCredits));
 
-        var totalIncomeForSlices = incomeCategories.Sum(c => c.Total);
-        var incomeSlices = incomeCategories
-            .Select(c => new BudgetSliceResult
-            {
-                Name = c.Name,
-                Amount = c.Total,
-                Percentage = totalIncomeForSlices > 0 ? c.Total / totalIncomeForSlices * 100 : 0
-            })
-            .ToList();
+        var incomeSlices = BuildSlices(incomeCategories);
 
         var expenseCategories = groups
             .SelectMany(g => g.Categories)
-            .Select(c => new { c.Name, Total = Math.Abs(c.LineItems.Where(li => li.Amount < 0 && !li.IsCashflowOnly).Sum(li => li.Amount)) })
-            .Where(c => c.Total > 0)
-            .OrderByDescending(c => c.Total)
+            .Select(c => (c.Name, Amount: Math.Abs(c.LineItems.Where(li => li.Amount < 0 && !li.IsCashflowOnly).Sum(li => li.Amount))))
+            .Where(c => c.Amount > 0)
+            .OrderByDescending(c => c.Amount)
             .ToList();
 
         if (vatExpenses > 0)
-            expenseCategories.Add(new { Name = "VAT Liability", Total = vatExpenses });
+            expenseCategories.Add((Resources.GetString("Budget_VatLiability", CultureInfo.CurrentUICulture)!, vatExpenses));
 
         var profit = income + vatCredits - (Math.Abs(expenses) + vatExpenses);
         if (profit > 0)
         {
-            expenseCategories.Add(new { Name = "Cash Reserves (90%)", Total = profit * 0.9m });
-            expenseCategories.Add(new { Name = "Spanish Taxes (10%)", Total = profit * 0.1m });
+            expenseCategories.Add((Resources.GetString("Budget_CashReserves", CultureInfo.CurrentUICulture)!, profit * 0.9m));
+            expenseCategories.Add((Resources.GetString("Budget_SpanishTaxes", CultureInfo.CurrentUICulture)!, profit * 0.1m));
         }
 
-        var totalExpenseForSlices = expenseCategories.Sum(c => c.Total);
-        var expenseSlices = expenseCategories
-            .Select(c => new BudgetSliceResult
-            {
-                Name = c.Name,
-                Amount = c.Total,
-                Percentage = totalExpenseForSlices > 0 ? c.Total / totalExpenseForSlices * 100 : 0
-            })
-            .ToList();
+        var expenseSlices = BuildSlices(expenseCategories);
 
         return new BudgetSummaryResult
         {
@@ -621,12 +627,13 @@ internal sealed class BudgetService(
     {
         var summary = ComputeBudgetSummary(groups);
 
-        // Per-group buffer: allocated minus line-item total (negative = expense, positive = income).
+        // Allocated minus line-item total (negative = expense, positive = income).
         var groupBuffers = groups
             .Where(g => !g.IsTicketingGroup)
             .Select(g => new
             {
-                Name = $"{g.Name} Buffer",
+                Name = string.Format(CultureInfo.CurrentCulture,
+                    Resources.GetString("Budget_GroupBuffer", CultureInfo.CurrentUICulture)!, g.Name),
                 Raw = g.Categories.Sum(c =>
                     c.AllocatedAmount - c.LineItems.Where(li => !li.IsCashflowOnly).Sum(li => li.Amount))
             })
@@ -634,16 +641,14 @@ internal sealed class BudgetService(
             .ToList();
 
         var allExpenseEntries = summary.ExpenseSlices
-            .Select(s => new { s.Name, s.Amount })
-            .Concat(groupBuffers.Where(b => b.Raw < 0).Select(b => new { b.Name, Amount = Math.Abs(b.Raw) }))
+            .Select(s => (s.Name, s.Amount))
+            .Concat(groupBuffers.Where(b => b.Raw < 0).Select(b => (b.Name, Amount: Math.Abs(b.Raw))))
             .ToList();
-        var totalExpense = allExpenseEntries.Sum(s => s.Amount);
 
         var allIncomeEntries = summary.IncomeSlices
-            .Select(s => new { s.Name, s.Amount })
-            .Concat(groupBuffers.Where(b => b.Raw > 0).Select(b => new { b.Name, Amount = b.Raw }))
+            .Select(s => (s.Name, s.Amount))
+            .Concat(groupBuffers.Where(b => b.Raw > 0).Select(b => (b.Name, Amount: b.Raw)))
             .ToList();
-        var totalIncome = allIncomeEntries.Sum(s => s.Amount);
 
         return new BudgetSummaryResult
         {
@@ -651,48 +656,24 @@ internal sealed class BudgetService(
             TotalExpenses = summary.TotalExpenses,
             NetBalance = summary.NetBalance,
             TotalLineItems = summary.TotalLineItems,
-            IncomeSlices = allIncomeEntries
-                .Select(s => new BudgetSliceResult
-                {
-                    Name = s.Name,
-                    Amount = s.Amount,
-                    Percentage = totalIncome > 0 ? s.Amount / totalIncome * 100 : 0
-                })
-                .ToList(),
-            ExpenseSlices = allExpenseEntries
-                .Select(s => new BudgetSliceResult
-                {
-                    Name = s.Name,
-                    Amount = s.Amount,
-                    Percentage = totalExpense > 0 ? s.Amount / totalExpense * 100 : 0
-                })
-                .ToList()
+            IncomeSlices = BuildSlices(allIncomeEntries),
+            ExpenseSlices = BuildSlices(allExpenseEntries)
         };
     }
 
-    /// <summary>
-    /// The VAT portion of a VAT-inclusive amount: |amount| × rate / (100 + rate).
-    /// </summary>
-    internal static decimal ComputeVatPortion(decimal amount, int vatRate) =>
-        Math.Abs(amount) * vatRate / (100m + vatRate);
-
-    /// <summary>
-    /// Spanish quarterly VAT: settlement lands 45 days after the quarter-end of the
-    /// expected date.
-    /// </summary>
-    internal static LocalDate ComputeVatSettlementDate(LocalDate expectedDate)
+    private static IReadOnlyList<BudgetSliceResult> BuildSlices(
+        IReadOnlyCollection<(string Name, decimal Amount)> entries)
     {
-        var quarterEnd = expectedDate.Month switch
+        var total = entries.Sum(entry => entry.Amount);
+        return entries.Select(entry => new BudgetSliceResult
         {
-            >= 1 and <= 3 => new LocalDate(expectedDate.Year, 3, 31),
-            >= 4 and <= 6 => new LocalDate(expectedDate.Year, 6, 30),
-            >= 7 and <= 9 => new LocalDate(expectedDate.Year, 9, 30),
-            _ => new LocalDate(expectedDate.Year, 12, 31)
-        };
-        return quarterEnd.PlusDays(45);
+            Name = entry.Name,
+            Amount = entry.Amount,
+            Percentage = total > 0 ? entry.Amount / total * 100 : 0
+        }).ToList();
     }
 
-    // Projected-week materialization lives in repo to avoid projected-items-lag-one-sync.
+    // The repository materializes projected weeks, so they never lag one sync behind.
     public async Task<int> SyncTicketingActualsAsync(
         Guid budgetYearId,
         IReadOnlyList<TicketingWeeklyActuals> weeklyActuals,
@@ -770,7 +751,7 @@ internal sealed class BudgetService(
             .Select(item => (item.IsAutoGenerated, item.Description, item.Notes)));
     }
 
-    // Actual-tickets sum from auto-generated revenue notes "N tickets" (projected use "~N").
+    // From auto-generated revenue notes "N tickets" (projections use "~N").
     private static int SumActualTicketsSold(IEnumerable<(bool IsAutoGenerated, string Description, string? Notes)> items)
     {
         var total = 0;
@@ -797,9 +778,8 @@ internal sealed class BudgetService(
 
     public async Task<IReadOnlyList<UserDataSlice>> ContributeForUserAsync(Guid userId, CancellationToken ct)
     {
-        // GDPR export must include audit rows left on accounts merged into this one. The
-        // id list is the resolved record's: asked with an archived id, the survivor's own
-        // rows are theirs too.
+        // Include audit rows left on accounts merged into this one. Asked with an archived id, the survivor's rows
+        // count too.
         var allIds = (await userService.GetUserInfoAsync(userId, ct))?.AllUserIds ?? [userId];
         var entries = await repository.GetAuditLogEntriesForUserIdsAsync(allIds, ct);
 

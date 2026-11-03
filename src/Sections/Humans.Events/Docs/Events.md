@@ -47,6 +47,7 @@ Event programming: submission, moderation, browsing, export, and preference mana
 | CampId | Guid? | FK only → Camp (Camps section); null for individual submissions |
 | GuideSharedVenueId | Guid? | FK → EventVenue; nullable |
 | SubmitterUserId | Guid | FK only → User (Users section) |
+| EventSettingsId | Guid? | Bare id of Settings' `settings_event` row the entry belongs to; stamped from `EventGuideSettings.EventSettingsId` on submit and bulk import. Null only on rows older than the column, until the `events.event-ids` data migration assigns them |
 | StartAt | Instant | NodaTime; UTC |
 | DurationMinutes | int | 15–1440 on the individual and admin forms (1440 = the all-day encoding); 15–480 in 15-minute steps on the barrio form and bulk CSV |
 | IsRecurring | bool | |
@@ -140,7 +141,7 @@ Append-only audit log. DB-level: `OnDelete(DeleteBehavior.Restrict)` prevents ca
 | DayOffset | int? | Day offset (from gate opening) of the favourited occurrence of a recurring event. Null = whole event (every occurrence). Rows created before this column existed also mean "whole event". |
 | CreatedAt | Instant | |
 
-Unique constraint on (UserId, GuideEventId, DayOffset) with `NULLS NOT DISTINCT` (PG15+), so a user cannot hold two whole-event (null-day) favourites for the same event. A duplicate caught at insert returns the same already-favourited result as the initial lookup; unrelated persistence failures still propagate.
+Unique constraint on (UserId, GuideEventId, DayOffset) with `NULLS NOT DISTINCT` (PG15+), so a user cannot hold two whole-event (null-day) favourites for the same event. A duplicate caught at insert returns the same already-favourited result as the initial lookup; unrelated persistence failures still propagate. Favourite-button requests reject redirects: an onboarding, status or login page cannot masquerade as a successful save. A failed request keeps the heart and schedule row unchanged, shows the existing localized error and permits retry.
 
 Adding a favourite requires a currently approved event. A supplied day on a recurring event with authored recurrence days must match one of those offsets; invalid targets are rejected before persistence (API 404 for missing/unpublished events, 400 for invalid occurrence days). Null still favourites the whole event, and non-recurring events retain their day-ignoring expansion behavior.
 
@@ -160,8 +161,8 @@ Adding a favourite requires a currently approved event. A supplied day on a recu
 | Controller | Route prefix | Audience |
 |-----------|--------------|----------|
 | `EventsController` | `/Events/` | All active members |
-| `EventsController` (barrio actions) | `/Events/Barrio/{slug}/` | Camp Lead or Workshop Lead (per camp); CampAdmin / Admin globally |
-| `EventsController` (barrio bulk upload) | `/Events/Barrio/{slug}/BulkUpload` | Camp Lead or Workshop Lead (per camp); CampAdmin / Admin globally |
+| `EventsController` (barrio actions) | `/Events/Barrio/{slug}/` | Camp Lead or Workshop Lead (per camp); CampsAdmin / Admin globally |
+| `EventsController` (barrio bulk upload) | `/Events/Barrio/{slug}/BulkUpload` | Camp Lead or Workshop Lead (per camp); CampsAdmin / Admin globally |
 | `EventsModerationController` | `/Events/Moderate/` | EventsAdmin, Admin |
 | `EventsDashboardController` | `/Events/Dashboard/` | EventsAdmin, Admin |
 | `EventsExportController` | `/Events/Export/` | EventsAdmin, Admin |
@@ -175,12 +176,23 @@ Adding a favourite requires a currently approved event. A supplied day on a recu
 | Any active member | Browse approved events; submit individual events during open window; manage own favourites and category preferences; view own submissions |
 | Camp Lead or Workshop Lead | Submit and manage barrio events via `EventsController` (`/Events/Barrio/{slug}/*`), shown in their **My Submissions** page alongside personal submissions; authority resolved per request by `HumansCampControllerBase.ResolveCampEventManagementAsync` (Camps-owned; `CampOperationRequirement.SubmitEvent` over `CampInfo.IsEventManager`). Workshop Leads do NOT gain general camp-management authority. Can bulk-upload events via CSV at `/Events/Barrio/{slug}/BulkUpload` (US-26.10). |
 | EventsAdmin, Admin | All active member capabilities. Additionally: view moderation queue, approve/reject/request-resubmit events, **edit any event's fields in place from the moderation queue (any status; status preserved, no re-queue)**, view dashboard, download CSV export, print guide; manage guide settings (`/Settings#event-guide`), event categories, shared venues. The guide-settings tab, dashboard, and export reads propagate the browser abort token through their dependencies. |
+| Board | Read the moderation queue, dashboard, categories, venues and export page; change nothing and download no CSV (`EventsPolicies.Read`) |
 
 ## Invariants
 
+- The guide shows one event: `EventGuideSettings.EventSettingsId`. Submission lists, the barrio CSV's existing rows, approved events (and the approved-event cache), favourites, the moderation queue and counts, camp overlap checks, the dashboard and the guide export only include entries of that event, plus entries with no event id yet (`Event.IsInEvent`). Entries of other events are kept, never deleted, and still reach GDPR export and by-id owner/moderator lookups. Pointing the guide at another event rebuilds the approved cache.
+
+- Data migration `events.event-ids` (`/Debug/DataMigrations`) gives each unassigned entry the non-deleted Settings event whose build-start to strike-end window holds the entry's local start date, else the event with the nearest gate opening (earliest on a tie). It only writes rows still without an event id.
+
+- Approve, reject, request-edit and moderator-withdraw forms reject invalid model binding or validation with HTTP 400 after resolving the moderator, before event reads or writes. This includes the moderation reason’s 500-character limit.
+
+- Individual-event edit GET and POST share the event lookup, individual-route ownership check and editable-status refusal. Missing/camp events return 404 before ownership denial; non-owners require EventsAdmin/Admin, and non-editable events redirect with the existing message.
+
+- Guide settings and event forms share the section’s local-time conversion helper: configured zones use lenient DST resolution, and an unavailable zone treats local values as UTC. NodaTime inputs retain their sub-tick precision.
+
 - Category and venue create/edit forms require explicit active and display-order values; categories also require the sensitivity choice. Missing fields cannot reactivate an inactive entry, clear its sensitivity marker or reset its order. Explicit false and order zero remain valid, and form summaries display missing-field errors.
 
-- Personal, barrio and moderation authoring forms require explicit start time, duration and recurrence choices; personal and moderator individual forms also require the all-day choice. Moderator camp forms require the priority-rank field, with an explicit blank still clearing the rank. Missing fields refuse the save before event changes or persistence. Explicit midnight, 60-minute durations and false choices remain valid. Validation summaries show field errors even when an all-day toggle hides the timing inputs.
+- Personal, barrio and moderation authoring forms require explicit start date, start time, duration and recurrence choices; personal and moderator individual forms also require the all-day choice. Moderator camp forms require the priority-rank field, with an explicit blank still clearing the rank. Missing fields refuse the save before event changes or persistence. Start-date fields bind as `DateOnly`, so a submitted timestamp cannot add a hidden time component to the chosen start time. Start-time fields bind as `TimeOnly`: negative, multi-day and overflowing durations are invalid form input rather than offsets to the chosen date. Explicit midnight, late-night clock times, 60-minute durations and false choices remain valid. Validation summaries show field errors even when an all-day toggle hides the timing inputs.
 
 - Individual, barrio and moderation editor forms share live title/description character counters, using each input’s existing maximum length. Typing or clearing text updates the remaining count without changing the localized labels or server validation.
 
@@ -203,20 +215,21 @@ Adding a favourite requires a currently approved event. A supplied day on a recu
 
 - My Submissions, individual submit/edit forms, Schedule and Browse GETs preserve request cancellation through viewer, guide/burn settings, dropdown, submission, camp, favourite and submitter reads. Shared form helpers keep their default token for POST redisplays; event mutations and permission gates are unchanged.
 
-- Submissions are only accepted when `now >= EventGuideSettings.SubmissionOpenAt && now <= EventGuideSettings.SubmissionCloseAt`; `SubmitEventAsync` and `BulkImportAsync` refuse submissions outside it (the controller checks the same window first to show the closed-window message). `SubmitEventAsync` also performs the Draft→Pending `Submit` transition. Editing, resubmitting or withdrawing an existing individual or barrio event stays open after the window closes, by design: late corrections still reach a moderator.
+- Submissions are only accepted when `now >= EventGuideSettings.SubmissionOpenAt && now <= EventGuideSettings.SubmissionCloseAt`; `SubmitEventAsync` and `BulkImportAsync` refuse submissions outside it (the controller checks the same window first). If it closes after that check, both services return a refusal without writing or emailing; individual, barrio and CSV upload actions show the existing localized closed-window message rather than a server error. `SubmitEventAsync` also performs the Draft→Pending `Submit` transition. Editing, resubmitting or withdrawing an existing individual or barrio event stays open after the window closes, by design: late corrections still reach a moderator.
 - Personal calendar-feed descriptions reuse the Events host/category labels in the request UI culture, in all six languages; authored text, event data and iCal identifiers remain unchanged.
 - The individual and barrio submission forms render their field labels through `EventsResource` in every supported culture. Their required-field, length, and range validation messages use shared resources in all six cultures; validation limits are unchanged.
 - The My Submissions controller orders both personal and barrio event lists newest-submitted first; the service returns camp submission counts and event data without a display sort.
-- Submission and moderation lifecycle emails are best-effort after the event write commits. Submitter lookup, message preparation, and delivery failures are logged without turning the committed operation into a reported failure.
+- Submission and moderation lifecycle emails are best-effort after the event write commits. Submitter lookup, message preparation, and delivery failures are logged without turning the committed operation into a reported failure. After commit, submitter lookup and delivery are independent of request cancellation; the event write itself retains the caller’s token.
 - A moderation action (Approve/Reject/RequestEdit) may only be applied to a `Pending` event, and Reject/RequestEdit require a reason; `ApplyModerationAsync` returns either refusal as a `ModerationOutcome` and the controller maps it to its message; any other failure propagates.
 - An admin/moderator in-place edit (`EventsModerationController.Edit`/`Update` → `IEventManagement.AdminUpdateAsync`) may edit **any** event in **any** status and **preserves `Status`** — an Approved event stays Approved/published and is never re-queued to Pending (contrast `UpdateAndResubmitAsync`, the submitter path, which does re-queue). It appends an `Edited` `ModerationAction` (actor + optional note) and never changes the event's camp association or submitter.
 - `ModerationAction` records are never deleted or updated — `OnDelete(DeleteBehavior.Restrict)` prevents cascade; no Update paths exist in the repository.
+- Individual and barrio submissions and resubmissions require an existing active category, rechecked by the service before mutating the event. Individual submissions and resubmissions also require an existing active shared venue; barrio events use their camp location and require none. Refusals redisplay the form with entered content and a localized error on the affected selector; approved events remain approved and cached when an edit is refused. Internal save results identify the refused selector and distinguish selection refusals from a closed submission window. Moderator editing retains its all-category selection.
 - Category slugs are globally unique (unique constraint enforced at DB level; service validates before create/update).
 - `EventsApiController` is gated behind `EventsFeatureFilter` at class level and `[EnableCors("EventsApi")]`; the public endpoints allow unauthenticated access while `[Authorize] + [DisableCors]` endpoints are same-origin only.
 - Excluded category slugs stored in `EventPreference.ExcludedCategorySlugs` are validated against active categories before save. The API accepts mixed-case slugs; preference reads normalize them to the categories’ canonical lowercase form, and saves store lowercase slugs, so accepted exclusions work in both cached and database-backed browsing. Reading older mixed-case preferences never rewrites their rows.
 - Bulk CSV parsing and row-validation errors use the uploader’s UI culture, while column names and CSV syntax tokens remain unchanged. Invalid CSV values and quoting produce warnings without exception details; unexpected read or parser failures produce error logs with their exception, while the uploader sees generic feedback. Bulk CSV upload is all-or-nothing: if any row fails validation, no events are created or updated. Its bounded in-memory read stops when the request is aborted. Existing recurring events keep their authored day offsets when the CSV weekday selection is unchanged, even if other fields change; a changed recurrence selection is expanded across the event window. Rows with a non-empty `Id` update the matched camp event; rows with an empty `Id` create a new event. Both paths apply CSV columns through the same mapping, retaining existing identity and submitter fields on edits. Each existing-event `Id` may appear only once, so conflicting edits cannot silently overwrite each other, a category name must identify exactly one active category, and recurrence values must use `true`/`false` plus the documented weekday tokens. `Withdrawn` events cannot be modified via bulk upload.
 - `StartAt` is always stored as UTC `Instant`; timezone conversion is done at presentation layer using `EventGuideSettingsView.TimeZoneId`.
-- Bulk CSV validation requires the event start and end to fit years 0001–9999 in both UTC and the event timezone. Unsupported calendar values return localized row errors before any row is saved; valid dates outside the event window remain accepted.
+- All authoring forms and bulk CSV validation require the event start and end to fit years 0001–9999 in both UTC and the event timezone. Unsupported calendar values return form or localized row errors before any event is saved; valid dates outside the event window remain accepted.
 
 - Barrio submit/edit GETs and the CSV-template GET propagate browser cancellation through their camp/user authorization reads, guide/event settings, event lookup and form/template data. Writes begin only after the preflight reads finish.
 
@@ -227,7 +240,7 @@ Adding a favourite requires a currently approved event. A supplied day on a recu
 - A submitter **cannot** moderate their own event.
 - The public API (`/api/events/events`, `/api/events/barrios`, `/api/events/categories`) **cannot** return unapproved events.
 - Favourites and preferences endpoints **cannot** be accessed cross-origin (enforced by `[DisableCors]` on all `[Authorize]` API actions).
-- Barrio events **cannot** be submitted by a user who is not a Camp Lead, Workshop Lead, CampAdmin, or Admin for that camp.
+- Barrio events **cannot** be submitted by a user who is not a Camp Lead, Workshop Lead, CampsAdmin, or Admin for that camp.
 
 ## Triggers
 
@@ -239,6 +252,7 @@ Adding a favourite requires a currently approved event. A supplied day on a recu
 
 ## Cross-Section Dependencies
 
+- **Audit actions:** declared on `EventsAuditActions` (`src/Sections/Humans.Events/EventsAuditActions.cs`), one `AuditActionDefinition` each, written through `IAuditLogService`: `EventGuideExported`.
 - **Users**: controllers call `IUserService.GetUserInfoAsync(userId)` for submitter display names (email as fallback) — moderation actors render through `<vc:human>` from `ActorUserId`; the current user comes from `HumansControllerBase` over the same interface.
 - **Camps**: controllers call `ICampService.GetCampsForYearAsync(year)` to resolve camp display data per event. `Event.CampId` remains a bare FK column. Camp-event submission authority on `EventsController` barrio actions is sourced from `CampOperationRequirement.SubmitEvent` resource authorization (backed by `CampInfo.IsEventManager`) — the Lead OR Workshop OR-check that consumes `CampRoleAssignment` rows whose `CampRoleDefinition.SpecialRole` is `Lead` or `Workshop` (issue nobodies-collective/Humans#753). Moderation authority remains global (EventsAdmin / Admin) — no camp-scoped moderation.
 - **Camps and Profiles (downstream consumers):** the Camp detail page (`/Camps/{slug}`) renders the Events-owned `EventsCardViewComponent` (`src/Sections/Humans.Events/ViewComponents/EventsCardViewComponent.cs`) through Camps' `ICampPart` seam (`Section.cs` contributes `new CampPart(typeof(EventsCardViewComponent))`; Camps' `CampPartsViewComponent` invokes it by `Type` with `CampPartArgs(CampId)`, peterdrier/Humans#1815), which reads `IEventService` with the request-abort token to list the camp's approved events — title, category, description, schedule, venue, host — with per-row favourite hearts that toggle in place via the JSON favourites API (`POST /api/events/favourites/{eventId}`, no page reload). Events contributes the same component to profile pages through `IUserPart`; Users and Camps each compose their own descriptor and supply the target id, so neither view names Events. The component auto-hides when there are no approved events or the Events feature is off. Profile cards show only the user's personal (non-camp) submitted events — events submitted under a camp appear on the camp's page.

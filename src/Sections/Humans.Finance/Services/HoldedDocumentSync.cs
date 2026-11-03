@@ -8,7 +8,6 @@ using NodaTime;
 
 namespace Humans.Finance.Services;
 
-/// <summary>Refreshes Finance's purchase-document mirror and records the sync outcome.</summary>
 internal sealed class HoldedDocumentSync(
     IHoldedRepository repo,
     IHoldedClient client,
@@ -17,10 +16,9 @@ internal sealed class HoldedDocumentSync(
 {
     private static readonly DateTimeZone MadridZone = DateTimeZoneProviders.Tzdb["Europe/Madrid"];
 
-    /// <summary>Pulls every purchase document, matches it to a category and replaces the mirror.</summary>
-    /// <param name="checkDocs">Runs over the fetched documents before the mirror is written; the
-    /// facade's duplicate-document log. It must not throw.</param>
-    /// <param name="ct">Cancels the sync.</param>
+    /// <summary>Replaces the mirror.</summary>
+    /// <remarks><paramref name="checkDocs"/> runs over the fetched documents before the mirror is written. It must not
+    /// throw.</remarks>
     public async Task<HoldedSyncResult> SyncAsync(
         Func<IReadOnlyList<HoldedPurchaseDocListItemDto>, CancellationToken, Task> checkDocs,
         CancellationToken ct = default)
@@ -49,6 +47,8 @@ internal sealed class HoldedDocumentSync(
             var docs = allDocs.Select(doc => MapDoc(doc, entries, managedIds, now)).ToList();
 
             await checkDocs(allDocs, ct);
+
+            await FetchNotesAsync(docs, ct);
 
             await repo.ReplaceDocsAsync(docs, now, ct);
 
@@ -86,14 +86,59 @@ internal sealed class HoldedDocumentSync(
         }
     }
 
+    // The plan allows ~2,000 Holded calls a month: 50 a night is at most ~1,500, leaving the rest for the ledger sync,
+    // the list call and the pushes. A backlog drains over several nights.
+    private const int MaxNotesFetchesPerRun = 50;
+
+    /// <summary>
+    /// One GET per push-written document (description <c>ER: </c>) whose notes the mirror lacks, at most
+    /// <see cref="MaxNotesFetchesPerRun"/> a run; the rest keep theirs through the upsert. Other documents are never
+    /// fetched and keep null notes. A failed GET leaves the notes unknown for the next sync to retry and never fails
+    /// this one; a transient failure ends the run's fetching.
+    /// </summary>
+    private async Task FetchNotesAsync(IReadOnlyList<HoldedExpenseDoc> docs, CancellationToken ct)
+    {
+        var known = (await repo.GetAllDocsAsync(ct))
+            .Where(d => d.Notes is not null)
+            .Select(d => d.HoldedDocId)
+            .ToHashSet(StringComparer.Ordinal);
+        var candidates = docs
+            .Where(d => !known.Contains(d.HoldedDocId)
+                        && d.Description?.StartsWith(ExpenseRecon.DescriptionMarker, StringComparison.Ordinal) == true)
+            .Take(MaxNotesFetchesPerRun);
+        var failed = 0;
+        foreach (var doc in candidates)
+        {
+            try
+            {
+                doc.Notes = (await client.GetPurchaseDocumentAsync(doc.HoldedDocId, ct)).Notes?.Trim() ?? "";
+            }
+            catch (HoldedTransientException ex)
+            {
+                failed++;
+                logger.LogDebug(ex, "Holded purchase document {DocId} could not be read for its notes", doc.HoldedDocId);
+                break;
+            }
+            catch (Exception ex) when (ex is HoldedPermanentException or JsonException or InvalidOperationException)
+            {
+                failed++;
+                logger.LogDebug(ex, "Holded purchase document {DocId} could not be read for its notes", doc.HoldedDocId);
+            }
+        }
+        if (failed > 0)
+            logger.LogWarning(
+                "Holded document sync: notes unreadable for {Failed} purchase document(s); the next sync retries them.",
+                failed);
+    }
+
     private static HoldedExpenseDoc MapDoc(
         HoldedPurchaseDocListItemDto doc,
         HoldedMatchEntry[] entries,
         IReadOnlySet<string> managedIds,
         Instant now)
     {
-        // The whole doc goes on its FIRST line's account, with the union of doc and line tags:
-        // real purchase docs are single-line today. Line-level attribution is a later refinement.
+        // The whole doc goes on its FIRST line's account, with the union of doc and line tags: real purchase docs are
+        // single-line today.
         var bookedAccount = doc.Lines.Count > 0 ? doc.Lines[0].AccountId : null;
         var tags = doc.Tags
             .Concat(doc.Lines.SelectMany(l => l.Tags))
@@ -109,15 +154,15 @@ internal sealed class HoldedDocumentSync(
             HoldedDocId = doc.Id,
             DocNumber = doc.DocNumber,
             ContactName = doc.ContactName,
+            ContactId = string.IsNullOrEmpty(doc.ContactId) ? null : doc.ContactId,
             Description = string.IsNullOrWhiteSpace(doc.Description) ? null : doc.Description.Trim(),
             Date = localDate,
             Subtotal = doc.Subtotal,
             Tax = doc.Tax,
             Total = doc.Total,
             Currency = doc.Currency,
-            // Strict equality, not `!= true`: an absent `draft` field is treated as NOT approved —
-            // a silently-approved doc leaks into the budget actuals, an unmatched-approval one just
-            // stays a gap on the Unmatched queue.
+            // Strict equality: an absent `draft` is NOT approved. A wrongly approved doc leaks into the actuals; a
+            // wrongly unapproved one just stays on the Unmatched queue.
             IsApproved = doc.IsDraft == false,
             TagsJson = JsonSerializer.Serialize(tags),
             BookedAccountId = bookedAccount,

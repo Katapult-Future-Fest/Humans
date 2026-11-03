@@ -175,7 +175,7 @@ Every source today, and what it becomes. Audience is who the entry is published 
 | Board-vote meter | Governance | one per (application, board member) still to vote, since "awaiting *your* vote" is per person | `Role:Board`, with a single-member recipient set on each entry, so a Board membership refresh attributes to the role | voted or decided |
 | AccessSuspended | Users | one while suspended | `User` | unsuspended |
 | ReConsentRequired, LegalDocumentPublished, consents things-to-do | Governance | one per required consent outstanding | `User` | consent signed |
-| Consent-review meter, onboarding-pending meter | Users | one per profile awaiting review | `Role:ConsentCoordinator`, `Role:Board`, `Role:VolunteerCoordinator` | reviewed |
+| Consent-review meter, onboarding-pending meter | Users | one per profile awaiting review | `Role:ConsentCoordinator`, `Role:Board`, `Role:ShiftsAdmin` | reviewed |
 | Pending-deletions meter | Users | one per pending deletion | `Role:Admin` | deletion executed or cancelled |
 | SyncError, failed-sync meter | GoogleIntegration | one per failed sync event | `Role:Admin` | retried or discarded |
 | Ticket-sync meter | Tickets | one while in error state | `Role:Admin` | sync recovers |
@@ -208,15 +208,15 @@ These have no channel once the in-app row goes. The list is a recommendation Pet
 
 TeamMemberAdded (both branches; the member branch already emails), TeamJoinRequestDecided approve branch (already emails), ApplicationApproved, ApplicationRejected, ProfileRejected, FeedbackResponse, WorkspaceCredentialsReady, CampaignReceived (all already email), IssueComment (assignee sees it on the issue; the admin-comment email to the reporter stays), ShiftSignupChange (a coordinator's news about a signup; the consequence that matters is the coverage-gap entry), CampRoleAssigned, GoogleDriftDetected, FacilitatedMessageReceived (already emails), the three dead sources ConsentReviewNeeded, ApplicationSubmitted, VolunteerApproved, and the Users consent-check things-to-do entry (a status with no action for the member; the coordinator side is the consent-review row above).
 
-Every value of `NotificationSource` at the time of writing appears in exactly one of the three tables above. A source added between now and phase 4 gets a row before the switch lands.
+Every `NotificationSourceDefinition` declared at the time of writing appears in exactly one of the three tables above. A source added between now and phase 4 gets a row before the switch lands.
 
 ## What is deleted
 
 - Tables `notifications` and `notification_recipients`, `NotificationsDbContext`, its migrations and factory. The drop is its own PR after prod verification, per [`no-drops-until-prod-verified`](../../../../../memory/architecture/no-drops-until-prod-verified.md).
-- `INotificationEmitter`, `INotificationService`, `INotificationAutoResolve`, `INotificationRetention`, `NotificationSource`, `NotificationClass`, `NotificationPriority`, `NotificationSourceMapping`.
+- `INotificationEmitter`, `INotificationService`, `INotificationAutoResolve`, `INotificationRetention`, `NotificationSourceDefinition`, `NotificationSourceContributor`, `INotificationSourceContributor`, `NotificationSourceRegistry`, `NotificationClass`, `NotificationPriority`.
 - `NotificationService`, `NotificationEmitter`, `NotificationInboxService`, `NotificationMeterProvider`, `NotificationRepository`, `CleanupNotificationsJob`, the `IUserMerge` and `IUserDataContributor` participation (the board holds nothing to export; a merged or deleted user's entries go with the owning section's state and the next reconcile).
 - Controller routes Resolve, Dismiss, MarkRead, MarkAllRead, BulkResolve, BulkDismiss, ClickThrough, and the inbox views behind them.
-- `CacheKeys.NotificationBadgeCounts`, `NotificationMeterProvider.CountsCacheKey`.
+- `NotificationMeterProvider.CountsCacheKey`.
 - The 35 emitting call sites across Teams, Shifts, Issues, Camps, Auth, Governance, Feedback, Onboarding, Users, Campaigns, GoogleIntegration, Consent, Rideshare; the three auto-resolve call sites.
 - `ISectionThingsToDo` and its three implementations, `ThingsToDoViewComponent` in Base.
 - Users' `CommunicationPreference.InboxEnabled`: property override first, column drop in the same drop PR as the tables, per [`no-column-drops-for-decoupling`](../../../../../memory/architecture/no-column-drops-for-decoupling.md).

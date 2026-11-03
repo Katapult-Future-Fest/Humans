@@ -3,9 +3,6 @@ using NodaTime;
 
 namespace Humans.Events.Helpers;
 
-/// <summary>
-/// Shared NodaTime ↔ <see cref="DateTime"/> helpers for Events-section controllers.
-/// </summary>
 internal static class EventsTimeHelpers
 {
     public static DateTimeZone? GetTimeZone(EventSettingsInfo? burn)
@@ -16,10 +13,7 @@ internal static class EventsTimeHelpers
     public static DateTime ToLocalDateTime(Instant instant, DateTimeZone? tz)
         => tz == null ? instant.ToDateTimeUtc() : instant.InZone(tz).ToDateTimeUnspecified();
 
-    /// <summary>
-    /// The gate-relative day offset of an occurrence. Returns 0 when there is no
-    /// gate-opening date to measure from.
-    /// </summary>
+    /// <summary>0 when there is no gate-opening date to measure from.</summary>
     public static int ComputeDayOffset(Instant instant, LocalDate? gateOpeningDate, DateTimeZone? tz)
     {
         if (gateOpeningDate == null) return 0;
@@ -27,10 +21,27 @@ internal static class EventsTimeHelpers
         return Period.Between(gateOpeningDate.Value, eventDate, PeriodUnits.Days).Days;
     }
 
-    public static Instant ToInstant(DateTime dateTime, DateTimeZone? tz)
+    public static bool CanDisplaySchedule(LocalDateTime localStart, int durationMinutes, DateTimeZone? timeZone)
     {
-        if (tz == null)
-            return Instant.FromDateTimeUtc(DateTime.SpecifyKind(dateTime, DateTimeKind.Utc));
-        return LocalDateTime.FromDateTime(dateTime).InZoneLeniently(tz).ToInstant();
+        timeZone ??= DateTimeZone.Utc;
+        try
+        {
+            var start = localStart.InZoneLeniently(timeZone).ToInstant();
+            var end = start + Duration.FromMinutes(durationMinutes);
+            return start.InUtc().Year >= 1 && start.InZone(timeZone).Year >= 1
+                && end.InUtc().Year >= 1 && end.InZone(timeZone).Year >= 1;
+        }
+        catch (Exception ex) when (ex is OverflowException or ArgumentOutOfRangeException)
+        {
+            return false;
+        }
     }
+
+    public static Instant ToInstant(DateTime dateTime, DateTimeZone? tz)
+        => ToInstant(LocalDateTime.FromDateTime(dateTime), tz);
+
+    public static Instant ToInstant(LocalDateTime localDateTime, DateTimeZone? tz)
+        => tz == null
+            ? localDateTime.InUtc().ToInstant()
+            : localDateTime.InZoneLeniently(tz).ToInstant();
 }

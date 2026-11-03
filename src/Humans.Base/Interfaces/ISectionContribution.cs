@@ -6,18 +6,10 @@ namespace Humans.Base.Interfaces;
 /// registered as a singleton against every seam interface it implements.
 /// </summary>
 /// <remarks>
-/// Preferred shape: the section's <c>Section : ISection</c> entry point implements the seams
-/// it needs (memory/architecture/section-contribution-seams.md). A larger contribution may
-/// instead be a separate <c>internal sealed</c> stateless class with a parameterless
-/// constructor at the section project's root, named after the interface it implements —
-/// <c>SectionJobs : ISectionJobs</c>, <c>SectionNav : ISectionNav</c>. Internal on purpose:
-/// Shell finds them by reflection and no other section ever names one, so they are not part
-/// of the section's public surface. The bare name would collide with the section's same-named
-/// namespace (<c>class Jobs</c> in <c>Humans.Consent</c> against <c>Humans.Consent.Jobs</c>). Activated with <see cref="Activator"/>; per-request
-/// services are resolved from the <see cref="IServiceProvider"/> the descriptors' delegates
-/// receive.
-///
-/// Shell registers contributions by walking this marker, so a new seam costs Shell no edit:
-/// derive the seam interface from <see cref="ISectionContribution"/> and it is discovered.
+/// The section's <c>Section : ISection</c> implements the seams it needs as explicit interface implementations
+/// (<c>memory/architecture/section-contribution-seams.md</c>); there are no sibling <c>Section&lt;Seam&gt;</c>
+/// classes. Shell finds implementations by reflection. Per-request services come from the
+/// <see cref="IServiceProvider"/> the descriptors' delegates receive. A new seam interface deriving from this marker
+/// is discovered with no Shell edit.
 /// </remarks>
 public interface ISectionContribution;

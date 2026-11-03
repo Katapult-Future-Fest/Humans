@@ -11,11 +11,6 @@ using NodaTime;
 
 namespace Humans.Rideshare.Controllers;
 
-/// <summary>
-/// Member-facing Rideshare: the board, own offers/requests, and the interest lifecycle.
-/// Ownership and state rules live in <see cref="IRideshareService"/>; this only maps its
-/// error contract (404 / 403 / message) onto the response.
-/// </summary>
 [Authorize(Policy = PolicyNames.AppAccess)]
 [Route("Rideshare")]
 internal sealed class RideshareController(
@@ -25,22 +20,18 @@ internal sealed class RideshareController(
     IClock clock,
     ILogger<RideshareController> logger) : HumansControllerBase(users)
 {
-    // ── Board ─────────────────────────────────────────────────────────────
-
     [HttpGet("")]
     public async Task<IActionResult> Index(string? date, RideshareDirection? direction, CancellationToken ct)
     {
         var (error, user) = await ResolveCurrentUserOrChallengeAsync(ct);
         if (error is not null) return error;
 
-        var snapshot = await rideshare.GetSnapshotAsync(await rideshare.GetActiveYearAsync(ct), ct);
+        var snapshot = await rideshare.GetSnapshotAsync(await rideshare.GetActiveEventIdAsync(ct), ct);
         var dir = direction ?? RideshareDirection.Inbound;
         var day = RideshareDates.Parse(date) ?? BoardViewModel.DefaultDate(snapshot.Settings, dir, RideshareDates.Today(clock));
 
         return View(BoardViewModel.Build(snapshot, day, dir, user.Id));
     }
-
-    // ── Offers ────────────────────────────────────────────────────────────
 
     [HttpGet("Offer")]
     public async Task<IActionResult> Offer(Guid? id, RideshareDirection? direction, CancellationToken ct)
@@ -48,7 +39,7 @@ internal sealed class RideshareController(
         var (error, user) = await ResolveCurrentUserOrChallengeAsync(ct);
         if (error is not null) return error;
 
-        var snapshot = await rideshare.GetSnapshotAsync(await rideshare.GetActiveYearAsync(ct), ct);
+        var snapshot = await rideshare.GetSnapshotAsync(await rideshare.GetActiveEventIdAsync(ct), ct);
         if (id is null)
             return View(OfferFormViewModel.ForNew(user, direction ?? RideshareDirection.Inbound, snapshot.Settings, RideshareDates.Today(clock)));
 
@@ -76,7 +67,7 @@ internal sealed class RideshareController(
         return await SaveFormAsync(model, async () =>
         {
             if (model.Id is { } id) return await rideshare.UpdateOfferAsync(id, user.Id, save, ct);
-            else return await rideshare.CreateOfferAsync(user.Id, await rideshare.GetActiveYearAsync(ct), save, ct);
+            else return await rideshare.CreateOfferAsync(user.Id, await rideshare.GetActiveEventIdAsync(ct), save, ct);
         }, "Rideshare_OfferSaved");
     }
 
@@ -89,8 +80,6 @@ internal sealed class RideshareController(
         return await RunThenMineAsync(() => rideshare.CancelOfferAsync(id, user.Id, ct), "Rideshare_OfferCancelled");
     }
 
-    // ── Requests ──────────────────────────────────────────────────────────
-
     // Named RideRequest rather than Request: ControllerBase.Request is the HTTP request.
     [HttpGet("Request")]
     public async Task<IActionResult> RideRequest(Guid? id, RideshareDirection? direction, CancellationToken ct)
@@ -98,7 +87,7 @@ internal sealed class RideshareController(
         var (error, user) = await ResolveCurrentUserOrChallengeAsync(ct);
         if (error is not null) return error;
 
-        var snapshot = await rideshare.GetSnapshotAsync(await rideshare.GetActiveYearAsync(ct), ct);
+        var snapshot = await rideshare.GetSnapshotAsync(await rideshare.GetActiveEventIdAsync(ct), ct);
         if (id is null)
             return View(RequestFormViewModel.ForNew(user, direction ?? RideshareDirection.Inbound, snapshot.Settings, RideshareDates.Today(clock)));
 
@@ -126,7 +115,7 @@ internal sealed class RideshareController(
         return await SaveFormAsync(model, async () =>
         {
             if (model.Id is { } id) return await rideshare.UpdateRequestAsync(id, user.Id, save, ct);
-            else return await rideshare.CreateRequestAsync(user.Id, await rideshare.GetActiveYearAsync(ct), save, ct);
+            else return await rideshare.CreateRequestAsync(user.Id, await rideshare.GetActiveEventIdAsync(ct), save, ct);
         }, "Rideshare_RequestSaved");
     }
 
@@ -139,19 +128,15 @@ internal sealed class RideshareController(
         return await RunThenMineAsync(() => rideshare.CancelRequestAsync(id, user.Id, ct), "Rideshare_RequestCancelled");
     }
 
-    // ── Mine ──────────────────────────────────────────────────────────────
-
     [HttpGet("Mine")]
     public async Task<IActionResult> Mine(CancellationToken ct)
     {
         var (error, user) = await ResolveCurrentUserOrChallengeAsync(ct);
         if (error is not null) return error;
 
-        var snapshot = await rideshare.GetSnapshotAsync(await rideshare.GetActiveYearAsync(ct), ct);
+        var snapshot = await rideshare.GetSnapshotAsync(await rideshare.GetActiveEventIdAsync(ct), ct);
         return View(MineViewModel.Build(snapshot, user.Id));
     }
-
-    // ── Interests ─────────────────────────────────────────────────────────
 
     /// <summary>"I'm interested" (rider → trip) or "I can take you" (driver's trip → request pin).</summary>
     [HttpPost("Interest")]
@@ -205,8 +190,6 @@ internal sealed class RideshareController(
         if (error is not null) return error;
         return await RunThenMineAsync(() => rideshare.WithdrawInterestAsync(id, user.Id, ct), "Rideshare_InterestWithdrawn");
     }
-
-    // ── Error-contract mapping ────────────────────────────────────────────
 
     /// <summary>Redirect-style actions: 404 / 403 pass through, a rule becomes a localized error toast on Mine.</summary>
     private async Task<IActionResult> RunThenMineAsync(Func<Task<RideshareMutationResult>> action, string successKey)

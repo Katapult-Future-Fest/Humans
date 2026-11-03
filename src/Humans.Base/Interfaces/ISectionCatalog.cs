@@ -41,17 +41,23 @@ public sealed record SectionInfo(string Name, bool IsActive)
     /// <summary>Whether the section publishes a <c>Humans.&lt;Name&gt;.Contracts</c> surface — a leaf assembly beside it, or public types in its own <c>Contracts/</c> folder.</summary>
     public bool HasContracts { get; init; }
 
-    /// <summary>Whether the section carries its own <c>.resx</c> set (a public <c>&lt;Section&gt;Resource</c> marker).</summary>
-    public bool HasResources { get; init; }
+    /// <summary>
+    /// The section's public <c>&lt;Section&gt;Resource</c> marker, null when it carries no <c>.resx</c> set of its own.
+    /// A <see cref="Type"/> so <c>/Debug/Translations</c> can read every set through <c>IStringLocalizerFactory</c>
+    /// without referencing the sections.
+    /// </summary>
+    public Type? ResourceType { get; init; }
+
+    /// <summary>Whether the section carries its own <c>.resx</c> set.</summary>
+    public bool HasResources => ResourceType is not null;
 
     /// <summary>Facts other sections contributed about this one — guide page, agent doc key, issue queue.</summary>
     public IReadOnlyList<SectionAnnotation> Annotations { get; init; } = [];
 }
 
 /// <summary>
-/// The section list, published from DI at startup so nothing has to hand-maintain its own copy
-/// (nobodies-collective/Humans#1509). Shell composes it from the same dependency-graph walk that
-/// registers the sections, so it cannot drift from what the app actually runs.
+/// The section list, published from DI at startup so nothing hand-maintains its own copy. Composed from the same
+/// dependency-graph walk that registers the sections, so it cannot drift from what the app runs.
 /// </summary>
 /// <remarks>
 /// Registered as a singleton, so any service may inject it. It answers "is this a real section,

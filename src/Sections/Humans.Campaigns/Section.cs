@@ -1,33 +1,32 @@
+using Humans.Base.Authorization;
+using Humans.Base.Hosting;
 using Humans.Base.Interfaces;
-using Humans.Gdpr.Contracts;
+using Humans.Base.Models.Tables;
 using Humans.Campaigns.Contracts;
-using Humans.Email.Contracts;
 using Humans.Campaigns.Data;
 using Humans.Campaigns.Domain;
 using Humans.Campaigns.Services;
-using Humans.Base.Hosting;
-using Humans.Base.Models.Tables;
-using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.DependencyInjection;
+using Humans.Campaigns.ViewComponents;
+using Humans.Email.Contracts;
+using Humans.Gdpr.Contracts;
 using Humans.Users.Contracts;
+using Microsoft.Extensions.Configuration;
+using Humans.Notifications.Contracts;
+using Microsoft.Extensions.DependencyInjection;
+using Humans.AuditLog.Contracts;
 
 namespace Humans.Campaigns;
 
-/// <summary>
-/// Campaigns' DI entry point, at the project root by convention. Discovered by Shell —
-/// nothing names it, so it needs no section prefix. Plain Scoped service — no caching
-/// decorator; the admin pages are the only readers and they are not hot.
-/// </summary>
-public sealed class Section : ISection
+/// <summary>No caching decorator: the admin pages are the only readers and they are not hot.</summary>
+public sealed class Section : ISection, ISectionAdminNav, IUserPart
 {
     public void Register(IServiceCollection services, IConfiguration configuration)
     {
+        services.AddSingleton<IAuditActionContributor, CampaignsAuditActions>();
+        services.AddSingleton<INotificationSourceContributor, CampaignsNotificationSources>();
         services.AddSectionDbContext<CampaignsDbContext>(sentinelTable: "campaigns");
 
-        // Singleton + IDbContextFactory so the repository owns context lifetime.
         services.AddSingleton<ICampaignRepository, CampaignRepository>();
-        // Campaigns owns its email copy and its gallery samples; Email keeps the mechanics
-        // (memory/architecture/email-templates-live-in-sender.md).
         services.AddScoped<CampaignsEmails>();
         services.AddScoped<IEmailPreviewContributor, CampaignsEmailPreviews>();
 
@@ -35,13 +34,10 @@ public sealed class Section : ISection
         services.AddScoped<ICampaignManagement>(sp => sp.GetRequiredService<CampaignService>());
         services.AddScoped<ICampaignService>(sp => sp.GetRequiredService<CampaignService>());
         services.AddScoped<ICampaignWrite>(sp => sp.GetRequiredService<CampaignService>());
-        // Owns the user-scoped campaign_grants table → GDPR export contributor and
-        // account-merge fold participant.
         services.AddScoped<IUserDataContributor>(sp => sp.GetRequiredService<CampaignService>());
         services.AddScoped<IUserMerge>(sp => sp.GetRequiredService<CampaignService>());
 
-        // Section-owned badge colours: Base cannot name an internal CampaignStatus
-        // (memory/architecture/base-ui-registries-are-section-populated.md).
+        // Base cannot name an internal CampaignStatus, so the section registers its badge colours.
         EnumBadgeMap.Register(new Dictionary<Enum, string>
         {
             [CampaignStatus.Draft] = "bg-secondary",
@@ -49,4 +45,17 @@ public sealed class Section : ISection
             [CampaignStatus.Completed] = "bg-info",
         });
     }
+
+    IEnumerable<AdminNavGroup> ISectionAdminNav.Groups() =>
+    [
+        new("Campaigns", [
+            new("Campaigns", "Campaign", "Index", null, null, "fa-solid fa-bullhorn", PolicyNames.AdminOnly)
+        ])
+    ];
+
+    IEnumerable<UserPart> IUserPart.Parts() =>
+    [
+        new(UserPartSlots.Profile, typeof(MyCodesViewComponent), Weight: 100),
+        new(UserPartSlots.AdminDetail, typeof(CampaignCodesViewComponent), Weight: 100),
+    ];
 }

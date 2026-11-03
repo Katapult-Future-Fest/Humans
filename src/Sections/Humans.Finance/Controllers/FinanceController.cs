@@ -13,12 +13,8 @@ using Humans.Users.Contracts;
 
 namespace Humans.Finance.Controllers;
 
-/// <summary>
-/// Finance's own pages: the Holded connector, account provisioning, the unmatched-document queue,
-/// creditor accounts, SEPA payouts and cash flow. Budget's admin surface shares the <c>Finance</c>
-/// route prefix from its own <c>BudgetAdminController</c>.
-/// </summary>
-[Authorize(Policy = PolicyNames.FinanceAdminOrAdmin)]
+/// <summary>Budget's <c>BudgetAdminController</c> shares the <c>Finance</c> route prefix.</summary>
+[Authorize(Policy = FinancePolicies.Read)]
 [Route("Finance")]
 internal sealed class FinanceController(
     IUserService userService,
@@ -26,6 +22,7 @@ internal sealed class FinanceController(
     IHoldedFinanceAdminService holdedConnector,
     IExpenseReportService expenseReports,
     CashFlowService cashFlow,
+    CreditorMatchService creditorMatches,
     ILogger<FinanceController> logger) : HumansControllerBase(userService)
 {
     [HttpGet("CashFlow")]
@@ -42,13 +39,10 @@ internal sealed class FinanceController(
             logger.LogError(ex, "Error loading cash flow view");
             SetError("Failed to load cash flow data.");
         }
-        // The budget overview at /Finance, served by Budget's BudgetAdminController.
         return RedirectToAction("Index", "BudgetAdmin");
     }
 
-    /// <summary>The connector index: what Finance's half of the Holded integration is doing, and a
-    /// way into every screen that already covers a piece of it. Cache reads only — see
-    /// <see cref="IHoldedFinanceAdminService.GetConnectorOverviewAsync"/>.</summary>
+    /// <summary>Cache reads only.</summary>
     [HttpGet("Holded")]
     public async Task<IActionResult> Holded(CancellationToken ct)
         => View(await holdedConnector.GetConnectorOverviewAsync(ct));
@@ -62,6 +56,7 @@ internal sealed class FinanceController(
     }
 
     [HttpPost("HoldedAccounts/Provision")]
+    [Authorize(Policy = FinancePolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> ProvisionHoldedAccounts([BindRequired] int blockStart, [BindRequired] bool addAll)
     {
@@ -91,7 +86,9 @@ internal sealed class FinanceController(
     [HttpGet("Creditors")]
     public async Task<IActionResult> Creditors(string? sort, string? dir)
     {
+        if (GetCurrentUserId() is not { } viewerUserId) return Challenge();
         var (rows, unresolved) = await holdedFinance.ListCreditorAccountsAsync(HttpContext.RequestAborted);
+        var matches = await creditorMatches.GetForMemberAccountsAsync(rows, viewerUserId, HttpContext.RequestAborted);
 
         var names = new Dictionary<Guid, string>();
         var boundIds = rows.SelectMany(r => r.Bindings).Select(b => b.UserId)
@@ -101,8 +98,8 @@ internal sealed class FinanceController(
             foreach (var kv in await UserService.GetUserInfosAsync(boundIds, HttpContext.RequestAborted))
                 names[kv.Key] = kv.Value.BurnerName;
 
-        // The page shows one balance, inverted so a positive figure is money owed to the member.
-        // Only the display flips: the contract row keeps Holded's Σdebit − Σcredit.
+        // Display only: shown inverted, so positive is owed to the member. The contract row keeps Holded's
+        // Σdebit − Σcredit.
         var vms = rows
             .Select(r => new CreditorAccountRowVm(
                 r.SupplierAccountNum, r.Name, r.Balance is { } bal ? -bal : null,
@@ -113,7 +110,8 @@ internal sealed class FinanceController(
                 r.IbanMasked,
                 r.OpenDocumentCount,
                 r.PendingPayoutFileName,
-                r.HasDuplicateDocuments))
+                r.HasDuplicateDocuments,
+                matches.GetValueOrDefault(r.SupplierAccountNum)))
             .ToList();
 
         var sortBy = sort is "name" or "balance" or "member" or "opendocs" ? sort : "account";
@@ -127,13 +125,21 @@ internal sealed class FinanceController(
                 b.Source.ToString()))
             .ToList();
 
+        var recon = await holdedFinance.GetExpenseReconAsync(null, HttpContext.RequestAborted);
         return View(new CreditorsPageVm(
-            accounts, unresolvedVm, sortBy, sortDir, holdedConnector.GetSepaPayoutSettings()));
+            accounts, unresolvedVm, sortBy, sortDir, holdedConnector.GetSepaPayoutSettings(),
+            recon.IsAvailable ? recon.Totals.Problems : null, recon.Totals.Warnings));
     }
 
-    /// <summary>Streams a pain.001.001.09 credit-transfer file for the ticked rows. All-or-nothing:
-    /// a single bad amount refuses the whole batch, so the treasurer never uploads a half batch.</summary>
+    /// <summary>Local mirrors only; fixes stay on the pages it links to.</summary>
+    [HttpGet("ExpenseRecon")]
+    public async Task<IActionResult> ExpenseRecon(int? year, CancellationToken ct)
+        => View(await holdedFinance.GetExpenseReconAsync(year, ct));
+
+    /// <summary>Streams a pain.001.001.09 file. All-or-nothing: one bad amount refuses the batch, so the treasurer
+    /// never uploads half of one.</summary>
     [HttpPost("Sepa/Generate")]
+    [Authorize(Policy = FinancePolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> GenerateSepa(
         int[] selected, Dictionary<int, string> amounts, string maxPerTransfer, CancellationToken ct)
@@ -145,8 +151,8 @@ internal sealed class FinanceController(
             return BadRequest(ModelState);
         }
 
-        // Posted per batch, same invariant-parse reasoning as the amounts below: the posted value is
-        // authoritative, the config key (Sepa:MaxPayoutPerTransfer) is only the prefill default.
+        // Parsed invariantly like the amounts below. The posted value is authoritative; Sepa:MaxPayoutPerTransfer is
+        // only the prefill.
         if (!decimal.TryParse(maxPerTransfer, NumberStyles.Number, CultureInfo.InvariantCulture, out var cap)
             || cap <= 0m)
         {
@@ -154,10 +160,9 @@ internal sealed class FinanceController(
             return RedirectToAction(nameof(Creditors));
         }
 
-        // A checkbox posts only when ticked, so `selected` is the batch; the amount box next to it
-        // is keyed by the same account number. Parsed invariantly and not by model binding, which
-        // uses the request culture: `<input type="number">` always posts "12.34", and a comma-decimal
-        // culture would read that as 1234. A missing or unparseable amount stays 0 and is refused.
+        // A checkbox posts only when ticked, so `selected` is the batch, keyed like the amount boxes. Parsed
+        // invariantly, not model-bound: `<input type="number">` posts "12.34", which a comma-decimal culture reads as
+        // 1234. A missing or unparseable amount stays 0 and is refused.
         var picked = selected
             .Select(num => new SepaPayoutSelection(
                 num,
@@ -177,8 +182,7 @@ internal sealed class FinanceController(
         return File(Encoding.UTF8.GetBytes(result.Xml!), "application/xml", result.FileName!);
     }
 
-    /// <summary>Generated payout files and their transfers, newest file first, with the booking
-    /// state of each transfer.</summary>
+    /// <summary>Newest file first.</summary>
     [HttpGet("Sepa")]
     public async Task<IActionResult> Sepa(
         CancellationToken ct, int days = IHoldedFinanceAdminService.DefaultSepaMatchToleranceDays)
@@ -197,7 +201,6 @@ internal sealed class FinanceController(
         string Name(Guid? id) =>
             id is { } g && names.TryGetValue(g, out var nm) ? nm : id?.ToString() ?? "—";
 
-        // Display grouping and ordering: newest file first, transfers by creditor account within it.
         var files = rows
             .GroupBy(r => r.FileId)
             .Select(g => new SepaPayoutFileVm(
@@ -216,10 +219,10 @@ internal sealed class FinanceController(
         return View(new SepaPayoutsPageVm(files, unavailable, unmatched, bankFeedError, days));
     }
 
-    /// <summary>Books one transfer against the Sabadell line it was paired with on the page. No
-    /// <c>CancellationToken</c> reaches the service: a booking that has posted a payment must finish
+    /// <summary>No <c>CancellationToken</c> reaches the service: a booking that has posted a payment must finish
     /// even if the admin closes the tab.</summary>
     [HttpPost("Sepa/Book")]
+    [Authorize(Policy = FinancePolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> BookSepaTransfer(
         Guid transferId, string bankMovementId,
@@ -233,9 +236,9 @@ internal sealed class FinanceController(
         return RedirectToAction(nameof(Sepa), new { days });
     }
 
-    /// <summary>Withdraws a transfer the bank cancelled by hand before execution — the Withdraw
-    /// button on an unbooked row.</summary>
+    /// <summary>For a transfer the bank cancelled by hand before execution.</summary>
     [HttpPost("Sepa/Withdraw")]
+    [Authorize(Policy = FinancePolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> WithdrawSepaTransfer(
         Guid transferId, int days = IHoldedFinanceAdminService.DefaultSepaMatchToleranceDays)
@@ -248,8 +251,7 @@ internal sealed class FinanceController(
         return RedirectToAction(nameof(Sepa), new { days });
     }
 
-    /// <summary>The duplicate-document dry run: what Apply would delete, and why some of it is a
-    /// human's. Live Holded reads; nothing is written.</summary>
+    /// <summary>Dry run from live Holded reads; nothing is written.</summary>
     [HttpGet("HoldedDuplicates")]
     public async Task<IActionResult> HoldedDuplicates(CancellationToken ct)
     {
@@ -258,9 +260,9 @@ internal sealed class FinanceController(
         return View(plan);
     }
 
-    /// <summary>Deletes the duplicates and renders what happened. No <c>CancellationToken</c>: a run
-    /// that has deleted one document finishes the rest.</summary>
+    /// <summary>No <c>CancellationToken</c>: a run that has deleted one document finishes the rest.</summary>
     [HttpPost("HoldedDuplicates/Apply")]
+    [Authorize(Policy = FinancePolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> ApplyHoldedDuplicates()
     {
@@ -281,9 +283,10 @@ internal sealed class FinanceController(
         return names;
     }
 
-    /// <summary>Books a whole file against the one Sabadell line the bank debited it as — the
-    /// Process button. No <c>CancellationToken</c>, as for a single booking.</summary>
+    /// <summary>Books a whole file against the one Sabadell line the bank debited it as. No
+    /// <c>CancellationToken</c>, as for a single booking.</summary>
     [HttpPost("Sepa/BookFile")]
+    [Authorize(Policy = FinancePolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> BookSepaFile(
         Guid fileId, string bankMovementId,
@@ -297,10 +300,10 @@ internal sealed class FinanceController(
         return RedirectToAction(nameof(Sepa), new { days });
     }
 
-    /// <summary>Approves a file whose every unbooked transfer is matched to its own Sabadell line,
-    /// booking them all — the Book file button. No <c>CancellationToken</c>, as for a single
-    /// booking.</summary>
+    /// <summary>For a file whose every unbooked transfer is matched to its own Sabadell line. No
+    /// <c>CancellationToken</c>, as for a single booking.</summary>
     [HttpPost("Sepa/BookMatches")]
+    [Authorize(Policy = FinancePolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> BookSepaFileMatches(
         Guid fileId, int days = IHoldedFinanceAdminService.DefaultSepaMatchToleranceDays)
@@ -313,8 +316,7 @@ internal sealed class FinanceController(
         return RedirectToAction(nameof(Sepa), new { days });
     }
 
-    /// <summary>Every column on /Finance/Creditors is sortable; ties resolve on the account number
-    /// so the order is stable across reloads.</summary>
+    /// <summary>Ties resolve on the account number so the order is stable across reloads.</summary>
     private static List<CreditorAccountRowVm> SortCreditorRows(
         IReadOnlyList<CreditorAccountRowVm> rows, string sortBy, string sortDir)
     {
@@ -340,15 +342,14 @@ internal sealed class FinanceController(
         var ledger = await holdedFinance.GetCreditorLedgerAsync(accountNum, HttpContext.RequestAborted);
         if (ledger is null) return NotFound();
 
-        // The finance-admin review queue is every submitted report; the ones booked to this
-        // supplier account are the other side of the ledger, newest approval first.
+        // The finance-admin review queue is every submitted report; the ones booked to this account are the other
+        // side of the ledger.
         var reports = (await expenseReports.GetReviewQueueAsync(viewerUserId, isFinanceAdmin: true, HttpContext.RequestAborted))
             .Where(r => r.HoldedSupplierAccountNum == accountNum)
             .OrderByDescending(r => r.ApprovedAt ?? r.SubmittedAt ?? r.CreatedAt)
             .ToList();
 
-        // The running balance is the service's (CreditorLedgerLine.RunningBalance); the page
-        // shows newest activity first, lines within an entry in order.
+        // The running balance is the service's; the page shows newest activity first.
         var memberName = string.IsNullOrWhiteSpace(ledger.Contact?.Name) ? "member" : ledger.Contact.Name;
         var lines = ledger.Lines
             .Select(l => new CreditorStatementLineVm(l, l.RunningBalance, StatementDescription(l, memberName)))
@@ -356,11 +357,11 @@ internal sealed class FinanceController(
             .ThenByDescending(r => r.Line.EntryNumber)
             .ThenBy(r => r.Line.Line)
             .ToList();
-        return View(new CreditorStatementVm(ledger, lines, reports));
+        var match = await creditorMatches.GetAsync(accountNum, viewerUserId, HttpContext.RequestAborted);
+        return View(new CreditorStatementVm(ledger, lines, reports, match));
     }
 
-    // Holded labels a payment with the purchase it settles; shown that way, a payment reads like a
-    // second purchase. A payment shows as money moving between the association and the member.
+    // Holded labels a payment with the purchase it settles, which reads like a second purchase.
     private static string? StatementDescription(CreditorLedgerLine line, string memberName)
     {
         if (!string.Equals(line.Type, "payment", StringComparison.OrdinalIgnoreCase))
@@ -371,6 +372,7 @@ internal sealed class FinanceController(
     }
 
     [HttpPost("Creditors/Bind")]
+    [Authorize(Policy = FinancePolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> BindCreditor(Guid userId, int supplierAccountNum, string? returnUrl)
     {
@@ -395,6 +397,7 @@ internal sealed class FinanceController(
     }
 
     [HttpPost("Creditors/Unbind")]
+    [Authorize(Policy = FinancePolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> UnbindCreditor(Guid userId, string? returnUrl)
     {
@@ -418,6 +421,7 @@ internal sealed class FinanceController(
     }
 
     [HttpPost("HoldedSync/Run")]
+    [Authorize(Policy = FinancePolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> RunHoldedSync()
     {

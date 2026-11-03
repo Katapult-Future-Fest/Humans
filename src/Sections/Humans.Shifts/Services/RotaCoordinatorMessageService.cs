@@ -10,10 +10,7 @@ using Humans.Users.Contracts;
 
 namespace Humans.Shifts.Services;
 
-/// <summary>
-/// Groups active signups by user and requests one personalised email per recipient via Email.
-/// One audit row per dispatch (recipient rows are auditable through the outbox).
-/// </summary>
+/// <summary>One audit row per dispatch; the recipient rows are auditable through the outbox.</summary>
 internal sealed class RotaCoordinatorMessageService(
     IShiftManagementRepository repo,
     ITeamService teamService,
@@ -59,15 +56,14 @@ internal sealed class RotaCoordinatorMessageService(
         var summary = await DispatchToRecipientsAsync(
             groups,
             buildRequest: (recipient, shiftGroups, language) => new CoordinatorRotaMessageRequest(
+                RecipientUserId: recipient.Id,
                 RecipientEmail: recipient.Email!,
                 RecipientName: recipient.BurnerName,
                 SenderName: sender.BurnerName,
                 SenderEmail: sender.Email,
                 RotaName: rota.Name,
                 MessageText: messageText,
-                // Per-rota body keeps the flat shift-list shape; there is exactly
-                // one group in this path so the flatten is trivial — and none at
-                // all when the coordinator left the shift list out.
+                // One rota, so exactly one group, or none when the coordinator left the shift list out.
                 ShiftLines: shiftGroups.Count == 0 ? [] : shiftGroups[0].ShiftLines,
                 IncludeShifts: includeShifts,
                 Culture: language),
@@ -76,23 +72,15 @@ internal sealed class RotaCoordinatorMessageService(
             includeShifts,
             ct);
 
-        var auditSuffix = string.Empty;
-        if (summary.Skipped > 0) auditSuffix += $" ({summary.Skipped} skipped: no email or missing user)";
-        if (summary.Failed > 0) auditSuffix += $" ({summary.Failed} failed: enqueue error)";
-
-        await auditLogService.LogAsync(
-            AuditAction.CoordinatorRotaMessageSent,
+        await AuditDispatchAsync(
+            ShiftsAuditActions.CoordinatorRotaMessageSent,
             nameof(Rota), rota.Id,
             $"Requested rota message '{Truncate(messageText, 120)}' for {summary.Requested} recipient(s) on '{rota.Name}'"
-                + auditSuffix,
-            senderUserId);
+                + summary.AuditSuffix,
+            senderUserId, summary.Requested);
 
-        // Total-failure path: every enqueue threw. Audit row already records
-        // the failures; surface a Failure result so the controller does not
-        // render a misleading successful-request toast.
-        if (summary.Requested == 0 && summary.Failed > 0)
-            return RotaMessageDispatchResult.Failure(
-                $"Failed to enqueue any emails ({summary.Failed} enqueue error(s)); check server logs.");
+        if (summary.FailureMessage is { } failure)
+            return RotaMessageDispatchResult.Failure(failure);
 
         return RotaMessageDispatchResult.Success(summary.Requested, rota.Name);
     }
@@ -125,6 +113,7 @@ internal sealed class RotaCoordinatorMessageService(
         var summary = await DispatchToRecipientsAsync(
             groups,
             buildRequest: (recipient, shiftGroups, language) => new CoordinatorTeamRotasMessageRequest(
+                RecipientUserId: recipient.Id,
                 RecipientEmail: recipient.Email!,
                 RecipientName: recipient.BurnerName,
                 SenderName: sender.BurnerName,
@@ -139,24 +128,35 @@ internal sealed class RotaCoordinatorMessageService(
             includeShifts,
             ct);
 
-        var auditSuffix = string.Empty;
-        if (summary.Skipped > 0) auditSuffix += $" ({summary.Skipped} skipped: no email or missing user)";
-        if (summary.Failed > 0) auditSuffix += $" ({summary.Failed} failed: enqueue error)";
-
-        await auditLogService.LogAsync(
-            AuditAction.CoordinatorTeamRotasMessageSent,
-            // "Team" persisted literal — see memory/code/type-name-as-persisted-string.md.
+        await AuditDispatchAsync(
+            ShiftsAuditActions.CoordinatorTeamRotasMessageSent,
+            // Persisted literal: memory/code/type-name-as-persisted-string.md.
             "Team", teamId,
             $"Requested team-wide rota message '{Truncate(messageText, 120)}' for {summary.Requested} recipient(s) "
                 + $"across {groups.Count} rota(s) in '{team.Name}'"
-                + auditSuffix,
-            senderUserId);
+                + summary.AuditSuffix,
+            senderUserId, summary.Requested);
 
-        if (summary.Requested == 0 && summary.Failed > 0)
-            return TeamRotasMessageDispatchResult.Failure(
-                $"Failed to enqueue any emails ({summary.Failed} enqueue error(s)); check server logs.");
+        if (summary.FailureMessage is { } failure)
+            return TeamRotasMessageDispatchResult.Failure(failure);
 
         return TeamRotasMessageDispatchResult.Success(summary.Requested, groups.Count, team.Name);
+    }
+
+    private async Task AuditDispatchAsync(
+        AuditActionDefinition action, string entityType, Guid entityId, string description, Guid actorUserId, int requested)
+    {
+        try
+        {
+            await auditLogService.LogAsync(action, entityType, entityId, description, actorUserId);
+        }
+        catch (Exception ex) when (requested > 0)
+        {
+            // Retrying the dispatch would duplicate email requests already accepted by the outbox.
+            logger.LogCritical(ex,
+                "Coordinator message audit failed after {RequestedCount} successful email requests: {Action} on {EntityType} {EntityId}, sender {SenderUserId}",
+                requested, action, entityType, entityId, actorUserId);
+        }
     }
 
     public async Task<TeamRotasRecipientPreview> GetTeamRotasRecipientPreviewAsync(
@@ -189,20 +189,14 @@ internal sealed class RotaCoordinatorMessageService(
     }
 
     /// <summary>
-    /// Loads the team's rotas in the active event that <paramref name="filter"/>
-    /// admits, paired with their active (Pending/Confirmed) signups. Under the
-    /// default upcoming filter a rota is included if any of its shifts has not yet
-    /// ended (so events mid-flight still count); otherwise the rota's period decides.
-    /// Returns an empty list if no active event, the team has no rotas in it, or no
-    /// admitted rota has active signups.
+    /// Under the default upcoming filter a rota counts while any of its shifts has not ended, so events mid-flight
+    /// still count; otherwise the rota's period decides. Rotas with no active signups are left out.
     /// </summary>
     private async Task<IReadOnlyList<RotaSignupGroup>> BuildTeamRotaGroupsAsync(
         Guid teamId,
         TeamRotasAudienceFilter filter,
         CancellationToken ct)
     {
-        // "Active" is Settings' notion (nobodies-collective/Humans#1631) — resolve the
-        // calendar once, from the active id, rather than via a Shifts-local lookup.
         var calendar = await calendarResolver.GetActiveAsync(ct);
         if (calendar is null) return [];
 
@@ -248,11 +242,8 @@ internal sealed class RotaCoordinatorMessageService(
             .ToList();
 
     /// <summary>
-    /// Generic per-recipient dispatch loop shared by the per-rota and team-level
-    /// paths. Groups signups by user (dedupe across rotas), looks up recipients,
-    /// builds per-recipient shift-group lists in each rota's timezone, then
-    /// invokes the caller's <paramref name="buildRequest"/> + <paramref name="enqueue"/>.
-    /// Per-recipient failures isolated; aggregate counts returned for audit.
+    /// Shared by the per-rota and team paths: dedupes signups by user across rotas, formats each rota in its own
+    /// timezone, and isolates per-recipient failures.
     /// </summary>
     private async Task<DispatchSummary> DispatchToRecipientsAsync<TRequest>(
         IReadOnlyList<RotaSignupGroup> rotaGroups,
@@ -262,7 +253,6 @@ internal sealed class RotaCoordinatorMessageService(
         bool includeShifts,
         CancellationToken ct)
     {
-        // userId -> list of (group, signup) so we can later partition per recipient per rota.
         var byUser = new Dictionary<Guid, List<(RotaSignupGroup Group, ShiftSignup Signup)>>();
         foreach (var group in rotaGroups)
         {
@@ -308,9 +298,7 @@ internal sealed class RotaCoordinatorMessageService(
                 continue;
             }
 
-            // Nothing to format when the coordinator left the shift list out —
-            // the template drops the whole section rather than printing a lead-in
-            // over an empty list.
+            // The template drops the whole section rather than print a lead-in over an empty list.
             IReadOnlyList<CoordinatorRotaShiftGroup> shiftGroups = includeShifts
                 ? entries
                     .GroupBy(e => e.Group.RotaId)
@@ -331,9 +319,7 @@ internal sealed class RotaCoordinatorMessageService(
                 : CultureCatalog.DefaultCultureCode;
             var request = buildRequest(recipient, shiftGroups, language);
 
-            // Per-recipient enqueue is isolated: a transient outbox-write
-            // failure on one recipient must not unwind the loop and leave
-            // the audit row unwritten or earlier enqueues unaccounted for.
+            // One recipient's outbox failure must not unwind the loop and leave the audit row unwritten.
             try
             {
                 await enqueue(request, ct);
@@ -352,7 +338,7 @@ internal sealed class RotaCoordinatorMessageService(
         return new DispatchSummary(requested, skipped, failed);
     }
 
-    // Chronologically ordered "ddd MMMM d [@ HH:mm]" lines in the rota's timezone.
+    // Chronological, in the rota's timezone.
     private static IReadOnlyList<string> BuildShiftLines(
         IReadOnlyList<ShiftSignup> userSignups,
         Humans.Settings.Contracts.EventSettingsInfo eventSettings)
@@ -396,5 +382,15 @@ internal sealed class RotaCoordinatorMessageService(
     private sealed record DispatchSummary(
         int Requested,
         int Skipped,
-        int Failed);
+        int Failed)
+    {
+        public string AuditSuffix =>
+            (Skipped > 0 ? $" ({Skipped} skipped: no email or missing user)" : string.Empty)
+            + (Failed > 0 ? $" ({Failed} failed: enqueue error)" : string.Empty);
+
+        // A partial dispatch succeeded; only an all-failed dispatch must suppress the success toast.
+        public string? FailureMessage => Requested == 0 && Failed > 0
+            ? $"Failed to enqueue any emails ({Failed} enqueue error(s)); check server logs."
+            : null;
+    }
 }

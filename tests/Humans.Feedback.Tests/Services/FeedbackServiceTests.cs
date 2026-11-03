@@ -36,13 +36,8 @@ using Humans.Feedback.Contracts;
 namespace Humans.Feedback.Tests.Services;
 
 /// <summary>
-/// Owns its fixture rather than deriving from <c>Humans.Application.Tests</c>'
-/// <c>ServiceTestHarness</c>: that harness is built around an in-memory
-/// <c>UsersDbContext</c>, and inheriting it would grant a section test project
-/// <c>InternalsVisibleTo</c> on <c>UsersDbContext</c> — the boundary the G5 split exists
-/// to draw (nobodies-collective/Humans#866). The users and teams the service reads back
-/// live in an in-memory registry the <c>Seed*</c> helpers write to, so the test bodies
-/// below are unchanged from their pre-move versions.
+/// Owns its fixture: inheriting the <c>UsersDbContext</c>-based harness would grant this project
+/// <c>InternalsVisibleTo</c> on another section's context, so users come from an in-memory registry.
 /// </summary>
 public sealed class FeedbackServiceTests
 {
@@ -115,9 +110,8 @@ public sealed class FeedbackServiceTests
             NullLogger<FeedbackServiceImpl>.Instance);
     }
 
-    // Feedback stopped accepting new reports in nobodies-collective/Humans#977 —
-    // there is no service- or repository-level create any more, so every fixture
-    // below seeds historical rows straight into the DB.
+    // Feedback no longer accepts new reports, so every fixture below seeds historical rows
+    // straight into the DB.
     [HumansFact]
     public void FeedbackSurface_ExposesNoReportCreationMethod()
     {
@@ -231,12 +225,12 @@ public sealed class FeedbackServiceTests
 
         await _service.UpdateStatusAsync(report.Id, FeedbackStatus.Acknowledged, actorId, ct);
         await _auditLog.Received(1).LogAsync(
-            AuditAction.FeedbackStatusChanged, "FeedbackReport", report.Id,
+            FeedbackAuditActions.FeedbackStatusChanged, "FeedbackReport", report.Id,
             Arg.Any<string>(), actorId);
 
         await _service.UpdateStatusAsync(report.Id, FeedbackStatus.Open, null, ct);
         await _auditLog.Received(1).LogAsync(
-            AuditAction.FeedbackStatusChanged, "FeedbackReport", report.Id,
+            FeedbackAuditActions.FeedbackStatusChanged, "FeedbackReport", report.Id,
             Arg.Any<string>(), "API");
     }
 
@@ -344,7 +338,7 @@ public sealed class FeedbackServiceTests
                 && m.Subject.EndsWith($"#{expectedCulture}", StringComparison.Ordinal)),
             Arg.Any<CancellationToken>());
         await _notificationService.Received(1).SendAsync(
-            NotificationSource.FeedbackResponse,
+            FeedbackNotificationSources.FeedbackResponse,
             NotificationClass.Informational,
             NotificationPriority.Normal,
             $"Feedback_Notification_ResponseReceived_Title#{expectedCulture}",
@@ -393,7 +387,7 @@ public sealed class FeedbackServiceTests
         reply.EmailEnqueuePending.Should().BeFalse();
         await _emailService.Received(2).SendAsync(
             Arg.Is<EmailMessage>(m => m.DeliveryId == reply.Id && m.UserId == userId), Arg.Any<CancellationToken>());
-        await _auditLog.Received(1).LogAsync(AuditAction.FeedbackResponseSent, AuditEntityTypes.FeedbackReport,
+        await _auditLog.Received(1).LogAsync(FeedbackAuditActions.FeedbackResponseSent, AuditEntityTypes.FeedbackReport,
             report.Id, Arg.Is<string>(m => m.Contains("Queued", StringComparison.Ordinal)), reply.SenderUserId!.Value);
     }
 
@@ -492,7 +486,7 @@ public sealed class FeedbackServiceTests
         var report = await SeedReportAsync(userId, "Test", "/test");
 
         _notificationService.SendAsync(
-                Arg.Any<NotificationSource>(), Arg.Any<NotificationClass>(),
+                Arg.Any<NotificationSourceDefinition>(), Arg.Any<NotificationClass>(),
                 Arg.Any<NotificationPriority>(), Arg.Any<string>(),
                 Arg.Any<IReadOnlyList<Guid>>(),
                 body: Arg.Any<string?>(), actionUrl: Arg.Any<string?>(),
@@ -525,7 +519,7 @@ public sealed class FeedbackServiceTests
         updated.AssignedToUserId.Should().Be(assigneeId);
         updated.AssignedToTeamId.Should().Be(teamId);
         await _auditLog.Received(1).LogAsync(
-            AuditAction.FeedbackAssignmentChanged, "FeedbackReport", report.Id,
+            FeedbackAuditActions.FeedbackAssignmentChanged, "FeedbackReport", report.Id,
             Arg.Is<string>(s => s.Contains("Assignee") && s.Contains("Team")), actorId);
     }
 
@@ -538,9 +532,9 @@ public sealed class FeedbackServiceTests
         await _service.UpdateAssignmentAsync(report.Id, null, null, Guid.NewGuid(), ct);
 
         await _auditLog.DidNotReceiveWithAnyArgs().LogAsync(
-            default, default!, default, default!, default(Guid));
+            null!, default!, default, default!, default(Guid));
         await _auditLog.DidNotReceiveWithAnyArgs().LogAsync(
-            default, default!, default, default!, default(string)!);
+            null!, default!, default, default!, default(string)!);
     }
 
     [HumansFact]
@@ -554,7 +548,7 @@ public sealed class FeedbackServiceTests
         (await FeedbackDb.FeedbackReports.AsNoTracking().FirstAsync(r => r.Id == report.Id, ct))
             .GitHubIssueNumber.Should().Be(123);
         await _auditLog.Received(1).LogAsync(
-            AuditAction.FeedbackGitHubLinked, "FeedbackReport", report.Id,
+            FeedbackAuditActions.FeedbackGitHubLinked, "FeedbackReport", report.Id,
             Arg.Is<string>(s => s.Contains("123")), actorId);
 
         // The API path (no actor) clears the link and audits as "API".
@@ -562,7 +556,7 @@ public sealed class FeedbackServiceTests
         (await FeedbackDb.FeedbackReports.AsNoTracking().FirstAsync(r => r.Id == report.Id, ct))
             .GitHubIssueNumber.Should().BeNull();
         await _auditLog.Received(1).LogAsync(
-            AuditAction.FeedbackGitHubLinked, "FeedbackReport", report.Id,
+            FeedbackAuditActions.FeedbackGitHubLinked, "FeedbackReport", report.Id,
             Arg.Is<string>(s => s.Contains("cleared")), "API");
     }
 
@@ -680,6 +674,7 @@ public sealed class FeedbackServiceTests
             UserId = otherId,
             Category = FeedbackCategory.Bug,
             Description = "theirs",
+            ScreenshotStoragePath = "uploads/feedback/foreign/shot.png",
             PageUrl = "/theirs",
             Status = FeedbackStatus.Resolved,
             ResolvedByUserId = erasedId,
@@ -706,7 +701,7 @@ public sealed class FeedbackServiceTests
         _fileStorage.DeleteAsync("uploads/feedback/x/shot.png", Arg.Any<CancellationToken>())
             .Returns(async call =>
             {
-                // Cancellation arrives after the repository has committed the erasure.
+                // Once file deletion begins, cancellation must not skip the remaining erasure.
                 await erasureCancellation.CancelAsync();
                 call.ArgAt<CancellationToken>(1).ThrowIfCancellationRequested();
                 screenshotDeleted = true;
@@ -720,6 +715,7 @@ public sealed class FeedbackServiceTests
         (await FeedbackDb.FeedbackReports.AsNoTracking().AnyAsync(r => r.UserId == erasedId, ct))
             .Should().BeFalse();
         screenshotDeleted.Should().BeTrue();
+        await _fileStorage.DidNotReceive().DeleteAsync("uploads/feedback/foreign/shot.png", Arg.Any<CancellationToken>());
         await _fileStorage.Received(1).DeleteAsync("uploads/feedback/x/shot.png", CancellationToken.None);
 
         // The other human's thread survives with the erased user detached everywhere.
@@ -731,6 +727,30 @@ public sealed class FeedbackServiceTests
             .FirstAsync(m => m.Id == foreignReply.Id, ct);
         reply.Content.Should().Be("their thread keeps this");
         reply.SenderUserId.Should().BeNull();
+    }
+
+    [HumansFact]
+    public async Task EraseForUserAsync_ScreenshotFailure_RetainsTheReportForRetry()
+    {
+        var userId = Guid.NewGuid();
+        const string key = "uploads/feedback/retry/shot.png";
+        var report = await SeedReportAsync(userId, "mine", "/mine");
+        report.ScreenshotStoragePath = key;
+        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
+        var attempts = 0;
+        _fileStorage.DeleteAsync(key, Arg.Any<CancellationToken>()).Returns(_ =>
+            ++attempts == 1 ? Task.FromException(new IOException("Storage unavailable")) : Task.CompletedTask);
+
+        var erase = () => _service.EraseForUserAsync(userId, Xunit.TestContext.Current.CancellationToken);
+        await erase.Should().ThrowAsync<IOException>();
+
+        (await FeedbackDb.FeedbackReports.AsNoTracking().SingleAsync(
+            r => r.Id == report.Id, Xunit.TestContext.Current.CancellationToken))
+            .ScreenshotStoragePath.Should().Be(key);
+        await erase();
+        (await FeedbackDb.FeedbackReports.AsNoTracking().AnyAsync(
+            r => r.Id == report.Id, Xunit.TestContext.Current.CancellationToken)).Should().BeFalse();
+        await _fileStorage.Received(2).DeleteAsync(key, CancellationToken.None);
     }
 
     [HumansFact]
@@ -1030,11 +1050,7 @@ public sealed class FeedbackServiceTests
         return report;
     }
 
-    /// <summary>
-    /// Seeds a historical report straight into the DB. Feedback has no creation
-    /// path any more (nobodies-collective/Humans#977), so tests must not go
-    /// through the service to get one.
-    /// </summary>
+    /// <summary>Seeds a historical report straight into the DB; Feedback has no creation path.</summary>
     private async Task<FeedbackReport> SeedReportAsync(
         Guid userId, string description, string pageUrl, FeedbackStatus status = FeedbackStatus.Open)
     {
@@ -1055,11 +1071,6 @@ public sealed class FeedbackServiceTests
         return report;
     }
 
-    // ----- People and teams -----------------------------------------------------
-    // The pre-G5 versions of these wrote User rows into the harness's UsersDbContext and
-    // read them back through DB-backed IUserService stubs. A section test project cannot
-    // see those tables, so the registry holds the projection the service consumes: UserInfo.
-
     private UserInfo SeedUser(Guid id, string displayName, string? email = null, string? burnerName = null, string language = "en")
     {
         var user = new User
@@ -1068,9 +1079,8 @@ public sealed class FeedbackServiceTests
             UserName = email ?? $"test-{id}@test.com",
             Email = email,
             DisplayName = displayName,
-            // Mirrors CopyNamesToUser's dual-write from Profile onto User (#1097) — UserInfo.BurnerName
-            // reads User.BurnerName only (#1098). Callers that need to distinguish burner name from
-            // legal/display name pass burnerName explicitly; the rest get the realistic default.
+            // UserInfo.BurnerName reads User.BurnerName. Callers that need it distinct from the
+            // display name pass burnerName explicitly.
             BurnerName = burnerName ?? displayName,
             PreferredLanguage = language,
             CreatedAt = Clock.GetCurrentInstant()

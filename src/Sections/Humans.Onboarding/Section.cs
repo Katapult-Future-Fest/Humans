@@ -1,44 +1,40 @@
+using Humans.Base.Authorization;
 using Humans.Base.Constants;
-using Humans.Issues.Contracts;
 using Humans.Base.Interfaces;
+using Humans.Base.Models;
+using Humans.Consent.Contracts;
 using Humans.Email.Contracts;
+using Humans.Issues.Contracts;
 using Humans.Onboarding.Contracts;
 using Humans.Onboarding.Services;
+using Humans.Onboarding.ViewComponents;
+using Humans.Shifts.Contracts;
+using Humans.Users.Contracts;
 using Microsoft.Extensions.Configuration;
+using Humans.Notifications.Contracts;
 using Microsoft.Extensions.DependencyInjection;
+using static Humans.Base.Models.AccessLevel;
+using static Humans.Base.Models.AccessMatrixFeature;
+using Humans.AuditLog.Contracts;
 
 namespace Humans.Onboarding;
 
-/// <summary>
-/// Onboarding's DI entry point, at the project root by convention. Discovered by Shell —
-/// nothing names it, so it needs no section prefix.
-/// </summary>
-/// <remarks>
-/// No <c>AddSectionDbContext</c> line: the section owns no tables. It is a pure
-/// orchestrator over Profiles, Consent, Teams and Governance and routes every read and
-/// write through the owning section's service interface, so there is no repository and no
-/// <c>PeeledConfigurationNamespaces</c> row either.
-/// <para>
-/// One instance serves three registrations — the section's own full interface, the leaf's
-/// two-member intake contract, and the concrete type, which exists only to be the thing the
-/// other two forward to — so the director's state and logging stay single-instance per
-/// request. No controller injects <c>OnboardingService</c> directly.
-/// </para>
-/// </remarks>
-public sealed class Section : ISection, IIssueQueueOwner
+public sealed class Section :
+    ISection,
+    IIssueQueueOwner,
+    ISectionAccessMatrix,
+    ISectionAdminNav,
+    ISectionChrome,
+    ISectionHelp
 {
     public void Register(IServiceCollection services, IConfiguration configuration)
     {
-        // No back-call from leaf services into this director: ProfileService and
-        // ConsentService do not inject IOnboardingIntake. The writing controller reports
-        // the save (ProfileSavedAsync / ConsentSignedAsync) and Onboarding applies the
-        // follow-ups.
+        services.AddSingleton<IAuditActionContributor, OnboardingAuditActions>();
+        services.AddSingleton<INotificationSourceContributor, OnboardingNotificationSources>();
         services.AddScoped<OnboardingService>();
         services.AddScoped<IOnboardingService>(sp => sp.GetRequiredService<OnboardingService>());
         services.AddScoped<IOnboardingIntake>(sp => sp.GetRequiredService<OnboardingService>());
 
-        // Onboarding owns its email copy and its gallery samples; Email keeps the mechanics
-        // (memory/architecture/email-templates-live-in-sender.md).
         services.AddScoped<OnboardingEmails>();
         services.AddScoped<IEmailPreviewContributor, OnboardingEmailPreviews>();
 
@@ -46,13 +42,59 @@ public sealed class Section : ISection, IIssueQueueOwner
         services.AddScoped<IOnboardingWidgetSessionState, HttpOnboardingWidgetSessionState>();
     }
 
-    // This section owns the issue queue its members' reports land in; Issues discovers
-    // the seam rather than holding a list of sections (memory/architecture/section-contribution-seams.md).
     string IIssueQueueOwner.QueueKey => "Onboarding";
 
     string IIssueQueueOwner.AreaLabelResourceKey => "Issues_Area_Onboarding";
 
     IReadOnlyList<string> IIssueQueueOwner.PathSegments => ["onboardingreview"];
 
-    IReadOnlyList<string> IIssueQueueOwner.OwningRoles => [RoleNames.ConsentCoordinator, RoleNames.VolunteerCoordinator, RoleNames.HumanAdmin];
+    IReadOnlyList<string> IIssueQueueOwner.OwningRoles => [ConsentRoles.ConsentCoordinator, ShiftsRoles.ShiftsAdmin, UsersRoles.UsersAdmin];
+
+    IReadOnlyList<AccessMatrixData> ISectionAccessMatrix.AccessMatrices =>
+    [
+        new()
+        {
+            Key = "OnboardingReview",
+            SectionName = "Onboarding Review",
+            Order = 50,
+            Roles = ["ConsentCoordinator", "ShiftsAdmin", "Board"],
+            Features =
+            [
+                Of("View onboarding queue", ("ConsentCoordinator", Allowed), ("ShiftsAdmin", Allowed), ("Board", Allowed)),
+                Of("Clear consent checks", ("ConsentCoordinator", Allowed), ("ShiftsAdmin", Denied), ("Board", Allowed)),
+                Of("Flag / reject signup", ("ConsentCoordinator", Allowed), ("ShiftsAdmin", Denied), ("Board", Allowed)),
+                Of("Board voting", ("ConsentCoordinator", Denied), ("ShiftsAdmin", Denied), ("Board", Allowed)),
+            ]
+        }
+    ];
+
+    IEnumerable<AdminNavGroup> ISectionAdminNav.Groups() =>
+    [
+        new("Onboarding", [
+            new("Review", "OnboardingReview", "Index", null, null, "fa-solid fa-clipboard-check", PolicyNames.ReviewQueueAccess,
+                 PillCount: PillCounts.ReviewQueueAsync)
+        ])
+    ];
+
+    IEnumerable<ChromeComponent> ISectionChrome.Components() =>
+        [new(ChromeSlots.AboveContent, typeof(OnboardingProgressBannerViewComponent))];
+
+    IReadOnlyList<SectionHelpEntry> ISectionHelp.HelpEntries => Entries;
+
+    private static readonly IReadOnlyList<SectionHelpEntry> Entries =
+    [
+        SectionHelpEntry.FromEmbeddedMarkdown(typeof(Section).Assembly, "OnboardingReview", 70),
+    ];
+}
+
+internal static class PillCounts
+{
+    public static async ValueTask<int?> ReviewQueueAsync(IServiceProvider sp)
+    {
+        var users = sp.GetRequiredService<IUserService>();
+        var reviews = await sp.GetRequiredService<IConsentService>().GetConsentReviewsAsync();
+        var count = (await users.GetAllUserInfosAsync()).Count(u =>
+            u.NeedsConsentReview(reviews.GetValueOrDefault(u.Id) ?? ConsentReviewInfo.None(u.Id)));
+        return count > 0 ? count : null;
+    }
 }

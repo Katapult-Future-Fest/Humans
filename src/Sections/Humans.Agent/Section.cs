@@ -1,50 +1,46 @@
 using Humans.Agent.Authorization;
 using Humans.Agent.Contracts;
 using Humans.Agent.Data;
+using Humans.Agent.Health;
 using Humans.Agent.Jobs;
 using Humans.Agent.Services;
 using Humans.Agent.Services.Anthropic;
 using Humans.Agent.Services.Preload;
 using Humans.Agent.Services.Stores;
-using Humans.Base.Interfaces;
-using Humans.Gdpr.Contracts;
+using Humans.Agent.ViewComponents;
+using Humans.Base.Authorization;
 using Humans.Base.Configuration;
+using Humans.Base.Constants;
 using Humans.Base.Hosting;
+using Humans.Base.Interfaces;
 using Humans.Base.Services;
+using Humans.Gdpr.Contracts;
+using Humans.Settings.Contracts;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Humans.AuditLog.Contracts;
 
 namespace Humans.Agent;
 
 /// <summary>
-/// Agent's DI entry point, at the project root by convention. Discovered by Shell — nothing
-/// names it, so it needs no section prefix.
+/// The Anthropic connector lives here, not in Base: <c>IAnthropicClient</c> streams the section's own
+/// <c>AgentTurnToken</c>.
 /// </summary>
-/// <remarks>
-/// <para>
-/// <c>AgentConversationRetentionJob</c> (<c>Jobs/</c>) drives
-/// <see cref="IAgentConversationRetention"/>; its registration and schedule are contributed
-/// via <c>SectionJobs.cs</c>.
-/// </para>
-/// <para>
-/// The two warm-up hosted services <em>are</em> registered here. Nothing outside the section
-/// names them — <c>AddHostedService&lt;T&gt;</c> resolves T at the registration site — so
-/// moving them in is what keeps <c>IAgentPreloadCorpusBuilder</c> and
-/// <c>IAgentSettingsService</c> off the contracts leaf.
-/// </para>
-/// <para>
-/// <c>GitHubCommunityKbContentSource</c> stays in <c>Humans.Infrastructure</c>: it is a
-/// GitHub content connector implementing a Base interface. The <em>Anthropic</em> connector
-/// must live here — <c>IAnthropicClient</c> streams the section's own
-/// <c>AgentTurnToken</c>, and keeping it in Base would mean promoting that type downward.
-/// </para>
-/// </remarks>
-public sealed class Section : ISection
+public sealed class Section :
+    ISection,
+    ISectionAdminNav,
+    ISectionAnnotations,
+    ISectionChrome,
+    ISectionConfiguration,
+    ISectionHealthChecks,
+    ISectionJobs,
+    ISectionSettings
 {
     public void Register(IServiceCollection services, IConfiguration configuration)
     {
+        services.AddSingleton<IAuditActionContributor, AgentAuditActions>();
         services.AddSectionDbContext<AgentDbContext>(sentinelTable: "agent_conversations");
 
         services.Configure<AnthropicOptions>(configuration.GetSection(AnthropicOptions.SectionName));
@@ -63,9 +59,7 @@ public sealed class Section : ISection
 
         services.AddScoped<IAgentAnthropicBalanceProvider, AnthropicBalanceProvider>();
 
-        // Singletons: stateless readers that own a per-stem MemoryCache slot via the shared
-        // IMemoryCache. IGuideContentSource is registered as a singleton by
-        // InfrastructureServiceCollectionExtensions, so capturing it here is safe.
+        // Stateless readers over the shared IMemoryCache; IGuideContentSource is a singleton, so capturing it is safe.
         services.AddSingleton<AgentSectionDocReader>();
         services.AddSingleton<AgentFeatureSpecReader>();
         services.AddSingleton<GitHubCommunityKbContentSource>();
@@ -93,4 +87,53 @@ public sealed class Section : ISection
 
         services.AddScoped<AgentConversationRetentionJob>();
     }
+
+    IEnumerable<AdminNavGroup> ISectionAdminNav.Groups() =>
+    [
+        new("Agent", [
+            new("Status",  "AdminAgent", "Status",        null, null, "fa-solid fa-gauge-high", PolicyNames.BoardOrAdmin),
+            new("History", "Agent",      "Conversations", null, null, "fa-solid fa-comments",   PolicyNames.BoardOrAdmin)
+        ])
+    ];
+
+    IEnumerable<SectionAnnotation> ISectionAnnotations.Annotations() =>
+        AgentSectionKeys.All.Select(key => new SectionAnnotation(
+            key,
+            "Agent doc key",
+            $"{AgentSectionDocReader.SectionProjectFolder(key)}/{key}.md"));
+
+    IEnumerable<ChromeComponent> ISectionChrome.Components() =>
+        [
+            new(ChromeSlots.BodyEnd, typeof(HelpWidgetViewComponent)),
+            new(ChromeSlots.WidgetGallery, typeof(AgentGalleryViewComponent)),
+        ];
+
+    void ISectionConfiguration.DeclareSettings(IConfiguration configuration, ConfigurationRegistry registry)
+    {
+        configuration.GetOptionalSetting(registry, "Anthropic:ApiKey", "Anthropic", isSensitive: true,
+            importance: ConfigurationImportance.Recommended);
+        configuration.GetOptionalSetting(registry, "Anthropic:DefaultModel", "Anthropic");
+
+        configuration.GetOptionalSetting(registry, "CommunityKb:Owner", "Community KB");
+        configuration.GetOptionalSetting(registry, "CommunityKb:Repository", "Community KB");
+        configuration.GetOptionalSetting(registry, "CommunityKb:Branch", "Community KB");
+        configuration.GetOptionalSetting(registry, "CommunityKb:AccessToken", "Community KB", isSensitive: true);
+    }
+
+    void ISectionHealthChecks.AddHealthChecks(IHealthChecksBuilder builder, IConfiguration configuration)
+    {
+        builder.AddCheck<AnthropicHealthCheck>("anthropic-api-reachable", tags: [HealthCheckTags.External]);
+        builder.AddCheck<AgentDocsHealthCheck>("agent-grounding-docs");
+    }
+
+    IEnumerable<RecurringJobDescriptor> ISectionJobs.Jobs(IServiceProvider services)
+    {
+        yield return new RecurringJobDescriptor(
+            "agent-conversation-retention", typeof(AgentConversationRetentionJob), "15 3 * * *");
+    }
+
+    IEnumerable<SettingsTab> ISectionSettings.Tabs() =>
+    [
+        new SettingsTab("agent", "Settings_TabAgent", typeof(AgentSettingsTabViewComponent), PolicyNames.AdminOnly)
+    ];
 }

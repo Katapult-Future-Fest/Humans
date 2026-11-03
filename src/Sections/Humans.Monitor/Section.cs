@@ -7,16 +7,18 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace Humans.Monitor;
 
-/// <summary>
-/// Monitor's DI entry point. Discovered by Shell — nothing names it, so it needs no section
-/// prefix.
-/// </summary>
-public sealed class Section : ISection
+public sealed class Section : ISection, ISectionJobs
 {
     public void Register(IServiceCollection services, IConfiguration configuration)
     {
         services.AddScoped<IDriveActivityMonitorService, DriveActivityMonitorService>();
 
         services.AddScoped<DriveActivityMonitorJob>();
+    }
+
+    IEnumerable<RecurringJobDescriptor> ISectionJobs.Jobs(IServiceProvider services)
+    {
+        yield return new RecurringJobDescriptor(
+            "monitor-drive-activity", typeof(DriveActivityMonitorJob), "0 * * * *");
     }
 }

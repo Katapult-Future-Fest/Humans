@@ -1,3 +1,4 @@
+using Humans.Camps.Contracts;
 using System.Security.Claims;
 using AwesomeAssertions;
 using Humans.Base.Constants;
@@ -18,14 +19,15 @@ public sealed class CampAuthorizationHandlerTests
     private static readonly Guid LeadCampSeasonId = Guid.NewGuid();
     private static readonly Guid OtherCampSeasonId = Guid.NewGuid();
     private static readonly Guid UserId = Guid.NewGuid();
+    private static readonly Guid ActiveEventId = Guid.NewGuid();
     private static readonly Guid WorkshopUserId = Guid.NewGuid();
 
     public CampAuthorizationHandlerTests()
     {
         _handler = new CampAuthorizationHandler(_campService);
         _campService.GetSettingsAsync(Arg.Any<CancellationToken>())
-            .Returns(new CampSettingsInfo(2026, []));
-        _campService.GetCampsForYearAsync(2026, Arg.Any<CancellationToken>())
+            .Returns(new CampSettingsInfo(2026, []) { ActiveEventSettingsId = ActiveEventId });
+        _campService.GetCampsForEventAsync(ActiveEventId, Arg.Any<CancellationToken>())
             .Returns(new List<CampInfo>
             {
                 CreateCampInfo("lead"),
@@ -172,7 +174,7 @@ public sealed class CampAuthorizationHandlerTests
         kind switch
         {
             "admin" => CreateUserWithRoles(RoleNames.Admin),
-            "camp-admin" => CreateUserWithRoles(RoleNames.CampAdmin),
+            "camp-admin" => CreateUserWithRoles(CampsRoles.CampsAdmin),
             "lead" => CreateUserWithId(UserId),
             "workshop" => CreateUserWithId(WorkshopUserId),
             "regular" => CreateUserWithId(regularUserId),

@@ -1,7 +1,8 @@
+using Humans.Base.Constants;
+using Humans.Base.Interfaces;
 using Humans.Auth.Contracts;
 using AwesomeAssertions;
 using Humans.CityPlanning.Contracts;
-using Humans.AuditLog.Contracts;
 using Humans.Camps.Contracts;
 using Humans.Consent.Contracts;
 using Humans.Governance.Contracts;
@@ -20,7 +21,7 @@ using NSubstitute;
 namespace Humans.Development.Tests;
 
 /// <summary>
-/// Covers the #867 persona repair invariant: personas hold governance roles, and the
+/// Covers the persona repair invariant: personas hold governance roles, and the
 /// nightly SuspendNonCompliantMembersJob suspends them otherwise, so EnsureActiveAsync
 /// must submit missing consents through the canonical consent path and lift a consent
 /// suspension, on every dev sign-in, idempotently.
@@ -39,7 +40,6 @@ public class DevPersonaSeederTests
     private readonly ISystemTeamSync _systemTeamSync = Substitute.For<ISystemTeamSync>();
     private readonly IUserService _users = Substitute.For<IUserService>();
     private readonly IConsentWrite _consentWrite = Substitute.For<IConsentWrite>();
-    private readonly IAuditLogService _audit = Substitute.For<IAuditLogService>();
     private readonly ICampService _camps = Substitute.For<ICampService>();
     private readonly ICampSeeding _campSeeding = Substitute.For<ICampSeeding>();
     private readonly ICampRoleSeeding _campRoles = Substitute.For<ICampRoleSeeding>();
@@ -50,6 +50,8 @@ public class DevPersonaSeederTests
 
     public DevPersonaSeederTests()
     {
+        _userEmails.AddVerifiedEmailAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(new UserEmailAddResult(Guid.NewGuid(), true, false));
         _profileEditor.SaveProfileAsync(Arg.Any<Guid>(), Arg.Any<ProfileSaveRequest>(), Arg.Any<CancellationToken>())
             .Returns(new ProfileEditResult(true, Guid.NewGuid()));
     }
@@ -66,7 +68,6 @@ public class DevPersonaSeederTests
         _systemTeamSync,
         _users,
         _consentWrite,
-        _audit,
         _camps,
         _campSeeding,
         _campRoles,
@@ -75,6 +76,11 @@ public class DevPersonaSeederTests
         _humanLifecycle,
         _clock,
         Options.Create(new CityPlanningOptions()),
+        new RoleCatalog(new RoleDefinition[]
+            {
+                new(RoleNames.Admin, "Admin", "", ""),
+                new(RoleNames.Board, "Board", "", ""),
+            }),
         NullLogger<DevPersonaSeeder>.Instance);
 
     private static UserInfo NamedUserInfo(Guid userId, UserState state) =>
@@ -249,7 +255,7 @@ public class DevPersonaSeederTests
     [HumansFact]
     public async Task ResetLegalNamesAsync_BlanksLegalNamesAndKeepsBurnerName()
     {
-        // The no-name persona must hit the onboarding name gate (#812) on every sign-in.
+        // The no-name persona must hit the onboarding name gate on every sign-in.
         var userId = DevPersonaSeeder.PersonaGuid("no-name");
         _users.GetUserInfoAsync(userId, Arg.Any<CancellationToken>())
             .Returns(new ValueTask<UserInfo?>(NamedUserInfo(userId, UserState.Active)));

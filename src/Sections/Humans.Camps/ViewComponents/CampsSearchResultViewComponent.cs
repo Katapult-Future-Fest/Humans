@@ -2,16 +2,9 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace Humans.Camps.ViewComponents;
 
-/// <summary>
-/// One camp-search result row, keyed by camp id
-/// (nobodies-collective/Humans#1062). Callers hold the id their own search
-/// produced; Camps owns what a camp row looks like, resolves the public-year
-/// season name itself and fetches the slug the row links to.
-/// </summary>
+/// <summary>Camps owns what a camp row looks like: it resolves the active event's season name and the slug itself.</summary>
 /// <remarks>
-/// Public because Razor's compile-time discovery filters on public — an internal
-/// view component ships <c>&lt;vc:…&gt;</c> as inert markup on a green build
-/// (HUM0034's framework exception).
+/// Public: Razor's discovery only sees public view components; an internal one ships as inert markup.
 /// </remarks>
 public sealed class CampsSearchResultViewComponent(ICampService camps) : ViewComponent
 {
@@ -24,8 +17,8 @@ public sealed class CampsSearchResultViewComponent(ICampService camps) : ViewCom
         if (camp is null)
             return Content(string.Empty);
 
-        var settings = await camps.GetSettingsAsync(HttpContext.RequestAborted);
-        var season = camp.GetSeasonForYear(settings.PublicYear);
+        var activeEventId = (await camps.GetSettingsAsync(HttpContext.RequestAborted)).ActiveEventSettingsId;
+        var season = activeEventId is { } eventId ? camp.GetSeasonForEvent(eventId) : null;
         return View(new CampsSearchResultViewModel(season?.Name ?? camp.Slug, camp.Slug));
     }
 }

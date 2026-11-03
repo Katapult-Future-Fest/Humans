@@ -9,9 +9,8 @@ using NSubstitute;
 namespace Humans.Shifts.Tests.Services;
 
 /// <summary>
-/// The calendar always comes from Settings via <see cref="EventCalendarResolver"/>;
-/// this section's own repo only supplies the knobs row, which may not exist yet
-/// (nobodies-collective/Humans#1631).
+/// The calendar always comes from Settings via <see cref="EventCalendarResolver"/>; this
+/// section's repo only supplies the knobs row, which may not exist yet.
 /// </summary>
 public sealed class BurnSettingsServiceTests
 {
@@ -21,7 +20,7 @@ public sealed class BurnSettingsServiceTests
 
     public BurnSettingsServiceTests()
     {
-        _service = new BurnSettingsService(_repo, new EventCalendarResolver(_settingsService));
+        _service = new BurnSettingsService(_repo, new EventCalendarResolver(_settingsService, _repo));
     }
 
     private void StubActiveCalendar(EventSettingsInfo info) =>
@@ -45,6 +44,27 @@ public sealed class BurnSettingsServiceTests
         result.EventName.Should().Be(calendar.EventName);
         result.TimeZoneId.Should().Be(calendar.TimeZoneId);
         result.GateOpeningDate.Should().Be(calendar.GateOpeningDate);
+    }
+
+    [HumansFact]
+    public async Task GetByIdAsync_ShiftsOwnSubPeriodsWin_UnsetOnesFallBackToSettings()
+    {
+        var id = Guid.NewGuid();
+        var calendar = NewCalendar(id);
+        StubCalendarById(calendar);
+        _repo.GetEventSettingsByIdAsync(id, Arg.Any<CancellationToken>()).Returns(new EventSettings
+        {
+            Id = id,
+            SubPeriodFirstCrewStart = -30,
+            SubPeriodFinishingWeekendStart = -2,
+        });
+
+        var result = await _service.GetByIdAsync(id, Xunit.TestContext.Current.CancellationToken);
+
+        result!.FirstCrewStartOffset.Should().Be(-30);
+        result.SetupWeekStartOffset.Should().Be(calendar.SetupWeekStartOffset);
+        result.PreEventWeekStartOffset.Should().Be(calendar.PreEventWeekStartOffset);
+        result.FinishingWeekendStartOffset.Should().Be(-2);
     }
 
     [HumansFact]

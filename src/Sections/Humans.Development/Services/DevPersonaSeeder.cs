@@ -2,7 +2,6 @@ using Humans.Auth.Contracts;
 using System.Security.Cryptography;
 using System.Text;
 using Humans.Base.Extensions;
-using Humans.AuditLog.Contracts;
 using Humans.Camps.Contracts;
 using Humans.Consent.Contracts;
 using Humans.Governance.Contracts;
@@ -17,17 +16,6 @@ using NodaTime;
 
 namespace Humans.Development.Services;
 
-/// <summary>
-/// Dev-only persona seeding helper. Owns the dev persona writes.
-///
-/// Cross-section writes (User, Profile, UserEmail) flow through the owning
-/// section's services per design-rules §2c
-/// (<see cref="UserManager{TUser}"/> / <see cref="IUserService"/> /
-/// <see cref="IProfileEditorService"/> / <see cref="IUserEmailService"/>). All dev fixtures (system-team
-/// memberships, dev test department, dev barrio camp/season/lead, city-planning
-/// team, role assignments, sample contact fields) also go through section
-/// ownership services.
-/// </summary>
 internal sealed class DevPersonaSeeder(
     UserManager<User> userManager,
     IProfileEditorService profileEditorService,
@@ -40,7 +28,6 @@ internal sealed class DevPersonaSeeder(
     ISystemTeamSync systemTeamSync,
     IUserService userService,
     IConsentWrite consentWrite,
-    IAuditLogService auditLogService,
     ICampService campService,
     ICampSeeding campSeeding,
     ICampRoleSeeding campRoleSeeding,
@@ -49,12 +36,10 @@ internal sealed class DevPersonaSeeder(
     IHumanLifecycleService humanLifecycleService,
     IClock clock,
     IOptions<CityPlanningOptions> cityPlanningOptions,
+    RoleCatalog catalog,
     ILogger<DevPersonaSeeder> logger)
 {
-    /// <summary>
-    /// Ensures the dev persona's User + Profile + verified UserEmail exist.
-    /// Returns the resolved user id (handles legacy hardcoded GUIDs).
-    /// </summary>
+    /// <summary>Returns the resolved user id: legacy personas keep their old hardcoded GUIDs.</summary>
     public async Task<Guid> EnsurePersonaAsync(string slug, string displayNameSuffix, Guid id)
     {
         var existing = await userManager.FindByIdAsync(id.ToString());
@@ -79,7 +64,6 @@ internal sealed class DevPersonaSeeder(
         var now = clock.GetCurrentInstant();
         var displayName = $"Dev {displayNameSuffix}";
 
-        // Guest persona: bare user with no profile, teams, or roles
         if (string.Equals(slug, "guest", StringComparison.OrdinalIgnoreCase))
         {
             await SeedProfilelessUserAsync(id, email, displayName, now);
@@ -110,12 +94,11 @@ internal sealed class DevPersonaSeeder(
             return id;
         }
 
-        await userEmailService.AddVerifiedEmailAsync(id, email);
+        var emailAddition = await userEmailService.AddVerifiedEmailAsync(id, email);
+        if (emailAddition.ErrorKey is not null)
+            throw new InvalidOperationException("Could not add the verified email address.");
 
-        // Seed the Profile via the canonical service path. SaveProfileAsync
-        // creates the Profile row when missing, sets all fields, and lifts
-        // the lifecycle marker out of Stub. We bypass the dev-only IsApproved
-        // shortcut by setting it explicitly post-save.
+        // SaveProfileAsync creates the Profile row when missing and lifts it out of Stub.
         var saveRequest = BuildPersonaProfileRequest(
             burnerName: displayName,
             firstName: firstName,
@@ -138,15 +121,6 @@ internal sealed class DevPersonaSeeder(
                 "DEV: consent-check approval failed for persona {UserId}: {ErrorKey}",
                 id, consentCheckResult.ErrorKey);
         }
-        else
-        {
-            await auditLogService.LogAsync(
-                AuditAction.ConsentCheckCleared,
-                AuditEntityTypes.Profile,
-                id,
-                "Consent check cleared",
-                id);
-        }
 
         await contactFieldService.SaveContactFieldsAsync(
             profileId,
@@ -167,7 +141,6 @@ internal sealed class DevPersonaSeeder(
                     DisplayOrder: 1)
             ]);
 
-        // All seeded personas should be in Volunteers (unless explicitly restricted later).
         await systemTeamSync.SyncMembershipForUserAsync(id, SystemTeamType.Volunteers);
 
         if (IsBarrioLeadSlug(slug))
@@ -186,9 +159,8 @@ internal sealed class DevPersonaSeeder(
             await EnsureSeededRoleAsync(id, role, id);
         }
 
-        // Sign the required legal documents up front — role-holding personas without
-        // them are suspended by the nightly SuspendNonCompliantMembersJob once a
-        // document's grace period lapses (#867).
+        // Role-holding personas without the required documents are suspended by the nightly
+        // SuspendNonCompliantMembersJob once a grace period lapses.
         await EnsureActiveAsync(id);
 
         logger.LogInformation(
@@ -200,12 +172,9 @@ internal sealed class DevPersonaSeeder(
     }
 
     /// <summary>
-    /// Restores a persona to <see cref="UserState.Active"/> on every dev sign-in. Personas
-    /// hold governance roles, so without the required consents the nightly
-    /// <c>SuspendNonCompliantMembersJob</c> suspends them once a grace period lapses (#867).
-    /// Submits any missing required consents through the canonical consent path (whose
-    /// completion also lifts a consent suspension), then lifts any remaining consent
-    /// suspension for the no-longer-missing-anything case. Idempotent.
+    /// Runs on every dev sign-in: personas hold governance roles, so without the required consents the nightly
+    /// <c>SuspendNonCompliantMembersJob</c> suspends them. Submits missing consents, then lifts any remaining consent
+    /// suspension. Idempotent.
     /// </summary>
     public async Task EnsureActiveAsync(Guid userId)
     {
@@ -252,22 +221,15 @@ internal sealed class DevPersonaSeeder(
                 userId, restore.ErrorKey);
         }
 
-        // Volunteers admission is name + consents (SyncVolunteersMembershipForUserAsync),
-        // and SubmitConsentAsync deliberately does not provision system-team membership —
-        // without this re-sync a persona repaired here (or created in an environment that
-        // already has required documents, where the creation-path sync ran pre-consent)
-        // stays out of Volunteers until the nightly SystemTeamSyncJob. Skipped when the
-        // restore failed: the user would still be suspended, and a single-user sync also
-        // REMOVES ineligible members.
+        // SubmitConsentAsync does not provision system-team membership, so without this re-sync a repaired persona
+        // stays out of Volunteers until the nightly SystemTeamSyncJob. Skipped when the restore failed: the user is
+        // still suspended, and a single-user sync also REMOVES ineligible members.
         if ((submittedAny || wasSuspended) && restore.Success)
         {
             await systemTeamSync.SyncMembershipForUserAsync(userId, SystemTeamType.Volunteers);
         }
     }
 
-    /// <summary>
-    /// Ensures a governance role assignment exists. Existing active assignments are accepted.
-    /// </summary>
     private async Task EnsureSeededRoleAsync(Guid userId, string roleName, Guid assignerId)
     {
         var result = await roleAssignmentService.AssignRoleAsync(
@@ -281,12 +243,7 @@ internal sealed class DevPersonaSeeder(
         }
     }
 
-    /// <summary>
-    /// Mints a brand-new profileless guest user (random id + unique email) and
-    /// returns its id. Each call creates a fresh account so multiple testers
-    /// can run the onboarding widget in parallel without colliding on a single
-    /// shared Guest account.
-    /// </summary>
+    /// <summary>A fresh account per call, so testers can run onboarding in parallel without colliding.</summary>
     public async Task<Guid> EnsureFreshGuestAsync(string displayNameSuffix)
     {
         var newId = Guid.NewGuid();
@@ -298,10 +255,6 @@ internal sealed class DevPersonaSeeder(
         return newId;
     }
 
-    /// <summary>
-    /// Seeds a profileless user — just User + UserEmail, no Profile, no teams, no roles.
-    /// Used for testing the Guest dashboard and profileless account flows.
-    /// </summary>
     private async Task SeedProfilelessUserAsync(Guid id, string email, string displayName, Instant now)
     {
         var user = new User
@@ -320,22 +273,16 @@ internal sealed class DevPersonaSeeder(
             return;
         }
 
-        await userEmailService.AddVerifiedEmailAsync(id, email);
+        var emailAddition = await userEmailService.AddVerifiedEmailAsync(id, email);
+        if (emailAddition.ErrorKey is not null)
+            throw new InvalidOperationException("Could not add the verified email address.");
 
         logger.LogInformation("DEV: seeded profileless guest persona {Email} ({Id})", email, id);
     }
 
     /// <summary>
-    /// Re-blanks the No-Name persona's legal first/last names (keeping whatever
-    /// BurnerName it currently has) so the onboarding name-gate re-triggers on
-    /// the next request after every dev sign-in. SaveProfileAsync auto-demotes
-    /// the profile back to Stub once the legal names go blank, so each sign-in
-    /// is a fresh run at the gate. See #812.
-    /// <para>
-    /// Re-applies the canned persona profile fields (city/pronouns/birthday);
-    /// the persona exists only to exercise the gate, so its non-name fields are
-    /// not meaningful test data.
-    /// </para>
+    /// Re-blanks the legal names (keeping BurnerName) so the onboarding name gate re-triggers after every dev sign-in:
+    /// SaveProfileAsync demotes the profile back to Stub once the names go blank.
     /// </summary>
     public async Task ResetLegalNamesAsync(Guid userId)
     {
@@ -362,11 +309,7 @@ internal sealed class DevPersonaSeeder(
         logger.LogInformation("DEV: reset legal names for No-Name persona {UserId}", userId);
     }
 
-    /// <summary>
-    /// Builds the canned dev-persona profile save request. Shared by initial
-    /// seeding and the No-Name persona's per-login legal-name reset so the two
-    /// paths cannot drift.
-    /// </summary>
+    /// <summary>Shared by seeding and the No-Name reset so the two cannot drift.</summary>
     private static ProfileSaveRequest BuildPersonaProfileRequest(
         string burnerName, string firstName, string lastName, string bio) =>
         new(
@@ -392,18 +335,18 @@ internal sealed class DevPersonaSeeder(
             ProfilePictureContentType: null,
             RemoveProfilePicture: false);
 
-    /// <summary>
-    /// Seeds a test barrio camp + season + lead for the barrio-N-lead persona.
-    /// </summary>
     public async Task EnsureBarrioCampAsync(string personaSlug, Guid leadUserId)
     {
         var campSlug = personaSlug[..^"-lead".Length];
         var campName = campSlug.Replace("-", " ", StringComparison.Ordinal);
         campName = string.Concat(campName[..1].ToUpperInvariant(), campName.AsSpan(1));
 
-        var year = (await campService.GetSettingsAsync()).PublicYear;
-        if (year <= 0)
-            year = clock.GetCurrentInstant().InUtc().Date.Year;
+        // A season belongs to an event: without an active one there is nothing to seed into.
+        if ((await campService.GetSettingsAsync()).ActiveEventSettingsId is not { } eventSettingsId)
+        {
+            logger.LogWarning("DEV: no active event, skipping barrio camp {Slug}", campSlug);
+            return;
+        }
 
         var camp = await campService.GetCampBySlugAsync(campSlug);
         var created = false;
@@ -435,7 +378,7 @@ internal sealed class DevPersonaSeeder(
                 isSwissCamp: false,
                 timesAtNowhere: 0,
                 seasonData,
-                year);
+                eventSettingsId);
 
             logger.LogInformation("DEV: seeded camp {Slug}", campSlug);
             created = true;
@@ -448,18 +391,18 @@ internal sealed class DevPersonaSeeder(
             return;
         }
 
-        var currentYearSeason = camp.Seasons.FirstOrDefault(s => s.Year == year);
-        if (currentYearSeason is null)
+        var eventSeason = camp.GetSeasonForEvent(eventSettingsId);
+        if (eventSeason is null)
         {
             try
             {
-                await campSeeding.OptInToSeasonAsync(camp.Id, year);
+                await campSeeding.OptInToSeasonAsync(camp.Id, eventSettingsId);
             }
             catch (InvalidOperationException ex) when (ex.Message.Contains("has a season", StringComparison.Ordinal))
             {
                 logger.LogInformation(
-                    "DEV: barrio camp {Slug} already has a season for {Year}: {Message}",
-                    campSlug, year, ex.Message);
+                    "DEV: barrio camp {Slug} already has a season for event {EventSettingsId}: {Message}",
+                    campSlug, eventSettingsId, ex.Message);
             }
 
             camp = await campService.GetCampBySlugAsync(campSlug);
@@ -469,21 +412,21 @@ internal sealed class DevPersonaSeeder(
                 return;
             }
 
-            currentYearSeason = camp.Seasons.FirstOrDefault(s => s.Year == year);
+            eventSeason = camp.GetSeasonForEvent(eventSettingsId);
         }
 
-        if (currentYearSeason is not null && currentYearSeason.Status == CampSeasonStatus.Pending)
+        if (eventSeason is not null && eventSeason.Status == CampSeasonStatus.Pending)
         {
             try
             {
-                await campSeeding.ApproveSeasonAsync(currentYearSeason.Id, leadUserId, "Dev persona seed");
+                await campSeeding.ApproveSeasonAsync(eventSeason.Id, leadUserId, "Dev persona seed");
             }
             catch (InvalidOperationException ex) when (ex.Message.Contains("Cannot approve a season", StringComparison.Ordinal))
             {
                 // Idempotent: another seed/admin path likely moved it first.
                 logger.LogInformation(
                     "DEV: barrio camp season {SeasonId} approve skipped — already moved past Pending",
-                    currentYearSeason.Id);
+                    eventSeason.Id);
             }
         }
 
@@ -506,7 +449,6 @@ internal sealed class DevPersonaSeeder(
 
     private async Task<bool> EnsureCampLeadAsync(CampInfo camp, Guid leadUserId)
     {
-        // Idempotent: skip if the user already holds the Camp Lead role.
         if (camp.IsLead(leadUserId))
             return false;
 
@@ -526,15 +468,11 @@ internal sealed class DevPersonaSeeder(
             return false;
         }
 
-        // Adds an Active CampMember (idempotent) + the Camp Lead role assignment.
         await campSeeding.AddMemberAndAssignRoleInActiveSeasonAsync(
             camp.Id, leadDefId.Value, leadUserId, leadUserId);
         return true;
     }
 
-    /// <summary>
-    /// Ensures the coordinator persona's test department and sub-team exist with active memberships.
-    /// </summary>
     public async Task EnsureCoordinatorTeamsAsync(Guid coordinatorUserId)
     {
         var now = clock.GetCurrentInstant();
@@ -595,9 +533,6 @@ internal sealed class DevPersonaSeeder(
         return true;
     }
 
-    /// <summary>
-    /// Ensures the city planning team (from config) exists and the user is a coordinator of it.
-    /// </summary>
     public async Task EnsureCityPlanningTeamAsync(Guid userId)
     {
         var teamSlug = cityPlanningOptions.Value.CityPlanningTeamSlug;
@@ -628,10 +563,7 @@ internal sealed class DevPersonaSeeder(
         await EnsureSeededTeamMembershipAsync(team.Id, userId, TeamMemberRole.Coordinator, clock.GetCurrentInstant());
     }
 
-    /// <summary>
-    /// Returns the first 100 users (display name ordered) for the dev user-chooser view.
-    /// Filters out ephemeral guest accounts minted by the Guest dev-login button.
-    /// </summary>
+    /// <summary>First 100 by display name, without the ephemeral guest accounts.</summary>
     public async Task<IReadOnlyList<(Guid Id, string DisplayName, string Email)>> GetUsersForChooserAsync(
         CancellationToken ct = default)
     {
@@ -653,41 +585,30 @@ internal sealed class DevPersonaSeeder(
     public static bool IsCityPlanningSlug(string slug) =>
         string.Equals(slug, "city-planning", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>
-    /// Deterministic GUID from persona slug — stable across restarts for idempotent seeding.
-    /// </summary>
+    /// <summary>Stable across restarts, so seeding is idempotent.</summary>
     public static Guid PersonaGuid(string slug)
     {
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes($"dev-persona:{slug}"));
         return new Guid(hash.AsSpan(0, 16));
     }
 
-    /// <summary>
-    /// Resolves a persona slug back to a RoleNames constant, or null for "volunteer".
-    /// </summary>
-    internal static string? RoleNameFromSlug(string slug)
+    /// <summary>Null for "volunteer".</summary>
+    internal string? RoleNameFromSlug(string slug)
     {
         if (string.Equals(slug, "volunteer", StringComparison.OrdinalIgnoreCase))
             return null;
 
-        return RoleNameValues
+        return GrantableRoleNames
             .FirstOrDefault(r => string.Equals(PascalToKebab(r), slug, StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>
-    /// Every <see cref="RoleNames"/> constant. <c>DevLoginController</c> builds one persona per
-    /// entry and <see cref="RoleNameFromSlug"/> reverses the slug, so both read this one list.
+    /// Every catalogued role. <c>DevLoginController</c> builds one persona per entry and
+    /// <see cref="RoleNameFromSlug"/> reverses the slug, so both read this one list.
     /// </summary>
-    internal static IReadOnlyList<string> RoleNameValues { get; } = typeof(RoleNames)
-        .GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.FlattenHierarchy)
-        .Where(f => f.IsLiteral && !f.IsInitOnly && f.FieldType == typeof(string))
-        .Select(f => (string)f.GetRawConstantValue()!)
-        .ToList();
+    internal IReadOnlyList<string> GrantableRoleNames { get; } = [.. catalog.Roles.Select(r => r.Name)];
 
-    /// <summary>
-    /// Persona slug in kebab-case. Shared with <c>DevLoginController</c> so the persona
-    /// list, the sign-in route and the seeder-side reverse lookup cannot disagree.
-    /// </summary>
+    /// <summary>Shared with <c>DevLoginController</c> so the persona list, the route and the reverse lookup agree.</summary>
     internal static string PascalToKebab(string pascal)
     {
         var sb = new StringBuilder(pascal.Length + 4);

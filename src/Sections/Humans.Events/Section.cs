@@ -1,75 +1,76 @@
+using Humans.Base.Extensions;
+using NodaTime;
+using Humans.Base.Authorization;
+using Humans.Base.Constants;
+using Humans.Base.Hosting;
 using Humans.Base.Interfaces;
 using Humans.Base.Interfaces.Caching;
-using Humans.Camps.Contracts;
-using Humans.Gdpr.Contracts;
 using Humans.Calendar.Contracts;
+using Humans.Camps.Contracts;
 using Humans.Email.Contracts;
 using Humans.Events.Contracts;
 using Humans.Events.Data;
 using Humans.Events.Filters;
 using Humans.Events.Services;
 using Humans.Events.ViewComponents;
+using Humans.Gdpr.Contracts;
 using Humans.Settings.Contracts;
 using Humans.Users.Contracts;
-using Humans.Base.Hosting;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Humans.AuditLog.Contracts;
 
 namespace Humans.Events;
 
-/// <summary>
-/// Events' DI entry point, at the project root by convention. Discovered by Shell —
-/// nothing names it, so it needs no section prefix.
-/// </summary>
-public sealed class Section : ISection, IUserPart, ICampPart
+public sealed class Section :
+    ISection,
+    ISectionDataMigrations,
+    IUserPart,
+    ICampPart,
+    ISectionRoles,
+    ISectionAdminNav,
+    ISectionChrome,
+    ISectionNav,
+    ISectionPolicies,
+    ISectionSettings
 {
+    IEnumerable<ChromeComponent> ISectionChrome.Components() =>
+        [new(ChromeSlots.WidgetGallery, typeof(EventsGalleryViewComponent))];
+
+    IReadOnlyList<RoleDefinition> ISectionRoles.Roles { get; } =
+    [
+        new(EventsRoles.EventsAdmin, "Events Admin",
+            "Tastemakers of the program. They review event guide submissions, request edits, and shepherd the schedule from rough draft to ready-for-prime-time.",
+            "fa-solid fa-book-open"),
+    ];
+
     IEnumerable<UserPart> IUserPart.Parts() => [new(UserPartSlots.Profile, typeof(EventsCardViewComponent))];
 
-    // The camp detail page's hosted-events card (peterdrier/Humans#1815).
     IEnumerable<CampPart> ICampPart.Parts() => [new(typeof(EventsCardViewComponent))];
 
     public void Register(IServiceCollection services, IConfiguration configuration)
     {
+        services.AddSingleton<IAuditActionContributor, EventsAuditActions>();
         services.AddSectionDbContext<EventGuideDbContext>(sentinelTable: "events");
 
         services.AddScoped<EventsFeatureFilter>();
-        // Singleton + IDbContextFactory pattern (§15b): repo owns context lifetime.
         services.AddSingleton<IEventRepository, EventRepository>();
 
-        // CachingEventService Singleton decorator + warmup. The base
-        // Service is registered keyed under "event-inner"; unkeyed
-        // IEventManagement resolves to the decorator. The decorator handles its
-        // own invalidation inline after each delegated write (no
-        // SaveChangesInterceptor — all event_* writes flow through
-        // IEventManagement by design).
-
-        // Events owns its email copy and its gallery samples; Email keeps the mechanics
-        // (memory/architecture/email-templates-live-in-sender.md).
         services.AddScoped<EventsEmails>();
         services.AddScoped<IEmailPreviewContributor, EventsEmailPreviews>();
 
-        // Inner Service — Scoped + keyed. Single keyed registration is the
-        // concrete Service instance, exposed as IEventManagement (keyed) for the
-        // decorator.
         services.AddKeyedScoped<IEventManagement, EventService>(CachingEventService.InnerServiceKey);
         services.AddScoped<EventService>(sp =>
             (EventService)sp.GetRequiredKeyedService<IEventManagement>(CachingEventService.InnerServiceKey));
         services.AddScoped<ICalendarFeedContributor>(sp => sp.GetRequiredService<EventService>());
 
-        // CachingEventService — Singleton so the cache persists across
-        // requests. Resolves IEventRepository directly (Singleton via
-        // IDbContextFactory); resolves the Scoped inner via
-        // IServiceScopeFactory per-call.
         services.AddSingleton<CachingEventService>();
         services.AddSingleton<IEventManagement>(sp => sp.GetRequiredService<CachingEventService>());
 
-        // Public contract — forwards to the same caching Singleton so
-        // reads served to other sections (e.g. the camp detail events card) hit
-        // the existing approved-events cache. Interface segregation only; no new cache layer.
         services.AddSingleton<IEventService>(sp => sp.GetRequiredService<CachingEventService>());
 
-        // The guide settings projection carries the Settings-owned TimeZoneId, so a
-        // Settings-side event-settings save has to refresh it (peterdrier/Humans#1627).
+        // The guide settings projection carries Settings' TimeZoneId, so a Settings-side save must refresh it.
         services.AddSingleton<IEventSettingsChangeListener>(sp =>
             sp.GetRequiredService<CachingEventService>());
 
@@ -81,12 +82,79 @@ public sealed class Section : ISection, IUserPart, ICampPart
         // of cached approved events.
         services.AddScoped<IUserMerge>(sp => sp.GetRequiredService<CachingEventService>());
 
-        // Surface Events cache diagnostics on /Debug/CacheStats.
         services.AddSingleton<ICacheStats>(sp => sp.GetRequiredService<CachingEventService>().EventCacheStats);
 
-        // CachingEventService is itself the IHostedService — its StartAsync
-        // drives WarmAllAsync over all four projections. Failures are logged
-        // and swallowed; lazy population via EnsureLoadedAsync still works.
+        // Also the hosted service that warms all four projections. Failures are logged; lazy loading still works.
         services.AddHostedService(sp => sp.GetRequiredService<CachingEventService>());
     }
+
+    IEnumerable<AdminNavGroup> ISectionAdminNav.Groups() =>
+    [
+        new("Events", [
+            new("Dashboard",  "EventsDashboard",  "Index",      null, null, "fa-solid fa-chart-line",    EventsPolicies.Read),
+            new("Moderation", "EventsModeration", "Index",      null, null, "fa-solid fa-gavel",         EventsPolicies.Read),
+            new("Categories", "EventsAdmin",      "Categories", null, null, "fa-solid fa-tags",          EventsPolicies.Read),
+            new("Venues",     "EventsAdmin",      "Venues",     null, null, "fa-solid fa-location-dot",  EventsPolicies.Read),
+            new("Export",     "EventsExport",     "Index",      null, null, "fa-solid fa-file-export",   EventsPolicies.Read)
+        ])
+    ];
+
+    IEnumerable<MemberNavItem> ISectionNav.Items() =>
+    [
+        new(
+            "Events",
+            Policy: PolicyNames.AppAccess,
+            Weight: 50,
+            Visible: (sp, _) => sp.GetRequiredService<IConfiguration>().GetValue<bool>("Features:Events"),
+            Children:
+            [
+                new("Browse Events", Controller: "Events", Action: "Browse"),
+                new("My Submissions", Controller: "Events", Action: "MySubmissions"),
+                new("My Schedule", Controller: "Events", Action: "Schedule"),
+                new("", Divider: true, Policy: EventsPolicies.Read),
+                new("Guide Dashboard", Controller: "EventsDashboard", Action: "Index", Policy: EventsPolicies.Read),
+                new("Moderate Events", Controller: "EventsModeration", Action: "Index", Policy: EventsPolicies.Read),
+                new("Export Guide", Controller: "EventsExport", Action: "Index", Policy: EventsPolicies.Read),
+                new("", Divider: true, Policy: EventsPolicies.Read),
+                new("Guide Settings", RawHref: "/Settings#event-guide", Policy: EventsPolicies.Manage),
+                new("Guide Categories", Controller: "EventsAdmin", Action: "Categories", Policy: EventsPolicies.Read),
+                new("Guide Venues", Controller: "EventsAdmin", Action: "Venues", Policy: EventsPolicies.Read)
+            ])
+    ];
+
+    void ISectionPolicies.AddPolicies(AuthorizationOptions options)
+    {
+        options.AddPolicy(EventsPolicies.Read, policy =>
+            policy.RequireRole(EventsRoles.EventsAdmin, RoleNames.Board, RoleNames.Admin));
+
+        options.AddPolicy(EventsPolicies.Manage, policy =>
+            policy.RequireRole(EventsRoles.EventsAdmin, RoleNames.Admin));
+    }
+
+    IEnumerable<SettingsTab> ISectionSettings.Tabs() =>
+    [
+        new SettingsTab("event-guide", "Settings_TabEventGuide", typeof(EventGuideSettingsTabViewComponent), EventsPolicies.Manage)
+    ];
+
+    internal const string EventIdsKey = "events.event-ids";
+
+    IEnumerable<DataMigration> ISectionDataMigrations.Migrations() =>
+    [
+        new(EventIdsKey, "Events",
+            "Give every guide entry the event it belongs to: the event whose build-to-strike window holds its start date, else the event with the nearest gate opening",
+            "Treating guide entries without an event id as part of the guide's current event",
+            StatusAsync, ApplyAsync),
+    ];
+
+    private static async Task<DataMigrationStatus> StatusAsync(IServiceProvider sp, CancellationToken ct) =>
+        new(["Entry", "Title", "Starts (UTC)", "Event"],
+            [.. (await sp.GetRequiredService<IEventManagement>().GetUnassignedGuideEntriesAsync(ct))
+                .Select(p => (IReadOnlyList<string>)[
+                    p.EntryId.ToString(),
+                    p.Title,
+                    p.StartAt.ToDateTime(DateTimeZone.Utc),
+                    p.EventName])]);
+
+    private static Task<int> ApplyAsync(IServiceProvider sp, Guid actorUserId, CancellationToken ct) =>
+        sp.GetRequiredService<IEventManagement>().AssignGuideEntryEventIdsAsync(ct);
 }

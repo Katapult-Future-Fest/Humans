@@ -1,33 +1,50 @@
+using System.Globalization;
+using Humans.Base.Authorization;
+using Humans.Base.Constants;
 using Humans.Base.Hosting;
 using Humans.Base.Interfaces;
 using Humans.Base.Interfaces.Caching;
 using Humans.Base.Models.Tables;
 using Humans.Gdpr.Contracts;
+using Humans.Rideshare.Contracts;
 using Humans.Rideshare.Data;
 using Humans.Rideshare.Domain;
 using Humans.Rideshare.Services;
 using Humans.Rideshare.Services.Routing;
+using Humans.Settings.Contracts;
 using Humans.Users.Contracts;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.Extensions.Configuration;
+using Humans.Notifications.Contracts;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
+using Humans.AuditLog.Contracts;
 
 namespace Humans.Rideshare;
 
-/// <summary>
-/// Rideshare's DI entry point, at the project root by convention. Discovered by Shell —
-/// nothing names it, so it needs no section prefix.
-/// </summary>
-public sealed class Section : ISection
+public sealed class Section :
+    ISection,
+    ISectionRoles,
+    ISectionAdminNav,
+    ISectionNav,
+    ISectionPolicies,
+    ISectionDataMigrations
 {
+    IReadOnlyList<RoleDefinition> ISectionRoles.Roles { get; } =
+    [
+        new(RideshareRoles.RideshareAdmin, "Rideshare Admin",
+            "Road captains. They set the event's destination and travel windows, watch the season statistics, and keep the day roster of trips and riders.",
+            "fa-solid fa-car"),
+    ];
+
     public void Register(IServiceCollection services, IConfiguration configuration)
     {
+        services.AddSingleton<IAuditActionContributor, RideshareAuditActions>();
+        services.AddSingleton<INotificationSourceContributor, RideshareNotificationSources>();
         services.AddSectionDbContext<RideshareDbContext>(sentinelTable: "rideshare_trips");
 
-        // Singleton + IDbContextFactory pattern (§15b): repo owns context lifetime.
         services.AddSingleton<IRideshareRepository, RideshareRepository>();
 
-        // OpenRouteService: key from the environment, base URL from configuration.
         services.Configure<RouteProviderOptions>(o =>
         {
             o.ApiKey = Environment.GetEnvironmentVariable("ORS_API_KEY") ?? "";
@@ -43,8 +60,6 @@ public sealed class Section : ISection
             // HttpClient logger prints request URLs at Information, which would leak it.
             .RemoveAllLoggers();
 
-        // Inner service — Scoped + keyed; the Singleton decorator resolves it per call
-        // and is what unkeyed IRideshareService resolves to.
         services.AddKeyedScoped<IRideshareService, RideshareService>(CachingRideshareService.InnerServiceKey);
         services.AddSingleton<CachingRideshareService>();
         services.AddSingleton<IRideshareService>(sp => sp.GetRequiredService<CachingRideshareService>());
@@ -54,8 +69,8 @@ public sealed class Section : ISection
         services.AddScoped<IUserDataContributor>(sp => sp.GetRequiredService<CachingRideshareService>());
         services.AddScoped<IUserMerge>(sp => sp.GetRequiredService<CachingRideshareService>());
 
-        // Surface the snapshot cache on /Debug/CacheStats.
         services.AddSingleton<ICacheStats>(sp => sp.GetRequiredService<CachingRideshareService>().SnapshotCacheStats);
+        services.AddSingleton<IEventSettingsChangeListener>(sp => sp.GetRequiredService<CachingRideshareService>());
 
         EnumBadgeMap.Register(new Dictionary<Enum, string>
         {
@@ -69,4 +84,51 @@ public sealed class Section : ISection
             [InterestStatus.Withdrawn] = "bg-dark",
         });
     }
+
+    IEnumerable<AdminNavGroup> ISectionAdminNav.Groups() =>
+    [
+        new("Rideshare", [
+            new("Settings & stats", "RideshareAdmin", "Index", null, null, "fa-solid fa-car",          RidesharePolicies.Read),
+            new("Day roster",       "RideshareAdmin", "Day",   null, null, "fa-solid fa-calendar-day", RidesharePolicies.Read)
+        ])
+    ];
+
+    IEnumerable<MemberNavItem> ISectionNav.Items() =>
+    [
+        new("Nav_Rideshare", Controller: "Rideshare", Action: "Index", Policy: PolicyNames.AppAccess, Weight: 55)
+    ];
+
+    void ISectionPolicies.AddPolicies(AuthorizationOptions options)
+    {
+        options.AddPolicy(RidesharePolicies.Read, policy =>
+            policy.RequireRole(RideshareRoles.RideshareAdmin, RoleNames.Board, RoleNames.Admin));
+
+        options.AddPolicy(RidesharePolicies.Manage, policy =>
+            policy.RequireRole(RideshareRoles.RideshareAdmin, RoleNames.Admin));
+    }
+
+    internal const string EventIdsKey = "rideshare.event-ids";
+
+    IEnumerable<DataMigration> ISectionDataMigrations.Migrations() =>
+    [
+        new(EventIdsKey, "Rideshare",
+            "Give every rideshare settings row, offer and request the event of its year",
+            "Rideshare rows without an event id, and the year fallback that reads them",
+            StatusAsync, ApplyAsync),
+    ];
+
+    // Rows of a year with no event stay unstamped and unlisted: nothing reads them, and listing them would keep the
+    // migration pending forever.
+    private static async Task<DataMigrationStatus> StatusAsync(IServiceProvider sp, CancellationToken ct)
+    {
+        var plan = await sp.GetRequiredService<IRideshareService>().GetEventIdPlanAsync(ct);
+        return new(["Table", "Row", "Year", "Event"],
+            [
+                .. plan.Where(p => p.Event is not null).Select(p => (IReadOnlyList<string>)[
+                    p.Table, p.Id.ToString(), p.Year.ToString(CultureInfo.InvariantCulture), p.Event!.EventName]),
+            ]);
+    }
+
+    private static Task<int> ApplyAsync(IServiceProvider sp, Guid actorUserId, CancellationToken ct) =>
+        sp.GetRequiredService<IRideshareService>().AssignEventIdsAsync(ct);
 }

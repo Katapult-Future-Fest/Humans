@@ -9,7 +9,6 @@ using Humans.Users.Contracts;
 
 namespace Humans.Users.Services;
 
-// Suspend/unsuspend for onboarded humans. Owns no tables. See nobodies-collective#583 (umbrella #563).
 internal sealed class HumanLifecycleService(
     IUserManagement userService,
     INotificationEmitter notificationService,
@@ -28,7 +27,7 @@ internal sealed class HumanLifecycleService(
             return result;
 
         await auditLogService.LogAsync(
-            AuditAction.MemberSuspended,
+            UsersAuditActions.MemberSuspended,
             nameof(User),
             userId,
             $"Suspended{(string.IsNullOrWhiteSpace(notes) ? "" : $": {notes}")}",
@@ -39,14 +38,14 @@ internal sealed class HumanLifecycleService(
             var language = (await userService.GetUserInfoAsync(userId, ct))?.PreferredLanguage;
             var culture = CultureInfo.GetCultureInfo(language.IsSupportedCultureCode() ? language! : "en");
             var body = string.IsNullOrWhiteSpace(notes)
-                ? NoticeResources.GetString("AccountStatus_HeadingAdminSuspended", culture)!
+                ? NoticeResources.GetString("Users_AccountStatus_HeadingAdminSuspended", culture)!
                 : string.Format(culture,
                     NoticeResources.GetString("Users_Notification_AdminSuspendedWithReason", culture)!, notes);
             await notificationService.SendAsync(
-                NotificationSource.AccessSuspended,
+                UsersNotificationSources.AccessSuspended,
                 NotificationClass.Actionable,
                 NotificationPriority.Critical,
-                NoticeResources.GetString("AccountStatus_HeadingSuspended", culture)!,
+                NoticeResources.GetString("Users_AccountStatus_HeadingSuspended", culture)!,
                 [userId],
                 body: body,
                 actionUrl: "/Profile",
@@ -71,7 +70,7 @@ internal sealed class HumanLifecycleService(
             return result;
 
         await auditLogService.LogAsync(
-            AuditAction.MemberUnsuspended,
+            UsersAuditActions.MemberUnsuspended,
             nameof(User),
             userId,
             "Unsuspended",
@@ -79,7 +78,7 @@ internal sealed class HumanLifecycleService(
 
         try
         {
-            await notificationAutoResolve.ResolveBySourceAsync(userId, NotificationSource.AccessSuspended, ct);
+            await notificationAutoResolve.ResolveBySourceAsync(userId, UsersNotificationSources.AccessSuspended, ct);
         }
         catch (Exception ex)
         {
@@ -102,11 +101,20 @@ internal sealed class HumanLifecycleService(
             return result;
 
         await auditLogService.LogAsync(
-            AuditAction.MemberUnsuspended,
+            UsersAuditActions.MemberUnsuspended,
             nameof(User),
             userId,
             "Unsuspended after completing required consents",
             nameof(RestoreConsentSuspensionAsync));
+
+        try
+        {
+            await notificationAutoResolve.ResolveBySourceAsync(userId, UsersNotificationSources.AccessSuspended, ct);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed to resolve AccessSuspended notifications for user {UserId}", userId);
+        }
 
         return result;
     }

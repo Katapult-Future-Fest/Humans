@@ -1,3 +1,4 @@
+using Humans.Tickets.Contracts;
 using System.Reflection;
 using AwesomeAssertions;
 using Humans.Campaigns.Controllers;
@@ -7,15 +8,12 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace Humans.Campaigns.Tests.Controllers;
 
-/// <summary>
-/// Verifies CampaignController action authorization wiring.
-/// </summary>
 public class CampaignControllerTests
 {
     [HumansFact]
     public void Class_IsProtected()
     {
-        var classAttr = typeof(CampaignController).GetCustomAttribute<AuthorizeAttribute>();
+        var classAttr = typeof(CampaignController).GetCustomAttribute<AuthorizeAttribute>(inherit: false);
         classAttr.Should().NotBeNull("class-level [Authorize] must protect all campaign actions");
     }
 
@@ -28,15 +26,15 @@ public class CampaignControllerTests
     }
 
     [HumansFact]
-    public void Detail_Action_HasTicketAdminOrAdmin_Policy()
+    public void Detail_Action_HasTicketsRead_Policy()
     {
-        AssertActionPolicy(nameof(CampaignController.Detail), PolicyNames.TicketAdminOrAdmin, typeof(HttpGetAttribute));
+        AssertActionPolicy(nameof(CampaignController.Detail), TicketsPolicies.Read, typeof(HttpGetAttribute));
     }
 
     [HumansFact]
-    public void GenerateCodes_Action_HasTicketAdminOrAdmin_Policy()
+    public void GenerateCodes_Action_HasTicketsManage_Policy()
     {
-        AssertActionPolicy(nameof(CampaignController.GenerateCodes), PolicyNames.TicketAdminOrAdmin, typeof(HttpPostAttribute));
+        AssertActionPolicy(nameof(CampaignController.GenerateCodes), TicketsPolicies.Manage, typeof(HttpPostAttribute));
     }
 
     [HumansFact]
@@ -53,7 +51,6 @@ public class CampaignControllerTests
         AssertActionPolicy(nameof(CampaignController.SendWave), PolicyNames.AdminOnly, typeof(HttpGetAttribute));
         AssertActionPolicy(nameof(CampaignController.SendWave), PolicyNames.AdminOnly, typeof(HttpPostAttribute));
         AssertActionPolicy(nameof(CampaignController.Resend), PolicyNames.AdminOnly, typeof(HttpPostAttribute));
-        AssertActionPolicy(nameof(CampaignController.RetryAllFailed), PolicyNames.AdminOnly, typeof(HttpPostAttribute));
     }
 
     [HumansFact]
@@ -67,7 +64,6 @@ public class CampaignControllerTests
         AssertActionHasValidateAntiForgery(nameof(CampaignController.Complete), typeof(HttpPostAttribute));
         AssertActionHasValidateAntiForgery(nameof(CampaignController.SendWave), typeof(HttpPostAttribute));
         AssertActionHasValidateAntiForgery(nameof(CampaignController.Resend), typeof(HttpPostAttribute));
-        AssertActionHasValidateAntiForgery(nameof(CampaignController.RetryAllFailed), typeof(HttpPostAttribute));
     }
 
     [HumansFact]
@@ -96,7 +92,7 @@ public class CampaignControllerTests
     private static void AssertActionPolicy(string actionName, string policy, Type httpMethodAttributeType)
     {
         var method = GetAction(actionName, httpMethodAttributeType);
-        var auth = method.GetCustomAttribute<AuthorizeAttribute>();
+        var auth = method.GetCustomAttribute<AuthorizeAttribute>(inherit: false);
         auth.Should().NotBeNull($"{actionName} ({httpMethodAttributeType.Name}) requires [Authorize]");
         auth.Policy.Should().Be(policy,
             because: $"{actionName} ({httpMethodAttributeType.Name}) must use {policy}");

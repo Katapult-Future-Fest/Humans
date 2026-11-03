@@ -1,3 +1,4 @@
+using Microsoft.Extensions.DependencyInjection;
 using AwesomeAssertions;
 using Humans.AuditLog.Contracts;
 using Humans.Calendar.Data;
@@ -13,12 +14,9 @@ using Xunit;
 namespace Humans.Calendar.Tests.Services;
 
 /// <summary>
-/// "The Board can see what happened" is a section invariant, and until these tests
-/// existed every <c>audit.LogAsync</c> call in <see cref="CalendarService"/> could be
-/// deleted with the whole suite still green. Each mutation writes one entry; the
-/// event-level ones additionally carry the owning team as <c>relatedEntityId</c>, which
-/// is what makes team-scoped audit filtering work, and the per-occurrence ones
-/// deliberately do not.
+/// "The Board can see what happened": each mutation writes one entry. Event-level entries carry the
+/// owning team as <c>relatedEntityId</c>, which team-scoped audit filtering needs; per-occurrence
+/// ones deliberately do not.
 /// </summary>
 public class CalendarServiceAuditTests
 {
@@ -38,7 +36,7 @@ public class CalendarServiceAuditTests
         CalendarServiceValidationTests.ActiveTeams(),
         new FakeClock(Now),
         _audit,
-        NullLogger<CalendarService>.Instance);
+        NullLogger<CalendarService>.Instance, Substitute.For<IServiceScopeFactory>());
 
     [HumansFact]
     public async Task CreateEventWithResultAsync_WritesOneAuditEntry_RelatedToTheOwningTeam()
@@ -56,7 +54,7 @@ public class CalendarServiceAuditTests
 
         result.Succeeded.Should().BeTrue(result.ErrorMessage);
         await _audit.Received(1).LogAsync(
-            AuditAction.CalendarEventCreated, AuditEntityTypes.CalendarEvent, result.Event!.Id,
+            CalendarAuditActions.CalendarEventCreated, AuditEntityTypes.CalendarEvent, result.Event!.Id,
             Arg.Any<string>(), actor,
             teamId, AuditEntityTypes.Team);
     }
@@ -91,7 +89,7 @@ public class CalendarServiceAuditTests
 
         result.Succeeded.Should().BeTrue(result.ErrorMessage);
         await _audit.Received(1).LogAsync(
-            AuditAction.CalendarEventUpdated, AuditEntityTypes.CalendarEvent, id,
+            CalendarAuditActions.CalendarEventUpdated, AuditEntityTypes.CalendarEvent, id,
             Arg.Any<string>(), actor,
             newTeamId, AuditEntityTypes.Team);
     }
@@ -108,7 +106,7 @@ public class CalendarServiceAuditTests
         await CreateSut().DeleteEventAsync(id, actor, TestContext.Current.CancellationToken);
 
         await _audit.Received(1).LogAsync(
-            AuditAction.CalendarEventDeleted, AuditEntityTypes.CalendarEvent, id,
+            CalendarAuditActions.CalendarEventDeleted, AuditEntityTypes.CalendarEvent, id,
             Arg.Any<string>(), actor,
             teamId, AuditEntityTypes.Team);
     }
@@ -123,7 +121,7 @@ public class CalendarServiceAuditTests
             Guid.NewGuid(), Guid.NewGuid(), TestContext.Current.CancellationToken);
 
         await _audit.DidNotReceive().LogAsync(
-            Arg.Any<AuditAction>(), Arg.Any<string>(), Arg.Any<Guid>(),
+            Arg.Any<AuditActionDefinition>(), Arg.Any<string>(), Arg.Any<Guid>(),
             Arg.Any<string>(), Arg.Any<Guid>(), Arg.Any<Guid?>(), Arg.Any<string?>());
     }
 
@@ -144,7 +142,7 @@ public class CalendarServiceAuditTests
             eventId, Instant.FromUtc(2026, 6, 8, 10, 0), actor, TestContext.Current.CancellationToken);
 
         await _audit.Received(1).LogAsync(
-            AuditAction.CalendarOccurrenceCancelled, AuditEntityTypes.CalendarEvent, eventId,
+            CalendarAuditActions.CalendarOccurrenceCancelled, AuditEntityTypes.CalendarEvent, eventId,
             Arg.Any<string>(), actor,
             null);
     }
@@ -170,7 +168,7 @@ public class CalendarServiceAuditTests
             actor, TestContext.Current.CancellationToken);
 
         await _audit.Received(1).LogAsync(
-            AuditAction.CalendarOccurrenceOverridden, AuditEntityTypes.CalendarEvent, eventId,
+            CalendarAuditActions.CalendarOccurrenceOverridden, AuditEntityTypes.CalendarEvent, eventId,
             Arg.Any<string>(), actor,
             null);
     }

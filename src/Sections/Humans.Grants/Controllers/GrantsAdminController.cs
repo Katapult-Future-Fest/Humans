@@ -3,6 +3,7 @@ using Humans.Base.Controllers;
 using Humans.Grants.Authorization;
 using Humans.Grants.Models;
 using Humans.Grants.Services;
+using Humans.Settings.Contracts;
 using Humans.Users.Contracts;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -11,12 +12,8 @@ using NodaTime;
 namespace Humans.Grants.Controllers;
 
 /// <summary>
-/// The managers' and the Board's screens. Routed under <c>/Grants/Admin</c> rather than
-/// <c>/Admin</c>: admin pages belong to their section's URL space
-/// (memory/architecture/no-admin-url-section.md). Localization-exempt. The policy admits any
-/// program manager; every action also names its own policy (BoardOrAdmin for program
-/// administration, the manage policy for grant actions), and per-program operations are checked
-/// against the program resource.
+/// The class policy admits any program manager; each action names its own policy too, and per-program operations are
+/// checked against the program resource.
 /// </summary>
 [Authorize(Policy = GrantsPolicies.Manage)]
 [Route("Grants/Admin")]
@@ -24,10 +21,9 @@ internal sealed class GrantsAdminController(
     IGrantManagement grants,
     IUserService users,
     IAuthorizationService authorization,
+    ISettingsService settings,
     ILogger<GrantsAdminController> logger) : HumansControllerBase(users)
 {
-    // ── Programs ──────────────────────────────────────────────────────────
-
     [HttpGet("")]
     public async Task<IActionResult> Index(CancellationToken ct)
     {
@@ -37,7 +33,7 @@ internal sealed class GrantsAdminController(
         var canAdminister = GrantsPolicyHandler.IsAdministering(User);
         var programs = await grants.GetProgramsAsync(ct);
         if (!canAdminister)
-            programs = programs.Where(p => p.IsManager(user.Id)).ToList();
+            programs = programs.Where(p => user.AllUserIds.Any(p.IsManager)).ToList();
         return View(new AdminIndexViewModel
         {
             Today = grants.Today,
@@ -50,7 +46,8 @@ internal sealed class GrantsAdminController(
     [Authorize(Policy = PolicyNames.BoardOrAdmin)]
     public async Task<IActionResult> New(CancellationToken ct)
     {
-        return View("Form", await FillAsync(new ProgramFormViewModel { Year = grants.Today.Year }, ct));
+        var active = await settings.GetActiveEventSettingsAsync(ct);
+        return View("Form", await FillAsync(new ProgramFormViewModel { EventSettingsId = active?.Id }, ct));
     }
 
     [HttpPost("New")]
@@ -121,8 +118,6 @@ internal sealed class GrantsAdminController(
         return RedirectToAction(nameof(Program), new { programId });
     }
 
-    // ── Grants ────────────────────────────────────────────────────────────
-
     [HttpPost("{programId:guid}/Issue")]
     [Authorize(Policy = GrantsPolicies.Manage)]
     [ValidateAntiForgeryToken]
@@ -147,8 +142,6 @@ internal sealed class GrantsAdminController(
         ManageAsync(programId, async actor =>
             ((GrantMutationResult)await grants.ResendNoticeAsync(grantId, actor, ct), "Notice sent again"), ct, grantId);
 
-    // ── Helpers ───────────────────────────────────────────────────────────
-
     /// <summary>Loads the program and checks the operation against it; 404 and 403 as results.</summary>
     private async Task<(ProgramInfo? Program, IActionResult? Error)> AuthorizedAsync(
         Guid programId, ProgramOperationRequirement requirement, CancellationToken ct)
@@ -159,10 +152,7 @@ internal sealed class GrantsAdminController(
         return allowed.Succeeded ? (program, null) : (null, Forbid());
     }
 
-    /// <summary>
-    /// An action on a program the actor manages. A grant route names the program it is under;
-    /// a grant of another program is 404 so a manager of A never acts on B's grants.
-    /// </summary>
+    /// <summary>A grant of another program is 404, so a manager of A never acts on B's grants.</summary>
     private async Task<IActionResult> ManageAsync(
         Guid programId, Func<Guid, Task<(GrantMutationResult Result, string Success)>> act, CancellationToken ct,
         Guid? grantId = null)
@@ -189,6 +179,10 @@ internal sealed class GrantsAdminController(
     private async Task<ProgramFormViewModel> FillAsync(ProgramFormViewModel model, CancellationToken ct)
     {
         model.People = await UserService.GetUserInfosAsync(model.ManagerUserIds, ct);
+        model.Events = (await settings.GetAllEventSettingsAsync(ct))
+            .Where(e => e.Status != EventSettingsStatus.Deleted)
+            .OrderByDescending(e => e.GateOpeningDate)
+            .ToList();
         return model;
     }
 }

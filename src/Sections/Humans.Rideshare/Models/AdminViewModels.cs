@@ -7,17 +7,21 @@ using NodaTime;
 
 namespace Humans.Rideshare.Models;
 
-/// <summary>Admin settings form for the active year, with the season's derived stats beside it.</summary>
 internal sealed class RideshareSettingsViewModel
 {
-    public int Year { get; set; }
+    /// <summary>The event the form edits, so a save lands on it even if another event becomes active meanwhile.</summary>
+    public Guid? EventSettingsId { get; set; }
+
+    public string EventName { get; set; } = string.Empty;
 
     [Required, StringLength(200)]
     public string DestinationLabel { get; set; } = string.Empty;
 
+    [BindRequired]
     [Range(-90, 90)]
     public double DestinationLatitude { get; set; }
 
+    [BindRequired]
     [Range(-180, 180)]
     public double DestinationLongitude { get; set; }
 
@@ -43,7 +47,8 @@ internal sealed class RideshareSettingsViewModel
         var s = snapshot.Settings;
         return new RideshareSettingsViewModel
         {
-            Year = snapshot.Year,
+            EventSettingsId = snapshot.EventSettingsId,
+            EventName = snapshot.EventName,
             DestinationLabel = s?.DestinationLabel ?? string.Empty,
             DestinationLatitude = s?.DestinationLatitude ?? 0,
             DestinationLongitude = s?.DestinationLongitude ?? 0,
@@ -73,10 +78,10 @@ internal sealed class RideshareSettingsViewModel
 /// <summary>One accepted seat on a trip's roster. The rider is the request's owner when the driver answered a pin, else whoever expressed interest.</summary>
 internal sealed record RosterRider(Guid UserId, int Seats);
 
-/// <summary>A trip happening on the day, any status, with its accepted riders.</summary>
+/// <summary>Any status.</summary>
 internal sealed record DayRosterRow(TripView Trip, IReadOnlyList<RosterRider> Riders);
 
-internal sealed record DayViewModel(int Year, LocalDate Date, IReadOnlyList<DayRosterRow> Trips)
+internal sealed record DayViewModel(string EventName, LocalDate Date, IReadOnlyList<DayRosterRow> Trips)
 {
     public static DayViewModel Build(RideshareSnapshot snapshot, LocalDate date)
     {
@@ -89,7 +94,7 @@ internal sealed record DayViewModel(int Year, LocalDate Date, IReadOnlyList<DayR
                 .Select(i => new RosterRider(RiderOf(i, requestOwners), i.Seats))
                 .ToList()))
             .ToList();
-        return new DayViewModel(snapshot.Year, date, rows);
+        return new DayViewModel(snapshot.EventName, date, rows);
     }
 
     private static Guid RiderOf(InterestView interest, IReadOnlyDictionary<Guid, Guid> requestOwners) =>

@@ -1,18 +1,16 @@
 namespace Humans.Shifts.Contracts;
 
 /// <summary>
-/// Render model for <c>_VolunteerProfileBadges</c>. Combines shift-matching data
-/// (Skills/Quirks/Languages — from VolunteerEventProfile) with the person's dietary
-/// preference + medical conditions (now Profile fields, read via UserInfo).
-/// <para><see cref="MedicalConditions"/> is GDPR Art. 9 — it is populated only when
-/// the building code has confirmed the viewer holds the MedicalDataViewer policy.
-/// The partial additionally guards on <see cref="ShowMedical"/>.</para>
-/// <para>Public under <c>Contracts/</c> because Debug's widget gallery constructs it.</para>
+/// Medical conditions are GDPR Art. 9 data and never travel in this model: the partial renders a reveal control when
+/// <see cref="HasMedicalConditions"/> and <see cref="CanRevealMedical"/> both hold, and the text comes back from
+/// <c>POST /Shifts/Medical/{userId}/Reveal</c>, which audits every reveal. The builder sets both flags only once it has
+/// confirmed MedicalDataViewer. Public because widget-gallery sample cards construct it.
 /// </summary>
 public sealed record VolunteerBadgesViewModel(
+    Guid UserId,
     IReadOnlyList<string> Skills,
     IReadOnlyList<string> Quirks,
     IReadOnlyList<string> Languages,
     string? DietaryPreference,
-    string? MedicalConditions,
-    bool ShowMedical);
+    bool HasMedicalConditions,
+    bool CanRevealMedical);

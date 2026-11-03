@@ -1,3 +1,4 @@
+using Humans.Tickets.Contracts;
 using CsvHelper;
 using Humans.Base.Csv;
 using Humans.Campaigns.Domain;
@@ -127,7 +128,7 @@ internal sealed class CampaignController(
     }
 
     [HttpGet("{id:guid}")]
-    [Authorize(Policy = PolicyNames.TicketAdminOrAdmin)]
+    [Authorize(Policy = TicketsPolicies.Read)]
     public async Task<IActionResult> Detail(Guid id)
     {
         var page = await campaignService.GetDetailPageAsync(id, HttpContext.RequestAborted);
@@ -220,7 +221,7 @@ internal sealed class CampaignController(
 
     [HttpPost("{id:guid}/GenerateCodes")]
     [ValidateAntiForgeryToken]
-    [Authorize(Policy = PolicyNames.TicketAdminOrAdmin)]
+    [Authorize(Policy = TicketsPolicies.Manage)]
     public async Task<IActionResult> GenerateCodes(Guid id, int count, string discountType, [BindRequired] decimal discountValue)
     {
         var currentUser = await GetCurrentUserInfoAsync();
@@ -354,18 +355,5 @@ internal sealed class CampaignController(
         await campaignService.ResendToGrantAsync(currentUser.Id, grantId);
         SetSuccess("Resend queued.");
         return RedirectToAction(nameof(Detail), new { id = campaignId.Value });
-    }
-
-    [HttpPost("{id:guid}/RetryAllFailed")]
-    [ValidateAntiForgeryToken]
-    [Authorize(Policy = PolicyNames.AdminOnly)]
-    public async Task<IActionResult> RetryAllFailed(Guid id)
-    {
-        var currentUser = await GetCurrentUserInfoAsync();
-        if (currentUser is null) return Unauthorized();
-
-        await campaignService.RetryAllFailedAsync(currentUser.Id, id);
-        SetSuccess("Retrying all failed sends.");
-        return RedirectToAction(nameof(Detail), new { id });
     }
 }

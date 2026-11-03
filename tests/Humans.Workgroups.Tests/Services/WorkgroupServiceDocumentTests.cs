@@ -137,8 +137,6 @@ public sealed class WorkgroupServiceDocumentTests : WorkgroupsTestHarness
         (await service.GetByIdAsync(group.Id, Ct))!.AwaitingDisposition().Should().BeEmpty();
     }
 
-    // ── Publish ───────────────────────────────────────────────────────────
-
     [HumansFact]
     public async Task Publish_ADraftWithABody_Succeeds()
     {
@@ -177,8 +175,6 @@ public sealed class WorkgroupServiceDocumentTests : WorkgroupsTestHarness
 
         (await act()).Refusal.Should().NotBeNull();
     }
-
-    // ── Comment window ────────────────────────────────────────────────────
 
     [HumansFact]
     public async Task OpenComments_OnADraft_ReturnsARefusal()
@@ -261,8 +257,6 @@ public sealed class WorkgroupServiceDocumentTests : WorkgroupsTestHarness
         reloaded.CommentsOpenAt.Should().Be(now);
     }
 
-    // ── Delivering freezes the body ──────────────────────────────────────
-
     [HumansFact]
     public async Task Deliver_APublishedDocument_FreezesTheBody()
     {
@@ -327,8 +321,6 @@ public sealed class WorkgroupServiceDocumentTests : WorkgroupsTestHarness
             .Status.Should().Be(WorkgroupDocumentStatus.Delivered);
     }
 
-    // ── Disposition only on Delivered ────────────────────────────────────
-
     [HumansFact]
     public async Task RecordDisposition_OnAPublishedButNotDeliveredDocument_ReturnsARefusal()
     {
@@ -371,8 +363,6 @@ public sealed class WorkgroupServiceDocumentTests : WorkgroupsTestHarness
         (await act()).Refusal!.Key
             .Should().Be(WorkgroupErrorKeys.ReasonsRequired);
     }
-
-    // ── Comments: category and window gating ─────────────────────────────
 
     [HumansFact]
     public async Task AddComment_UnknownCategory_ReturnsARefusal()
@@ -439,8 +429,6 @@ public sealed class WorkgroupServiceDocumentTests : WorkgroupsTestHarness
             .Should().Be(WorkgroupCommentDisposition.Pending);
     }
 
-    // ── Bulk category response touches only Pending comments ────────────
-
     [HumansFact]
     public async Task RespondToCategory_LeavesAlreadyAnsweredCommentsUntouched()
     {
@@ -494,7 +482,7 @@ public sealed class WorkgroupServiceDocumentTests : WorkgroupsTestHarness
         await NewService().HideCommentAsync(comment.Id, member, "Off-topic", Ct);
 
         await AuditLog.Received(1).LogAsync(
-            AuditAction.WorkgroupCommentHidden, AuditEntityTypes.WorkgroupComment, comment.Id,
+            WorkgroupsAuditActions.WorkgroupCommentHidden, AuditEntityTypes.WorkgroupComment, comment.Id,
             Arg.Is<string>(text => text.Contains("Off-topic", StringComparison.Ordinal)),
             member, Arg.Any<Guid?>(), Arg.Any<string?>());
     }

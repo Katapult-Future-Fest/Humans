@@ -8,7 +8,7 @@ using NodaTime;
 
 namespace Humans.Rideshare.Models;
 
-/// <summary>Create/edit form for a ride request. Date travels as an ISO string.</summary>
+/// <summary>The date travels as an ISO string.</summary>
 internal sealed class RequestFormViewModel
 {
     public Guid? Id { get; set; }
@@ -38,6 +38,7 @@ internal sealed class RequestFormViewModel
     [BindRequired]
     public LuggageSize LuggageLoad { get; set; }
 
+    [BindRequired]
     public bool CanContributeToFuel { get; set; } = true;
 
     [StringLength(1000, ErrorMessage = "Validation_MaxLength")]

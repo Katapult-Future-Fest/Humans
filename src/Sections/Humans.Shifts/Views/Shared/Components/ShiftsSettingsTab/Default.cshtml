@@ -1,8 +1,7 @@
 @model Humans.Shifts.Models.EventSettingsViewModel
 
-@* Explicit asp-controller/asp-action: this view renders inside /Settings, so ambient
-   route data would otherwise resolve "Settings" against the wrong controller (Settings'
-   own _EventSettingsForm.cshtml documents the same gotcha). *@
+@* Explicit controller and action: inside /Settings, ambient route data would resolve "Settings" against the
+   wrong controller. *@
 <form method="post" asp-controller="Shifts" asp-action="Settings" style="max-width: 540px;">
     <div class="mb-3 form-check">
         <input asp-for="IsShiftBrowsingOpen" type="checkbox" class="form-check-input" />
@@ -15,6 +14,27 @@
     <div class="mb-3">
         <label asp-for="ReminderLeadTimeHours" class="form-label">Reminder Lead Time (hours)</label>
         <input asp-for="ReminderLeadTimeHours" type="number" class="form-control" />
+    </div>
+
+    <hr />
+    <p class="small text-muted mb-2">Build sub-periods: the dashboard and shift browser split the build window into four named phases. Each is the start day relative to gate opening; the next one's start ends it. -365 ≤ First crew &lt; Set-up week &lt; Pre-event week &lt; Finishing weekend &lt; 0.</p>
+    <div class="row">
+        <div class="col-6 mb-3">
+            <label asp-for="FirstCrewStartOffset" class="form-label">First Crew Start</label>
+            <input asp-for="FirstCrewStartOffset" type="number" min="-365" max="-1" class="form-control" />
+        </div>
+        <div class="col-6 mb-3">
+            <label asp-for="SetupWeekStartOffset" class="form-label">Set-up Week Start</label>
+            <input asp-for="SetupWeekStartOffset" type="number" min="-365" max="-1" class="form-control" />
+        </div>
+        <div class="col-6 mb-3">
+            <label asp-for="PreEventWeekStartOffset" class="form-label">Pre-event Week Start</label>
+            <input asp-for="PreEventWeekStartOffset" type="number" min="-365" max="-1" class="form-control" />
+        </div>
+        <div class="col-6 mb-3">
+            <label asp-for="FinishingWeekendStartOffset" class="form-label">Finishing Weekend Start</label>
+            <input asp-for="FinishingWeekendStartOffset" type="number" min="-365" max="-1" class="form-control" />
+        </div>
     </div>
 
     <button type="submit" class="btn btn-primary">Save</button>

@@ -1,3 +1,4 @@
+using Humans.AuditLog.Contracts;
 using Humans.Base.Extensions;
 using Humans.Consent.Contracts;
 using Humans.Consent.Data;
@@ -10,26 +11,21 @@ using NodaTime;
 namespace Humans.Consent.Services;
 
 /// <summary>
-/// The Consent Coordinator review Consent owns (<c>consent_reviews</c>): the reads behind
-/// <see cref="IConsentService"/>, the <see cref="IConsentWrite"/> annotations, the
-/// <c>consent.profile-review</c> copy and the Article 15/17 slice. Until the copy has run, a
-/// member without a row reads their legacy <c>profiles</c> review columns through
-/// <see cref="UserInfo"/> (Users decomposition plan §3.1 step 4).
+/// Until the <c>consent.profile-review</c> copy has run, a member without a row reads their legacy
+/// <c>profiles</c> review columns. No <c>IUserMerge</c>: reads resolve a merged-away id forward, so the
+/// survivor's own review stands.
 /// </summary>
-/// <remarks>
-/// No <c>IUserMerge</c>: rows stay keyed to the id they were written for and reads resolve a
-/// merged-away id forward, so the survivor's own review stands — as it did when these were
-/// profile columns, which the profile fold never moved.
-/// </remarks>
 internal sealed class ConsentReviewService(
     IConsentReviewRepository repo,
     IUserService users,
     IUserWrite userWrite,
+    IAuditLogService auditLog,
     IClock clock) : IConsentWrite, IUserDataContributor
 {
     internal const string ConsentReviewSlice = "ConsentReview";
 
-    // ─── Reads ───────────────────────────────────────────────────────────────────
+    /// <summary>The viewer reads a Profile entity as the person the row is about.</summary>
+    private const string ProfileEntityType = "Profile";
 
     public async Task<ConsentReviewInfo> GetReviewAsync(Guid userId, CancellationToken ct = default)
     {
@@ -50,9 +46,7 @@ internal sealed class ConsentReviewService(
         return result;
     }
 
-    // ─── IConsentWrite ───────────────────────────────────────────────────────────
-
-    public Task<OnboardingResult> RecordConsentCheckAsync(
+    public async Task<OnboardingResult> RecordConsentCheckAsync(
         Guid userId, ConsentCheckStatus status, Guid? reviewerId, string? notes, CancellationToken ct = default)
     {
         if (status is not (ConsentCheckStatus.Cleared or ConsentCheckStatus.Flagged))
@@ -60,9 +54,9 @@ internal sealed class ConsentReviewService(
                 "RecordConsentCheck only accepts Cleared or Flagged; use SetConsentCheckPending for the system-driven Pending transition.",
                 nameof(status));
 
-        return MutateAsync(userId, (row, now) =>
+        var cleared = status == ConsentCheckStatus.Cleared;
+        var result = await MutateAsync(userId, (row, now) =>
         {
-            var cleared = status == ConsentCheckStatus.Cleared;
             if (cleared && row.RejectedAt is not null)
                 return "AlreadyRejected";
             row.Status = status;
@@ -72,6 +66,16 @@ internal sealed class ConsentReviewService(
             row.IsApproved = cleared;
             return null;
         }, ct);
+        if (!result.Success)
+            return result;
+
+        var action = cleared ? ConsentAuditActions.ConsentCheckCleared : ConsentAuditActions.ConsentCheckFlagged;
+        var description = cleared ? "Consent check cleared" : $"Consent check flagged: {notes}";
+        if (reviewerId is { } reviewer)
+            await auditLog.LogAsync(action, ProfileEntityType, userId, description, reviewer);
+        else
+            await auditLog.LogAsync(action, ProfileEntityType, userId, description, nameof(ConsentReviewService));
+        return result;
     }
 
     public Task<OnboardingResult> SetConsentCheckPendingAsync(Guid userId, CancellationToken ct = default) =>
@@ -94,8 +98,8 @@ internal sealed class ConsentReviewService(
             return null;
         }, ct);
 
-    // A member with no row yet starts from their legacy review, so a write never drops what the
-    // profile columns still hold. The write is keyed to the id asked with, as the profile was.
+    // A member with no row starts from their legacy review, so a write never drops what the profile columns
+    // still hold. Keyed to the id asked with.
     private async Task<OnboardingResult> MutateAsync(
         Guid userId, Func<ConsentReview, Instant, string?> apply, CancellationToken ct)
     {
@@ -114,15 +118,11 @@ internal sealed class ConsentReviewService(
         return new OnboardingResult(true);
     }
 
-    // ─── consent.profile-review ──────────────────────────────────────────────────
-
-    /// <summary>A legacy review the copy would write, and whether the member's stored state still
-    /// has to become Rejected (a legacy rejection a live account's <c>users.State</c> never
-    /// recorded).</summary>
+    /// <summary><c>SetRejectedState</c>: a legacy rejection the live account's <c>users.State</c>
+    /// never recorded.</summary>
     internal sealed record PendingCopy(ConsentReviewInfo Review, bool CopyRow, bool SetRejectedState);
 
-    /// <summary>Every account (tombstones included) whose legacy profile review has no row yet,
-    /// plus every live account whose legacy rejection is not yet its stored state.</summary>
+    /// <summary>Tombstones included for the row copy; only live accounts for the state.</summary>
     public async Task<IReadOnlyList<PendingCopy>> GetUncopiedLegacyReviewsAsync(CancellationToken ct = default)
     {
         var copied = (await repo.GetAllAsync(ct)).Select(r => r.UserId).ToHashSet();
@@ -154,15 +154,13 @@ internal sealed class ConsentReviewService(
         return written;
     }
 
-    /// <summary>The one reader of the obsolete legacy fields: the read fallback, the write's
-    /// starting point and the copy. Deleted with the migration once production reports it done.
-    /// Null when the profile holds no review. The legacy enum maps by name (same members, same
-    /// stored strings).</summary>
+    /// <summary>The only reader of the obsolete legacy fields; it goes when the data migration is retired. Null
+    /// when the profile holds no review. The legacy enum maps by name.</summary>
     private static ConsentReviewInfo? LegacyReview(UserInfo? info)
     {
         if (info?.Profile is not { } p)
             return null;
-#pragma warning disable HUM_PROFILE_REVIEW // the fallback and copy the fields are kept for (plan §3.1)
+#pragma warning disable HUM_PROFILE_REVIEW // read fallback and copy, until the data migration is retired
         if (p.ConsentCheckStatus is null && !p.IsApproved && p.RejectedAt is null)
             return null;
         return new ConsentReviewInfo(
@@ -202,10 +200,8 @@ internal sealed class ConsentReviewService(
         UpdatedAt = now,
     };
 
-    // ─── IUserDataContributor ────────────────────────────────────────────────────
-
-    /// <summary>The rows of this human's own id and every merged-away id (rows stay keyed to the
-    /// id they were written for). Legacy profile values are still exported by Users' profile slices.</summary>
+    /// <summary>Rows of every id in the chain. Legacy profile values are still exported by Users' profile
+    /// slices.</summary>
     public async Task<IReadOnlyList<UserDataSlice>> ContributeForUserAsync(Guid userId, CancellationToken ct)
     {
         var info = await users.GetUserInfoAsync(userId, ct);

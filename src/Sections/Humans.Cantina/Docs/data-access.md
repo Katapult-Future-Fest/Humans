@@ -14,16 +14,16 @@ Called only by `DietaryProfileService`.
 
 Implements `ICantinaService` (public reads: `GetDietaryProfileAsync`,
 `GetDietaryProfilesAsync`), `IDietaryProfileManagement` (internal: save,
-legacy copy), `IUserDataContributor` (export slice `DietaryProfile`,
+decline), `IUserDataContributor` (export slice `DietaryProfile`,
 erase deletes the row) and `IUserMerge` (survivor wins). Reads resolve the
-merge chain and the legacy `ProfileInfo` food fields through
+merge chain through
 `IUserService`. No cache.
 
 ### CantinaRosterService (Scoped)
 
 No repository. Cross-section reads via `IShiftService`
 (on-site cohort per day, via `GetOnSiteUserIdsForDayAsync`), `ISettingsService`
-(active-burn metadata — `GetActiveAsync` returning `EventSettingsInfo`, for
+(active-burn metadata — `GetActiveEventSettingsAsync` returning `EventSettingsInfo`, for
 the gate-opening/strike-end date range and event timezone),
 `IUserService` (cached `UserInfo` for burner names) and `ICantinaService`
 (dietary preference, allergies, intolerances), plus `IAuditLogService`
@@ -38,11 +38,3 @@ confirmed shift of the event. The first-shift scan reads confirmed
 signups through the same `IShiftService` surface, one call
 per day from build start through `min(StrikeEndOffset, the last day the
 caller needs)` — not the whole event every time.
-
-### Data migrations
-
-`cantina.profile-dietary` (`SectionDataMigrations`) copies the legacy
-`profiles` food columns into rows for members without one; Apply is
-idempotent.
-
----

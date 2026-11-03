@@ -5,18 +5,9 @@ using Xunit;
 namespace Humans.Notifications.Tests.Enums;
 
 /// <summary>
-/// Notifications' string-stored-enum guard. <see cref="NotificationSource"/>,
-/// <see cref="NotificationClass"/> and <see cref="NotificationPriority"/> sit on
-/// Notifications' contracts leaf, so the section's own tests guard them.
+/// Both are persisted with <c>HasConversion&lt;string&gt;()</c>: renaming a member leaves the OLD
+/// string in the column, so a rename needs a migration that UPDATEs the stored values.
 /// </summary>
-/// <remarks>
-/// All three are persisted with <c>HasConversion&lt;string&gt;()</c>: renaming a member leaves
-/// the OLD string in <c>notifications.source</c> / <c>.class</c> / <c>.priority</c>. A rename
-/// needs a migration that UPDATEs the stored values.
-/// <see cref="NotificationSource"/> is doubly load-bearing: it is named by three moved
-/// sections plus eleven Base services through the contracts leaf, so a rename is far more
-/// likely to be silently missed somewhere than for a single-caller enum.
-/// </remarks>
 public class EnumStringStabilityTests
 {
     [HumansTheory]
@@ -36,19 +27,6 @@ public class EnumStringStabilityTests
 
     public static TheoryData<Type, string[]> StringStoredEnumData => new()
     {
-        {
-            typeof(NotificationSource), [
-                "TeamMemberAdded", "ShiftCoverageGap", "ShiftSignupChange", "ConsentReviewNeeded",
-                "ApplicationSubmitted", "SyncError", "TermRenewalReminder", "ApplicationApproved",
-                "ApplicationRejected", "VolunteerApproved", "ProfileRejected", "AccessSuspended",
-                "ReConsentRequired", "TeamJoinRequestSubmitted", "TeamJoinRequestDecided",
-                "FeedbackResponse", "WorkspaceCredentialsReady", "RoleAssignmentChanged",
-                "CampaignReceived", "TeamMemberRemoved", "ShiftAssigned", "GoogleDriftDetected",
-                "FacilitatedMessageReceived", "LegalDocumentPublished", "CampMembershipApproved",
-                "CampMembershipRejected", "CampMembershipSeasonClosed", "CampRoleAssigned",
-                "IssueComment", "IssueStatusChanged", "IssueAssigned", "IssueSubmitted"
-            ]
-        },
         {
             typeof(NotificationClass), ["Informational", "Actionable"]
         },

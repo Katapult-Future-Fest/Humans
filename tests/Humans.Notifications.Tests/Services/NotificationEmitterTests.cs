@@ -1,5 +1,5 @@
 using Humans.Email.Contracts;
-using Humans.Base.Caching;
+using Humans.Users.Contracts;
 using Humans.Notifications.Domain;
 using Xunit;
 using Humans.Notifications.Data;
@@ -8,7 +8,6 @@ using AwesomeAssertions;
 using Humans.Notifications.Contracts;
 using static Humans.Notifications.Tests.NotificationTestFixtures;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
 using NodaTime;
 using NodaTime.Testing;
@@ -17,20 +16,11 @@ using NSubstitute;
 
 namespace Humans.Notifications.Tests.Services;
 
-/// <summary>
-/// Direct unit tests for <see cref="NotificationEmitter"/>, the narrow
-/// recipient-known dispatch surface that <see cref="INotificationEmitter"/>
-/// resolves to. The emitter is a separate concrete from
-/// <c>NotificationService</c> so that team / role-assignment services can
-/// inject the narrower interface without closing a DI cycle back through
-/// <c>IRoleAssignmentService</c>.
-/// </summary>
 public class NotificationEmitterTests : IDisposable
 {
     private readonly PreferenceRegistry _dbContext = new();
     private readonly NotificationsDbContext _notificationsDb;
     private readonly FakeClock _clock;
-    private readonly IMemoryCache _cache;
     private readonly NotificationRepository _repo;
     private readonly ICommunicationPreferenceService _preferenceService = Substitute.For<ICommunicationPreferenceService>();
     private readonly NotificationEmitter _emitter;
@@ -45,20 +35,18 @@ public class NotificationEmitterTests : IDisposable
 
         _notificationsDb = new NotificationsDbContext(notificationsOptions);
         _clock = new FakeClock(Instant.FromUtc(2026, 4, 1, 12, 0));
-        _cache = new MemoryCache(new MemoryCacheOptions());
         _repo = new NotificationRepository(new TestDbContextFactory<NotificationsDbContext>(notificationsOptions));
 
         _preferenceService.StubInboxDisabledFrom(_dbContext);
 
         _emitter = new NotificationEmitter(
-            _repo, _preferenceService, _clock, _cache,
+            _repo, _preferenceService, _clock,
             NullLogger<NotificationEmitter>.Instance);
     }
 
     public void Dispose()
     {
         _notificationsDb.Dispose();
-        _cache.Dispose();
         GC.SuppressFinalize(this);
     }
 
@@ -66,7 +54,7 @@ public class NotificationEmitterTests : IDisposable
     public async Task SendAsync_EmptyRecipientList_WritesNothing()
     {
         await _emitter.SendAsync(
-            NotificationSource.TeamMemberAdded,
+            TestSources.TeamUpdate,
             NotificationClass.Informational,
             NotificationPriority.Normal,
             "Empty",
@@ -82,7 +70,7 @@ public class NotificationEmitterTests : IDisposable
         var user2 = Guid.NewGuid();
 
         await _emitter.SendAsync(
-            NotificationSource.TeamMemberAdded,
+            TestSources.TeamUpdate,
             NotificationClass.Informational,
             NotificationPriority.Normal,
             "Hello",
@@ -109,13 +97,13 @@ public class NotificationEmitterTests : IDisposable
         _dbContext.CommunicationPreferences.Add(new()
         {
             UserId = suppressed,
-            Category = NotificationSource.TeamMemberAdded.ToMessageCategory(),
+            Category = TestSources.TeamUpdate.Category,
             InboxEnabled = false,
         });
         await _dbContext.SaveChangesAsync(TestContext.Current.CancellationToken);
 
         await _emitter.SendAsync(
-            NotificationSource.TeamMemberAdded,
+            TestSources.TeamUpdate,
             NotificationClass.Informational,
             NotificationPriority.Normal,
             "Filtered",
@@ -135,19 +123,19 @@ public class NotificationEmitterTests : IDisposable
         _dbContext.CommunicationPreferences.Add(new()
         {
             UserId = u1,
-            Category = NotificationSource.TeamMemberAdded.ToMessageCategory(),
+            Category = TestSources.TeamUpdate.Category,
             InboxEnabled = false,
         });
         _dbContext.CommunicationPreferences.Add(new()
         {
             UserId = u2,
-            Category = NotificationSource.TeamMemberAdded.ToMessageCategory(),
+            Category = TestSources.TeamUpdate.Category,
             InboxEnabled = false,
         });
         await _dbContext.SaveChangesAsync(TestContext.Current.CancellationToken);
 
         await _emitter.SendAsync(
-            NotificationSource.TeamMemberAdded,
+            TestSources.TeamUpdate,
             NotificationClass.Informational,
             NotificationPriority.Normal,
             "All suppressed",
@@ -166,7 +154,7 @@ public class NotificationEmitterTests : IDisposable
         _dbContext.CommunicationPreferences.Add(new()
         {
             UserId = suppressed,
-            Category = NotificationSource.ApplicationSubmitted.ToMessageCategory(),
+            Category = TestSources.Approval.Category,
             InboxEnabled = false,
         });
         await _dbContext.SaveChangesAsync(TestContext.Current.CancellationToken);
@@ -177,7 +165,7 @@ public class NotificationEmitterTests : IDisposable
                 .Returns(Task.FromException<IReadOnlySet<Guid>>(new InvalidOperationException("Preferences unavailable")));
 
         await _emitter.SendAsync(
-            NotificationSource.ApplicationSubmitted,
+            TestSources.Approval,
             NotificationClass.Actionable,
             NotificationPriority.High,
             "Action required",
@@ -203,7 +191,7 @@ public class NotificationEmitterTests : IDisposable
         var titleLimit = entity.FindProperty(nameof(Notification.Title))!.GetMaxLength()!.Value;
         var bodyLimit = entity.FindProperty(nameof(Notification.Body))!.GetMaxLength()!.Value;
 
-        await _emitter.SendAsync(NotificationSource.PreapprovalFileBy, NotificationClass.Actionable,
+        await _emitter.SendAsync(TestSources.Plain, NotificationClass.Actionable,
             NotificationPriority.Normal, title, [Guid.NewGuid()], body,
             cancellationToken: TestContext.Current.CancellationToken);
 
@@ -230,7 +218,7 @@ public class NotificationEmitterTests : IDisposable
         var user = Guid.NewGuid();
 
         await _emitter.SendAsync(
-            NotificationSource.ShiftSignupChange,
+            TestSources.ShiftUpdate,
             NotificationClass.Actionable,
             NotificationPriority.Critical,
             "Title",
@@ -245,7 +233,7 @@ public class NotificationEmitterTests : IDisposable
         n.Body.Should().Be("Body text");
         n.ActionUrl.Should().Be("/somewhere");
         n.ActionLabel.Should().Be("Open");
-        n.Source.Should().Be(NotificationSource.ShiftSignupChange);
+        n.Source.Should().Be(TestSources.ShiftUpdate.Name);
         n.Class.Should().Be(NotificationClass.Actionable);
         n.Priority.Should().Be(NotificationPriority.Critical);
         n.TargetGroupName.Should().Be("Build Team");
@@ -253,19 +241,20 @@ public class NotificationEmitterTests : IDisposable
     }
 
     [HumansFact]
-    public async Task SendAsync_InvalidatesPerRecipientBadgeCache()
+    public async Task SendAsync_UpdatesRecipientBadgeCounts()
     {
         var user = Guid.NewGuid();
-        var key = CacheKeys.NotificationBadgeCounts(user);
-        _cache.Set(key, (Actionable: 1, Informational: 2));
+        var ct = TestContext.Current.CancellationToken;
+        var inbox = new NotificationInboxService(_repo, Substitute.For<IUserService>(), TestSources.Registry, _clock);
+        (await inbox.GetUnreadBadgeCountsAsync(user, ct)).Should().Be((0, 0));
 
         await _emitter.SendAsync(
-            NotificationSource.TeamMemberAdded,
+            TestSources.TeamUpdate,
             NotificationClass.Informational,
             NotificationPriority.Normal,
             "Cache evict",
             recipientUserIds: [user], cancellationToken: TestContext.Current.CancellationToken);
 
-        _cache.TryGetValue(key, out _).Should().BeFalse();
+        (await inbox.GetUnreadBadgeCountsAsync(user, ct)).Should().Be((0, 1));
     }
 }

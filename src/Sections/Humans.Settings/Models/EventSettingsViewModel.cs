@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using System.Globalization;
 using System.Text.Json;
 using Humans.Settings.Contracts;
 using NodaTime;
@@ -7,11 +8,6 @@ using Microsoft.AspNetCore.Mvc.ModelBinding;
 
 namespace Humans.Settings.Models;
 
-/// <summary>
-/// The app-wide event settings form. Only the values Settings owns after
-/// nobodies-collective/Humans#1104 — the Shifts knobs (browsing switch, volunteer
-/// cap, reminder lead time) stay on the Shifts screen.
-/// </summary>
 internal sealed class EventSettingsViewModel : IValidatableObject
 {
     [BindRequired]
@@ -20,15 +16,9 @@ internal sealed class EventSettingsViewModel : IValidatableObject
     [Required, MaxLength(256)]
     public string EventName { get; set; } = string.Empty;
 
-    [Required, MaxLength(100)]
-    [BindRequired]
-    public string TimeZoneId { get; set; } = "Europe/Madrid";
-
     [Required]
     public string GateOpeningDate { get; set; } = string.Empty;
 
-    // The build window is [BuildStartOffset, 0) and the four sub-periods below
-    // partition it, so build starts on the first-crew day.
     [BindRequired]
     public int BuildStartOffset { get; set; } = -25;
     [Range(0, int.MaxValue, ErrorMessage = "Event end must be on or after gate-opening day.")]
@@ -37,22 +27,9 @@ internal sealed class EventSettingsViewModel : IValidatableObject
     [BindRequired]
     public int StrikeEndOffset { get; set; } = 9;
 
-    // Build sub-period boundaries — defaults match the entity defaults set by EF config.
-    [Range(int.MinValue, -1, ErrorMessage = "First crew start must be a negative offset relative to gate-opening day.")]
-    [BindRequired]
-    public int FirstCrewStartOffset { get; set; } = -25;
 
-    [Range(int.MinValue, -1, ErrorMessage = "Set-up week start must be a negative offset relative to gate-opening day.")]
-    [BindRequired]
-    public int SetupWeekStartOffset { get; set; } = -16;
 
-    [Range(int.MinValue, -1, ErrorMessage = "Pre-event week start must be a negative offset relative to gate-opening day.")]
-    [BindRequired]
-    public int PreEventWeekStartOffset { get; set; } = -9;
 
-    [Range(int.MinValue, -1, ErrorMessage = "Finishing weekend start must be a negative offset relative to gate-opening day.")]
-    [BindRequired]
-    public int FinishingWeekendStartOffset { get; set; } = -4;
 
     [BindRequired]
     public string EarlyEntryCapacityJson { get; set; } = "{}";
@@ -62,19 +39,13 @@ internal sealed class EventSettingsViewModel : IValidatableObject
     [BindRequired]
     public string? EarlyEntryClose { get; set; }
 
-    /// <summary>Negative day offset from <see cref="GateOpeningDate"/>; null until configured.</summary>
     [BindRequired]
     public int? EarlyEntryStartOffset { get; set; }
 
-    /// <summary>The cycle is wrapped: the member dashboard hides its in-season cards.</summary>
     [BindRequired]
     public bool IsOffSeason { get; set; }
 
-    /// <summary>
-    /// The form's view of <see cref="EventSettingsStatus"/>: the checkbox maps to
-    /// Active/Inactive and never reaches <see cref="EventSettingsStatus.Deleted"/> —
-    /// withdrawing a cycle is not something this form does.
-    /// </summary>
+    /// <summary>Maps to Active/Inactive only; this form never withdraws a cycle.</summary>
     [BindRequired]
     public bool IsActive { get; set; }
 
@@ -85,31 +56,6 @@ internal sealed class EventSettingsViewModel : IValidatableObject
             yield return new ValidationResult(
                 "Strike end must be on or after event end.",
                 [nameof(StrikeEndOffset), nameof(EventEndOffset)]);
-        }
-
-        // The build window opens on the first-crew day at the latest — a first-crew
-        // boundary before it would name days no build shift can occupy.
-        if (BuildStartOffset > FirstCrewStartOffset)
-        {
-            yield return new ValidationResult(
-                $"Build starts at {BuildStartOffset} but first crew starts at {FirstCrewStartOffset}. "
-                + "The build window is split into the four sub-periods below, so build start must be "
-                + "the first crew day or earlier (more negative).",
-                [nameof(BuildStartOffset), nameof(FirstCrewStartOffset)]);
-        }
-
-        if (FirstCrewStartOffset >= SetupWeekStartOffset
-            || SetupWeekStartOffset >= PreEventWeekStartOffset
-            || PreEventWeekStartOffset >= FinishingWeekendStartOffset)
-        {
-            yield return new ValidationResult(
-                "Build sub-period offsets must be strictly ascending: First crew < Set-up week < Pre-event week < Finishing weekend.",
-                [
-                    nameof(FirstCrewStartOffset),
-                    nameof(SetupWeekStartOffset),
-                    nameof(PreEventWeekStartOffset),
-                    nameof(FinishingWeekendStartOffset)
-                ]);
         }
 
         if (EarlyEntryStartOffset is { } eeStartOffset
@@ -131,25 +77,19 @@ internal sealed record EventSettingsParseResult(
     public bool Success => Settings is not null && Errors.Count == 0;
 }
 
-/// <summary>
-/// Form ↔ <see cref="EventSettingsInfo"/>. The controller never touches the EF
-/// entity — the DTO is the section's own write surface too.
-/// </summary>
+/// <summary>The controller never touches the EF entity: the DTO is the section's own write surface too.</summary>
 internal static class EventSettingsFormMapper
 {
+    private static readonly Domain.EventSettings SubPeriodDefaults = new();
+
     internal static EventSettingsViewModel ToViewModel(EventSettingsInfo src) => new()
     {
         Id = src.Id,
         EventName = src.EventName,
-        TimeZoneId = src.TimeZoneId,
         GateOpeningDate = LocalDatePattern.Iso.Format(src.GateOpeningDate),
         BuildStartOffset = src.BuildStartOffset,
         EventEndOffset = src.EventEndOffset,
         StrikeEndOffset = src.StrikeEndOffset,
-        FirstCrewStartOffset = src.FirstCrewStartOffset,
-        SetupWeekStartOffset = src.SetupWeekStartOffset,
-        PreEventWeekStartOffset = src.PreEventWeekStartOffset,
-        FinishingWeekendStartOffset = src.FinishingWeekendStartOffset,
         EarlyEntryCapacityJson = JsonSerializer.Serialize(src.EarlyEntryCapacity),
         BarriosEarlyEntryAllocationJson = src.BarriosEarlyEntryAllocation is not null
             ? JsonSerializer.Serialize(src.BarriosEarlyEntryAllocation)
@@ -162,12 +102,32 @@ internal static class EventSettingsFormMapper
         IsOffSeason = src.IsOffSeason,
     };
 
+    /// <summary>
+    /// A blank form for a new event, shaped like <paramref name="previous"/> one year on: offsets and early-entry
+    /// capacity carry over, the gate date and the name's year move forward, and the instant-valued close is cleared.
+    /// </summary>
+    internal static EventSettingsViewModel NextEvent(EventSettingsInfo? previous)
+    {
+        if (previous is null)
+            return new EventSettingsViewModel();
+
+        var next = ToViewModel(previous);
+        var nextYear = previous.GateOpeningDate.PlusYears(1);
+        next.Id = null;
+        next.EventName = previous.EventName.Replace(
+            previous.Year.ToString(CultureInfo.InvariantCulture),
+            nextYear.Year.ToString(CultureInfo.InvariantCulture),
+            StringComparison.Ordinal);
+        next.GateOpeningDate = LocalDatePattern.Iso.Format(nextYear);
+        next.EarlyEntryClose = null;
+        next.IsActive = false;
+        next.IsOffSeason = false;
+        return next;
+    }
+
     internal static EventSettingsParseResult Parse(EventSettingsViewModel model)
     {
         var errors = new List<EventSettingsFormError>();
-
-        if (DateTimeZoneProviders.Tzdb.GetZoneOrNull(model.TimeZoneId) is null)
-            errors.Add(new EventSettingsFormError(nameof(model.TimeZoneId), "Invalid IANA timezone ID."));
 
         var parsedDate = LocalDatePattern.Iso.Parse(model.GateOpeningDate);
         if (!parsedDate.Success)
@@ -196,22 +156,24 @@ internal static class EventSettingsFormMapper
 
         var gateOpening = parsedDate.Value;
 
-        // A new cycle mints its own id — Settings owns event ids (nobodies-collective/Humans#1631).
+        // A new cycle mints its own id: Settings owns event ids.
         return new EventSettingsParseResult(
             new EventSettingsInfo(
                 Id: model.Id ?? Guid.NewGuid(),
                 EventName: model.EventName,
-                // Year is the gate-opening year, never edited on its own.
                 Year: gateOpening.Year,
-                TimeZoneId: model.TimeZoneId,
+                // The global timezone; the service stores it on save.
+                TimeZoneId: string.Empty,
                 GateOpeningDate: gateOpening,
                 BuildStartOffset: model.BuildStartOffset,
                 EventEndOffset: model.EventEndOffset,
                 StrikeEndOffset: model.StrikeEndOffset,
-                FirstCrewStartOffset: model.FirstCrewStartOffset,
-                SetupWeekStartOffset: model.SetupWeekStartOffset,
-                PreEventWeekStartOffset: model.PreEventWeekStartOffset,
-                FinishingWeekendStartOffset: model.FinishingWeekendStartOffset,
+                // Shifts owns the build sub-periods now; a new row gets Settings' defaults as Shifts' fallback,
+                // and an update never overwrites the stored ones.
+                FirstCrewStartOffset: SubPeriodDefaults.FirstCrewStartOffset,
+                SetupWeekStartOffset: SubPeriodDefaults.SetupWeekStartOffset,
+                PreEventWeekStartOffset: SubPeriodDefaults.PreEventWeekStartOffset,
+                FinishingWeekendStartOffset: SubPeriodDefaults.FinishingWeekendStartOffset,
                 EarlyEntryCapacity: earlyEntryCapacity,
                 BarriosEarlyEntryAllocation: barriosAllocation,
                 EarlyEntryClose: earlyEntryClose,

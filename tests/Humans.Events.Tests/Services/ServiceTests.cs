@@ -51,6 +51,116 @@ public sealed class EventServiceTests
     }
 
     [HumansTheory]
+    [InlineData(false, "missing")]
+    [InlineData(true, "missing")]
+    [InlineData(false, "inactive")]
+    [InlineData(true, "inactive")]
+    [InlineData(false, "none")]
+    [InlineData(true, "none")]
+    [InlineData(false, "active")]
+    [InlineData(true, "active")]
+    public async Task IndividualSaves_RequireAnActiveVenue_BeforeChangingTheEvent(bool edit, string venueState)
+    {
+        OpenSubmissionWindow();
+        var category = new EventCategory { Id = Guid.NewGuid() };
+        _repo.Categories.Add(category);
+        var originalVenue = new EventVenue { Id = Guid.NewGuid() };
+        _repo.Venues.Add(originalVenue);
+        Guid? selectedId = string.Equals(venueState, "none", StringComparison.Ordinal) ? null : Guid.NewGuid();
+        var active = string.Equals(venueState, "active", StringComparison.Ordinal);
+        if (selectedId is { } id && (active || string.Equals(venueState, "inactive", StringComparison.Ordinal)))
+            _repo.Venues.Add(new EventVenue { Id = id, IsActive = active });
+        var guideEvent = new Event
+        {
+            Id = Guid.NewGuid(),
+            CategoryId = category.Id,
+            GuideSharedVenueId = edit ? originalVenue.Id : selectedId,
+            Title = "Original",
+            Status = edit ? EventStatus.Approved : EventStatus.Draft,
+        };
+        if (edit) _repo.Events.Add(guideEvent);
+        var ct = TestContext.Current.CancellationToken;
+
+        var result = edit
+            ? await _service.UpdateAndResubmitAsync(guideEvent.Id, EditOf(guideEvent) with { VenueId = selectedId, Title = "Changed" }, ct)
+            : await _service.SubmitEventAsync(guideEvent, "https://x/events", ct);
+
+        result.ErrorKey.Should().Be(active ? null : "Events_VenueUnavailable");
+        if (!active) result.Field.Should().Be("VenueId");
+        if (active)
+        {
+            guideEvent.Status.Should().Be(EventStatus.Pending);
+            guideEvent.GuideSharedVenueId.Should().Be(selectedId);
+        }
+        else
+        {
+            guideEvent.Status.Should().Be(edit ? EventStatus.Approved : EventStatus.Draft);
+            guideEvent.Title.Should().Be("Original");
+            guideEvent.GuideSharedVenueId.Should().Be(edit ? originalVenue.Id : selectedId);
+            _repo.SaveChangesCount.Should().Be(0);
+            if (!edit) _repo.Events.Should().BeEmpty();
+            _emailService.ReceivedCalls().Should().BeEmpty();
+            _audit.ReceivedCalls().Should().BeEmpty();
+        }
+    }
+
+    [HumansTheory]
+    [InlineData(false, false, "missing")]
+    [InlineData(false, true, "missing")]
+    [InlineData(true, false, "missing")]
+    [InlineData(true, true, "missing")]
+    [InlineData(false, false, "inactive")]
+    [InlineData(false, true, "inactive")]
+    [InlineData(true, false, "inactive")]
+    [InlineData(true, true, "inactive")]
+    [InlineData(false, false, "active")]
+    [InlineData(false, true, "active")]
+    [InlineData(true, false, "active")]
+    [InlineData(true, true, "active")]
+    public async Task MemberSaves_RequireAnActiveCategory_BeforeChangingTheEvent(
+        bool edit, bool camp, string categoryState)
+    {
+        OpenSubmissionWindow();
+        var category = new EventCategory { Id = Guid.NewGuid(), IsActive = string.Equals(categoryState, "active", StringComparison.Ordinal) };
+        if (!string.Equals(categoryState, "missing", StringComparison.Ordinal)) _repo.Categories.Add(category);
+        var originalCategory = new EventCategory { Id = Guid.NewGuid() };
+        _repo.Categories.Add(originalCategory);
+        var guideEvent = new Event
+        {
+            Id = Guid.NewGuid(),
+            CampId = camp ? Guid.NewGuid() : null,
+            GuideSharedVenueId = camp ? null : Guid.NewGuid(),
+            CategoryId = edit ? originalCategory.Id : category.Id,
+            Title = "Original",
+            Status = edit ? EventStatus.Approved : EventStatus.Draft,
+        };
+        if (edit) _repo.Events.Add(guideEvent);
+        if (!camp) _repo.Venues.Add(new EventVenue { Id = guideEvent.GuideSharedVenueId!.Value });
+        var ct = TestContext.Current.CancellationToken;
+
+        var result = edit
+            ? await _service.UpdateAndResubmitAsync(guideEvent.Id, EditOf(guideEvent) with { CategoryId = category.Id, Title = "Changed" }, ct)
+            : await _service.SubmitEventAsync(guideEvent, "https://x/events", ct);
+        result.ErrorKey.Should().Be(category.IsActive ? null : "Events_CategoryUnavailable");
+
+        if (category.IsActive)
+        {
+            guideEvent.Status.Should().Be(EventStatus.Pending);
+            guideEvent.CategoryId.Should().Be(category.Id);
+        }
+        else
+        {
+            guideEvent.Status.Should().Be(edit ? EventStatus.Approved : EventStatus.Draft);
+            guideEvent.Title.Should().Be("Original");
+            guideEvent.CategoryId.Should().Be(edit ? originalCategory.Id : category.Id);
+            _repo.SaveChangesCount.Should().Be(0);
+            if (!edit) _repo.Events.Should().BeEmpty();
+            _emailService.ReceivedCalls().Should().BeEmpty();
+            _audit.ReceivedCalls().Should().BeEmpty();
+        }
+    }
+
+    [HumansTheory]
     [InlineData(0)]
     [InlineData(1)]
     [InlineData(2)]
@@ -102,7 +212,7 @@ public sealed class EventServiceTests
         csv.Should().NotContain("Pending event");
         if (expectedRows > 0)
             csv.Should().Contain("Flame").And.Contain("Ember").And.Contain("Main Stage").And.Contain("2026-07-01");
-        await _audit.Received(1).LogAsync(AuditAction.EventGuideExported, "EventGuide", _repo.Settings.Id,
+        await _audit.Received(1).LogAsync(EventsAuditActions.EventGuideExported, "EventGuide", _repo.Settings.Id,
             $"Approved event guide CSV exported: {expectedRows} rows", actorId);
 
         var print = (await controller.PrintGuide(ct)).Should().BeOfType<ViewResult>().Which;
@@ -138,15 +248,17 @@ public sealed class EventServiceTests
         result.Should().Be(expected);
     }
 
-    [HumansFact]
-    public async Task SaveGuideSettingsAsync_CreatesSettingsUsingEventTimezone()
+    [HumansTheory]
+    [InlineData("Europe/Madrid", 10)]
+    [InlineData("Unavailable/Zone", 12)]
+    public async Task SaveGuideSettingsAsync_CreatesSettingsUsingEventTimezone(string zoneId, int utcHour)
     {
         var eventSettingsId = Guid.NewGuid();
         _burnSettings.GetEventSettingsByIdAsync(eventSettingsId, Arg.Any<CancellationToken>()).Returns(new EventSettingsInfo(
             Id: eventSettingsId,
             EventName: "Nowhere 2026",
             Year: 2026,
-            TimeZoneId: "Europe/Madrid",
+            TimeZoneId: zoneId,
             GateOpeningDate: new LocalDate(2026, 7, 1),
             BuildStartOffset: -14,
             EventEndOffset: 7,
@@ -162,15 +274,15 @@ public sealed class EventServiceTests
         await _service.SaveGuideSettingsAsync(
             existingId: null,
             eventSettingsId,
-            submissionOpenAt: new LocalDateTime(2026, 5, 5, 12, 0),
+            submissionOpenAt: new LocalDateTime(2026, 5, 5, 12, 0).PlusNanoseconds(123),
             submissionCloseAt: new LocalDateTime(2026, 5, 6, 12, 0),
             guidePublishAt: new LocalDateTime(2026, 5, 7, 12, 0),
             maxPrintSlots: 42, ct: TestContext.Current.CancellationToken);
 
         _repo.Settings.Should().NotBeNull();
-        _repo.Settings!.SubmissionOpenAt.Should().Be(Instant.FromUtc(2026, 5, 5, 10, 0));
-        _repo.Settings.SubmissionCloseAt.Should().Be(Instant.FromUtc(2026, 5, 6, 10, 0));
-        _repo.Settings.GuidePublishAt.Should().Be(Instant.FromUtc(2026, 5, 7, 10, 0));
+        _repo.Settings!.SubmissionOpenAt.Should().Be(Instant.FromUtc(2026, 5, 5, utcHour, 0) + Duration.FromNanoseconds(123));
+        _repo.Settings.SubmissionCloseAt.Should().Be(Instant.FromUtc(2026, 5, 6, utcHour, 0));
+        _repo.Settings.GuidePublishAt.Should().Be(Instant.FromUtc(2026, 5, 7, utcHour, 0));
         _repo.Settings.MaxPrintSlots.Should().Be(42);
         _repo.SaveChangesCount.Should().Be(1);
     }
@@ -515,6 +627,9 @@ public sealed class EventServiceTests
             SubmitterUserId = submitterId,
             Title = "Fire show",
         };
+        _repo.Categories.Add(new EventCategory { Id = guideEvent.CategoryId });
+        guideEvent.GuideSharedVenueId ??= Guid.NewGuid();
+        _repo.Venues.Add(new EventVenue { Id = guideEvent.GuideSharedVenueId.Value });
 
         await _service.SubmitEventAsync(guideEvent, "https://x/Events/MySubmissions", TestContext.Current.CancellationToken);
 
@@ -534,6 +649,9 @@ public sealed class EventServiceTests
         OpenSubmissionWindow();
         // Bulk import opts out — one email per CSV row would spam the uploader.
         var guideEvent = new Event { Id = Guid.NewGuid(), SubmitterUserId = Guid.NewGuid() };
+        _repo.Categories.Add(new EventCategory { Id = guideEvent.CategoryId });
+        guideEvent.GuideSharedVenueId ??= Guid.NewGuid();
+        _repo.Venues.Add(new EventVenue { Id = guideEvent.GuideSharedVenueId.Value });
 
         await _service.SubmitEventAsync(guideEvent, lifecycleActionUrl: null, TestContext.Current.CancellationToken);
 
@@ -563,6 +681,66 @@ public sealed class EventServiceTests
                 && m.RecipientEmail == "sub@example.com"
                 && m.HtmlBody.Contains("Too loud")
                 && m.HtmlBody.Contains("https://x/edit")));
+    }
+
+    [HumansTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LifecycleEmail_AfterCommit_CompletesDespiteRequestCancellation(bool moderation)
+    {
+        using var request = new CancellationTokenSource();
+        OpenSubmissionWindow();
+        var submitterId = StubSubmitterWithEmail("sub@example.com", "Burner");
+        var submitter = await _userService.GetUserInfoAsync(submitterId);
+        _userService.ClearReceivedCalls();
+        _userService.GetUserInfoAsync(submitterId, Arg.Any<CancellationToken>()).Returns(call =>
+        {
+            call.Arg<CancellationToken>().ThrowIfCancellationRequested();
+            return ValueTask.FromResult(submitter);
+        });
+        var guideEvent = new Event
+        {
+            Id = Guid.NewGuid(),
+            SubmitterUserId = submitterId,
+            Title = "Fire show",
+            Status = moderation ? EventStatus.Pending : EventStatus.Draft,
+        };
+        var repo = Substitute.For<IEventRepository>();
+        repo.GetGuideSettingsAsync(request.Token).Returns(_repo.Settings);
+        repo.GetCategoryAsync(guideEvent.CategoryId, request.Token).Returns(new EventCategory { Id = guideEvent.CategoryId });
+        guideEvent.GuideSharedVenueId = Guid.NewGuid();
+        repo.GetVenueAsync(guideEvent.GuideSharedVenueId.Value, request.Token).Returns(new EventVenue { Id = guideEvent.GuideSharedVenueId.Value });
+        repo.GetEventForModerationAsync(guideEvent.Id, request.Token).Returns(guideEvent);
+        repo.AddEventAsync(guideEvent, request.Token).Returns(async _ =>
+        {
+            await request.CancelAsync();
+        });
+        repo.SaveEventAndModerationActionAsync(guideEvent, Arg.Any<EventModerationAction>(), request.Token).Returns(async _ =>
+        {
+            await request.CancelAsync();
+        });
+        var service = new EventService(repo, _burnSettings, _userService, _camps, _audit, _emailService,
+            _emailMessages, _clock, NullLogger<EventService>.Instance, _localizer);
+
+        if (moderation)
+        {
+            (await service.ApplyModerationAsync(guideEvent.Id, Guid.NewGuid(), EventModerationActionType.Rejected,
+                "Too loud", "https://x/edit", request.Token)).Should().Be(ModerationOutcome.Applied);
+            await repo.Received(1).SaveEventAndModerationActionAsync(guideEvent,
+                Arg.Is<EventModerationAction>(action => action.Action == EventModerationActionType.Rejected), request.Token);
+        }
+        else
+        {
+            (await service.SubmitEventAsync(guideEvent, "https://x/edit", request.Token)).ErrorKey.Should().BeNull();
+            await repo.Received(1).AddEventAsync(guideEvent, request.Token);
+        }
+
+        request.IsCancellationRequested.Should().BeTrue();
+        guideEvent.Status.Should().Be(moderation ? EventStatus.Rejected : EventStatus.Pending);
+        await _emailService.Received(1).SendAsync(Arg.Is<EmailMessage>(message =>
+            message.RecipientEmail == "sub@example.com"
+            && message.TemplateName == (moderation ? "event_rejected" : "event_submitted")), CancellationToken.None);
+        _ = _userService.Received(1).GetUserInfoAsync(submitterId, CancellationToken.None);
     }
 
     [HumansFact]
@@ -601,6 +779,9 @@ public sealed class EventServiceTests
             SubmitterUserId = Guid.NewGuid(),
             Title = "Fire show",
         };
+        _repo.Categories.Add(new EventCategory { Id = guideEvent.CategoryId });
+        guideEvent.GuideSharedVenueId ??= Guid.NewGuid();
+        _repo.Venues.Add(new EventVenue { Id = guideEvent.GuideSharedVenueId.Value });
         _userService.GetUserInfoAsync(guideEvent.SubmitterUserId, Arg.Any<CancellationToken>())
             .Returns(ValueTask.FromException<UserInfo?>(new InvalidOperationException("User lookup unavailable")));
 
@@ -648,12 +829,9 @@ public sealed class EventServiceTests
     private Guid StubSubmitterWithEmail(string email, string burnerName, string language = "en")
     {
         var userId = Guid.NewGuid();
-        // BurnerName mirrors CopyNamesToUser's dual-write from Profile onto User (nobodies-collective/Humans#1097) —
-        // UserInfo.BurnerName reads User.BurnerName only (nobodies-collective/Humans#1098).
+        // UserInfo.BurnerName reads User.BurnerName, so it is seeded there.
         var user = new User { Id = userId, DisplayName = burnerName, BurnerName = burnerName, PreferredLanguage = language };
         _userService.GetUserInfoAsync(userId, Arg.Any<CancellationToken>())
-            // UserInfoStubHelpers.ToUserInfo lives in Humans.Application.Tests and is not
-            // visible across the section boundary; UserInfo.Create is the public builder.
             .Returns(UserInfo.Create(
                 user,
                 [new UserEmail { Id = Guid.NewGuid(), UserId = userId, Email = email, IsVerified = true, IsPrimary = true }],
@@ -673,6 +851,9 @@ public sealed class EventServiceTests
             SubmittedAt = submittedAt,
             LastUpdatedAt = Instant.FromUtc(2026, 5, 1, 13, 0)
         };
+        _repo.Categories.Add(new EventCategory { Id = guideEvent.CategoryId });
+        guideEvent.GuideSharedVenueId ??= Guid.NewGuid();
+        _repo.Venues.Add(new EventVenue { Id = guideEvent.GuideSharedVenueId.Value });
         _repo.Events.Add(guideEvent);
 
         await _service.UpdateAndResubmitAsync(guideEvent.Id, EditOf(guideEvent), TestContext.Current.CancellationToken);
@@ -694,6 +875,7 @@ public sealed class EventServiceTests
             SubmittedAt = Instant.FromUtc(2026, 5, 1, 12, 0),
             LastUpdatedAt = Instant.FromUtc(2026, 5, 2, 12, 0)
         };
+        _repo.Categories.Add(new EventCategory { Id = guideEvent.CategoryId });
         _repo.Events.Add(guideEvent);
 
         await _service.UpdateAndResubmitAsync(
@@ -800,6 +982,9 @@ public sealed class EventServiceTests
     {
         OpenSubmissionWindow();
         var guideEvent = new Event { Id = Guid.NewGuid(), SubmitterUserId = Guid.NewGuid() };
+        _repo.Categories.Add(new EventCategory { Id = guideEvent.CategoryId });
+        guideEvent.GuideSharedVenueId ??= Guid.NewGuid();
+        _repo.Venues.Add(new EventVenue { Id = guideEvent.GuideSharedVenueId.Value });
 
         await _service.SubmitEventAsync(guideEvent, lifecycleActionUrl: null, TestContext.Current.CancellationToken);
 
@@ -808,7 +993,98 @@ public sealed class EventServiceTests
     }
 
     [HumansFact]
-    public async Task SubmitEventAsync_WindowClosed_ThrowsAndWritesNothing()
+    public async Task SubmitEventAsync_StampsTheGuidesEvent()
+    {
+        OpenSubmissionWindow();
+        _repo.Settings!.EventSettingsId = Guid.NewGuid();
+        var guideEvent = new Event { Id = Guid.NewGuid(), SubmitterUserId = Guid.NewGuid() };
+        _repo.Categories.Add(new EventCategory { Id = guideEvent.CategoryId });
+        guideEvent.GuideSharedVenueId ??= Guid.NewGuid();
+        _repo.Venues.Add(new EventVenue { Id = guideEvent.GuideSharedVenueId.Value });
+
+        await _service.SubmitEventAsync(guideEvent, lifecycleActionUrl: null, TestContext.Current.CancellationToken);
+
+        guideEvent.EventSettingsId.Should().Be(_repo.Settings.EventSettingsId);
+    }
+
+    [HumansFact]
+    public async Task GetApprovedEventsAsync_ShowsOnlyTheGuidesEventAndUnassignedEntries()
+    {
+        var guideEventId = Guid.NewGuid();
+        _repo.Settings = new EventGuideSettings { Id = Guid.NewGuid(), EventSettingsId = guideEventId };
+        var category = new EventCategory { Id = Guid.NewGuid(), Name = "Talk", Slug = "talk" };
+        Event Approved(Guid? eventSettingsId) => new()
+        {
+            Id = Guid.NewGuid(),
+            Status = EventStatus.Approved,
+            EventSettingsId = eventSettingsId,
+            Category = category
+        };
+        var current = Approved(guideEventId);
+        var unassigned = Approved(null);
+        var lastYear = Approved(Guid.NewGuid());
+        _repo.Events.AddRange([current, unassigned, lastYear]);
+
+        var result = await _service.GetApprovedEventsAsync(null, null, null, null, [], TestContext.Current.CancellationToken);
+
+        result.Select(e => e.Id).Should().BeEquivalentTo([current.Id, unassigned.Id]);
+        (await _service.GetApprovedEventByIdAsync(lastYear.Id, TestContext.Current.CancellationToken)).Should().BeNull();
+    }
+
+    [HumansFact]
+    public void PickEventFor_PrefersTheWindowHoldingTheStartDate_ElseTheNearestGateOpening()
+    {
+        var y2026 = Cycle("Nowhere 2026", new LocalDate(2026, 7, 7));
+        var y2027 = Cycle("Nowhere 2027", new LocalDate(2027, 7, 6));
+        IReadOnlyList<EventSettingsInfo> cycles = [y2026, y2027];
+
+        // 23:30 UTC on gate-minus-15 is already gate-minus-14 (build start) in Madrid.
+        EventService.PickEventFor(Instant.FromUtc(2026, 6, 22, 23, 30), cycles).Should().Be(y2026);
+        EventService.PickEventFor(Instant.FromUtc(2027, 7, 8, 10, 0), cycles).Should().Be(y2027);
+        EventService.PickEventFor(Instant.FromUtc(2026, 12, 1, 10, 0), cycles).Should().Be(y2026);
+        EventService.PickEventFor(Instant.FromUtc(2027, 3, 1, 10, 0), cycles).Should().Be(y2027);
+    }
+
+    [HumansFact]
+    public async Task AssignGuideEntryEventIdsAsync_AssignsEveryUnassignedEntry_AndLeavesAssignedOnes()
+    {
+        var y2026 = Cycle("Nowhere 2026", new LocalDate(2026, 7, 7));
+        var deleted = Cycle("Deleted", new LocalDate(2026, 7, 7)) with { Status = EventSettingsStatus.Deleted };
+        _burnSettings.GetAllEventSettingsAsync(Arg.Any<CancellationToken>()).Returns([deleted, y2026]);
+        var unassigned = new Event { Id = Guid.NewGuid(), Title = "Old", StartAt = Instant.FromUtc(2026, 7, 9, 18, 0) };
+        var otherEvent = Guid.NewGuid();
+        var assigned = new Event { Id = Guid.NewGuid(), EventSettingsId = otherEvent, StartAt = Instant.FromUtc(2026, 7, 9, 18, 0) };
+        _repo.Events.AddRange([unassigned, assigned]);
+
+        var pending = await _service.GetUnassignedGuideEntriesAsync(TestContext.Current.CancellationToken);
+        var written = await _service.AssignGuideEntryEventIdsAsync(TestContext.Current.CancellationToken);
+
+        pending.Should().ContainSingle().Which.EventName.Should().Be("Nowhere 2026");
+        written.Should().Be(1);
+        unassigned.EventSettingsId.Should().Be(y2026.Id);
+        assigned.EventSettingsId.Should().Be(otherEvent);
+        (await _service.GetUnassignedGuideEntriesAsync(TestContext.Current.CancellationToken)).Should().BeEmpty();
+    }
+
+    private static EventSettingsInfo Cycle(string name, LocalDate gateOpening) => new(
+        Id: Guid.NewGuid(),
+        EventName: name,
+        Year: gateOpening.Year,
+        TimeZoneId: "Europe/Madrid",
+        GateOpeningDate: gateOpening,
+        BuildStartOffset: -14,
+        EventEndOffset: 6,
+        StrikeEndOffset: 10,
+        FirstCrewStartOffset: -25,
+        SetupWeekStartOffset: -16,
+        PreEventWeekStartOffset: -9,
+        FinishingWeekendStartOffset: -4,
+        EarlyEntryCapacity: new Dictionary<int, int>(),
+        BarriosEarlyEntryAllocation: null,
+        EarlyEntryClose: null);
+
+    [HumansFact]
+    public async Task SubmitEventAsync_WindowClosed_ReturnsRefusalAndWritesNothing()
     {
         _repo.Settings = new EventGuideSettings
         {
@@ -820,18 +1096,25 @@ public sealed class EventServiceTests
 
         var act = () => _service.SubmitEventAsync(guideEvent, lifecycleActionUrl: null, TestContext.Current.CancellationToken);
 
-        await act.Should().ThrowAsync<InvalidOperationException>();
+        (await act()).ErrorKey.Should().Be("Events_SubmissionWindowClosed");
         _repo.Events.Should().NotContain(guideEvent);
+        guideEvent.SubmittedAt.Should().Be(default);
+        await _emailService.DidNotReceiveWithAnyArgs().SendAsync(default!);
     }
 
     [HumansFact]
-    public async Task BulkImportAsync_WindowClosed_Throws()
+    public async Task BulkImportAsync_WindowClosed_ReturnsRefusalAndWritesNothing()
     {
         var act = () => _service.BulkImportAsync(
             Guid.NewGuid(), Guid.NewGuid(), [], new LocalDate(2026, 7, 1), 6, DateTimeZone.Utc,
             TestContext.Current.CancellationToken);
 
-        await act.Should().ThrowAsync<InvalidOperationException>();
+        var result = await act();
+        result.RefusalKey.Should().Be("Events_SubmissionWindowClosed");
+        result.HasErrors.Should().BeTrue();
+        result.CreatedCount.Should().Be(0);
+        result.UpdatedCount.Should().Be(0);
+        _repo.Events.Should().BeEmpty();
     }
 
     [HumansFact]
@@ -1329,8 +1612,7 @@ public sealed class EventServiceTests
     public async Task BulkImportAsync_EditedDraftRow_SubmitsViaUpdatePath_NoDuplicateInsert()
     {
         OpenSubmissionWindow();
-        // Regression: the Draft branch previously called SubmitEventAsync (INSERT)
-        // on an already-persisted entity, which throws a duplicate-key error.
+        // The Draft branch must update an already-persisted entity, not INSERT it (duplicate key).
         var campId = Guid.NewGuid();
         var cat = new EventCategory { Id = Guid.NewGuid(), Name = "Workshop", Slug = "workshop", IsActive = true };
         _repo.Categories.Add(cat);
@@ -1700,6 +1982,15 @@ public sealed class EventServiceTests
             return Task.CompletedTask;
         }
 
+        public Task<int> AssignEventSettingsIdsAsync(IReadOnlyDictionary<Guid, Guid> eventSettingsIdByEventId, CancellationToken ct = default)
+        {
+            var rows = Events.Where(e => e.EventSettingsId is null && eventSettingsIdByEventId.ContainsKey(e.Id)).ToList();
+            foreach (var row in rows)
+                row.EventSettingsId = eventSettingsIdByEventId[row.Id];
+            SaveChangesCount++;
+            return Task.FromResult(rows.Count);
+        }
+
         public Task<IReadOnlyList<Event>> GetApprovedEventsAsync(Guid? campId, Guid? venueId, Guid? categoryId, string? q, IReadOnlyList<string> excludedSlugs, CancellationToken ct = default)
             => Task.FromResult<IReadOnlyList<Event>>(Events.Where(e => e.Status == EventStatus.Approved).ToList());
 
@@ -1709,8 +2000,9 @@ public sealed class EventServiceTests
         public Task<IReadOnlyList<Event>> GetAllEventsForDashboardAsync(CancellationToken ct = default)
             => Task.FromResult<IReadOnlyList<Event>>(Events);
 
-        public Task<Dictionary<EventStatus, int>> GetModerationStatusCountsAsync(CancellationToken ct = default)
-            => Task.FromResult(Events.GroupBy(e => e.Status).ToDictionary(g => g.Key, g => g.Count()));
+        public Task<Dictionary<EventStatus, int>> GetModerationStatusCountsAsync(Guid? eventSettingsId, CancellationToken ct = default)
+            => Task.FromResult(Events.Where(e => e.IsInEvent(eventSettingsId))
+                .GroupBy(e => e.Status).ToDictionary(g => g.Key, g => g.Count()));
 
         public Task<IReadOnlyList<Event>> GetEventsByStatusAsync(EventStatus status, CancellationToken ct = default)
             => Task.FromResult<IReadOnlyList<Event>>(Events.Where(e => e.Status == status).ToList());
@@ -1721,7 +2013,7 @@ public sealed class EventServiceTests
         public Task<Event?> GetEventWithDetailsAsync(Guid eventId, CancellationToken ct = default)
             => Task.FromResult(Events.FirstOrDefault(e => e.Id == eventId));
 
-        public Task<IReadOnlyList<CampEventOverlap>> GetActiveCampEventsAsync(CancellationToken ct = default)
+        public Task<IReadOnlyList<CampEventOverlap>> GetActiveCampEventsAsync(Guid? eventSettingsId, CancellationToken ct = default)
             => Task.FromResult<IReadOnlyList<CampEventOverlap>>([]);
 
         public Task SaveEventAndModerationActionAsync(Event guideEvent, EventModerationAction action, CancellationToken ct = default)

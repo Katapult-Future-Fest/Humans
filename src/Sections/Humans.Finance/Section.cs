@@ -1,40 +1,51 @@
+using Humans.Base.Authorization;
 using Humans.Base.Caching;
-using Humans.Base.Interfaces.Caching;
+using Humans.Base.Configuration;
+using Humans.Base.Constants;
+using Humans.Base.Helpers;
+using Humans.Base.Hosting;
 using Humans.Base.Interfaces;
-using Humans.Gdpr.Contracts;
+using Humans.Base.Interfaces.Caching;
+using Humans.Email.Contracts;
 using Humans.Finance.Contracts;
 using Humans.Finance.Data;
+using Humans.Finance.Jobs;
 using Humans.Finance.Services;
-using Humans.Base.Hosting;
-using Humans.Email.Contracts;
+using Humans.Finance.ViewComponents;
+using Humans.Gdpr.Contracts;
 using Humans.Users.Contracts;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Humans.AuditLog.Contracts;
 
 namespace Humans.Finance;
 
-/// <summary>
-/// Finance's DI entry point, at the project root by convention. Discovered by Shell —
-/// nothing names it, so it needs no section prefix.
-/// </summary>
-/// <remarks>
-/// The Holded HTTP client is <em>not</em> registered here. <c>IHoldedClient</c> belongs to the
-/// Holded section, which registers it; Finance consumes it through
-/// <c>Humans.Holded.Contracts</c>. The purchase-doc sync's nightly job, <c>HoldedDocSyncJob</c>, is
-/// this section's (<c>Jobs/</c>); the ledger mirror's <c>HoldedSyncJob</c> is Holded's.
-/// </remarks>
-public sealed class Section : ISection
+public sealed class Section :
+    ISection,
+    ISectionRoles,
+    ISectionAdminNav,
+    ISectionConfiguration,
+    ISectionDataMigrations,
+    ISectionJobs,
+    ISectionPolicies,
+    IUserPart
 {
+    IReadOnlyList<RoleDefinition> ISectionRoles.Roles { get; } =
+    [
+        new(FinanceRoles.FinanceAdmin, "Finance Admin",
+            "Stewards of the purse. They manage budgets, track expenditures, and ensure every euro is accounted for with the transparency a nonprofit deserves.",
+            "fa-solid fa-coins"),
+    ];
+
     public void Register(IServiceCollection services, IConfiguration configuration)
     {
+        services.AddSingleton<IAuditActionContributor, FinanceAuditActions>();
         services.AddSectionDbContext<FinanceDbContext>(sentinelTable: "holded_expense_docs");
 
-        // The organisation's SEPA identity. Keys are the pre-existing Sepa:* ones; absent them,
-        // /Finance/Creditors says payout is unavailable rather than generating a rejectable file.
-        // Second pass honours the flat SEPA_CREDITOR_IBAN, registered in ConfigurationMetadata-
-        // Extensions as winning over the appsetting, for deployments that cannot use dotted keys —
-        // same shape as MailerLite's MAILERLITE_API_KEY. It overrides rather than falls back: this
-        // is the account the money leaves, so the deployment-set value beats the committed one.
+        // Absent the Sepa:* keys, /Finance/Creditors says payout is unavailable rather than generating a rejectable
+        // file. The flat SEPA_CREDITOR_IBAN overrides the appsetting (not a fallback): this is the account the money
+        // leaves, so the deployment-set value wins.
         services
             .Configure<SepaOptions>(configuration.GetSection("Sepa"))
             .Configure<SepaOptions>(opts =>
@@ -45,7 +56,7 @@ public sealed class Section : ISection
             });
 
         services.AddScoped<IHoldedRepository, Repository>();
-        // Sweep failure counts outlive scoped requests and jobs; expose their diagnostics.
+        // Sweep failure counts must outlive scoped requests and jobs.
         services.AddSingleton(sp => new TrackedCache<string, Dictionary<string, int>>(
             "Finance.SepaStuckBankLines", warmOnStartup: false,
             sp.GetRequiredService<ILogger<Service>>()));
@@ -55,18 +66,13 @@ public sealed class Section : ISection
         services.AddScoped<IHoldedFinanceManagement>(sp => sp.GetRequiredService<Service>());
         services.AddScoped<IHoldedFinanceService>(sp => sp.GetRequiredService<Service>());
         services.AddScoped<IHoldedFinanceWrite>(sp => sp.GetRequiredService<Service>());
-        // /Finance/Holded's read model. Internal — this section's own screen is the only consumer.
         services.AddScoped<IHoldedFinanceAdminService>(sp => sp.GetRequiredService<Service>());
-        // The SEPA bank-line sweep's body; its Hangfire target is SepaBankBookingJob, in this
-        // project's Jobs/ (nobodies-collective/Humans#1185).
         services.AddScoped<ISepaBankBooking>(sp => sp.GetRequiredService<Service>());
         services.AddScoped<Jobs.SepaBankBookingJob>();
         services.AddScoped<Jobs.HoldedDocSyncJob>();
-        // Owns the user-scoped holded_creditor_contacts table → GDPR export contributor (design-rules §8a).
+        services.AddScoped<Jobs.ExpenseReconJob>();
         services.AddScoped<IUserDataContributor>(sp => sp.GetRequiredService<Service>());
 
-        // finance_payment_details: the member IBAN other sections read and write, its export,
-        // erasure and account-merge fold (Users decomposition commit 1).
         services.AddScoped<IPaymentDetailsRepository, PaymentDetailsRepository>();
         services.AddScoped<PaymentDetailsService>();
         services.AddScoped<IPaymentDetailsManagement>(sp => sp.GetRequiredService<PaymentDetailsService>());
@@ -75,12 +81,88 @@ public sealed class Section : ISection
         services.AddScoped<IUserDataContributor>(sp => sp.GetRequiredService<PaymentDetailsService>());
         services.AddScoped<IUserMerge>(sp => sp.GetRequiredService<PaymentDetailsService>());
 
-        // Finance owns its email copy and its gallery samples; Email keeps the mechanics
-        // (memory/architecture/email-templates-live-in-sender.md).
         services.AddScoped<FinanceEmails>();
         services.AddScoped<IEmailPreviewContributor, FinanceEmailPreviews>();
 
-        // /Finance/CashFlow: reads Budget and Tickets through their public contracts; no tables.
         services.AddScoped<CashFlowService>();
+        services.AddScoped<CreditorMatchService>();
     }
+
+    IEnumerable<AdminNavGroup> ISectionAdminNav.Groups() =>
+    [
+        new("Finance", [
+            new("Holded connector", "Finance", "Holded", null, null, "fa-solid fa-plug", FinancePolicies.Read)
+        ])
+    ];
+
+    void ISectionConfiguration.DeclareSettings(IConfiguration configuration, ConfigurationRegistry registry)
+    {
+        configuration.GetOptionalSetting(registry, "Sepa:CreditorName", "SEPA",
+            importance: ConfigurationImportance.Recommended);
+        configuration.GetOptionalSetting(registry, "Sepa:CreditorIban", "SEPA", isSensitive: true,
+            importance: ConfigurationImportance.Recommended);
+        configuration.GetOptionalSetting(registry, "Sepa:CreditorBic", "SEPA",
+            importance: ConfigurationImportance.Recommended);
+        configuration.GetOptionalSetting(registry, "Sepa:CreditorIdentifier", "SEPA",
+            importance: ConfigurationImportance.Recommended);
+        configuration.GetOptionalSetting(registry, "Sepa:ChargeBearer", "SEPA");
+        // Defaults to €50 when unset.
+        configuration.GetOptionalSetting(registry, "Sepa:MaxPayoutPerTransfer", "SEPA");
+        // Either unset, /Finance/Sepa offers no Book buttons.
+        configuration.GetOptionalSetting(registry, "Sepa:TreasuryAccountId", "SEPA",
+            importance: ConfigurationImportance.Recommended);
+        configuration.GetOptionalSetting(registry, "Sepa:TreasuryLedgerAccount", "SEPA",
+            importance: ConfigurationImportance.Recommended);
+
+        // Wins over the Sepa:CreditorIban appsetting.
+        registry.RegisterEnvironmentVariable("SEPA_CREDITOR_IBAN", "SEPA", isSensitive: true);
+    }
+
+    internal const string IbanToPaymentDetailsKey = "finance.iban-to-payment-details";
+
+    IEnumerable<DataMigration> ISectionDataMigrations.Migrations() =>
+    [
+        new(IbanToPaymentDetailsKey, "Finance",
+            "Copy each member's IBAN from profiles.Iban into finance_payment_details",
+            "PaymentDetailsService's legacy fallback and ProfileInfo.Iban; then a drop PR for profiles.Iban",
+            IbanStatusAsync, ApplyIbanAsync),
+    ];
+
+    // Masked: this screen lists every member at once; an unmasked IBAN is shown one member at a time, behind the
+    // audited reveal.
+    private static async Task<DataMigrationStatus> IbanStatusAsync(IServiceProvider sp, CancellationToken ct) =>
+        new(["User", "Burner name", "IBAN"],
+            [.. (await sp.GetRequiredService<IPaymentDetailsManagement>().GetUncopiedLegacyIbansAsync(ct))
+                .Select(r => (IReadOnlyList<string>)[r.UserId.ToString(), r.BurnerName, IbanFormatter.Mask(r.Iban)])]);
+
+    private static Task<int> ApplyIbanAsync(IServiceProvider sp, Guid actorUserId, CancellationToken ct) =>
+        sp.GetRequiredService<IPaymentDetailsManagement>().CopyLegacyIbansAsync(ct);
+
+    IEnumerable<RecurringJobDescriptor> ISectionJobs.Jobs(IServiceProvider services)
+    {
+        // The Sabadell line lands 6-50 h after a file is generated, so hourly buys nothing; :17 avoids the on-the-hour
+        // stampede.
+        yield return new RecurringJobDescriptor(
+            "sepa-bank-booking", typeof(SepaBankBookingJob), "17 */2 * * *");
+
+        // Ahead of Holded's 03:00 ledger sweep; the shared "holded-api" lock keeps them apart if this runs long.
+        yield return new RecurringJobDescriptor(
+            "holded-doc-sync", typeof(HoldedDocSyncJob), "45 2 * * *");
+
+        // After the doc sync (02:45) and Holded's ledger sweep (03:00), so both mirrors it reads are fresh.
+        yield return new RecurringJobDescriptor(
+            "expense-recon", typeof(ExpenseReconJob), "30 3 * * *");
+    }
+
+    void ISectionPolicies.AddPolicies(AuthorizationOptions options)
+    {
+        options.AddPolicy(FinancePolicies.Read, policy =>
+            policy.RequireRole(FinanceRoles.FinanceAdmin, RoleNames.Board, RoleNames.Admin));
+
+        options.AddPolicy(FinancePolicies.Manage, policy =>
+            policy.RequireRole(FinanceRoles.FinanceAdmin, RoleNames.Admin));
+    }
+
+    IEnumerable<UserPart> IUserPart.Parts() =>
+        [new(UserPartSlots.AdminDetailSidebar, typeof(PaymentDetailsViewComponent), Weight: 100)];
 }

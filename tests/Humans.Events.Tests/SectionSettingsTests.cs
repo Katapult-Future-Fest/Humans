@@ -1,3 +1,6 @@
+using Humans.Events.Contracts;
+using Humans.Settings.Contracts;
+using Humans.Base.Interfaces;
 using System.ComponentModel.DataAnnotations;
 using Xunit;
 using Humans.Events.Models;
@@ -7,7 +10,7 @@ using Humans.Base.Authorization;
 namespace Humans.Events.Tests;
 
 /// <summary>
-/// The /Settings#event-guide tab contribution (peterdrier/Humans#1634). The Policy
+/// The /Settings#event-guide tab contribution. The Policy
 /// assertion is the negative case: <c>SettingsTabComposition</c> (Humans.Settings.Tests)
 /// drops any tab whose policy the viewer fails, so a non-EventsAdmin/Admin viewer never
 /// sees this tab.
@@ -31,11 +34,11 @@ public sealed class SectionSettingsTests
     [HumansFact]
     public void Tabs_ReturnsTheEventGuideTabGatedOnEventsAdminOrAdmin()
     {
-        var tabs = new SectionSettings().Tabs().ToList();
+        var tabs = ((ISectionSettings)new Section()).Tabs().ToList();
 
         var tab = tabs.Should().ContainSingle().Which;
         tab.Key.Should().Be("event-guide");
         tab.Label.Should().Be("Settings_TabEventGuide");
-        tab.Policy.Should().Be(PolicyNames.EventsAdminOrAdmin);
+        tab.Policy.Should().Be(EventsPolicies.Manage);
     }
 }

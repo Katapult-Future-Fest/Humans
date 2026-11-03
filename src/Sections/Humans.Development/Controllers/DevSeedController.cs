@@ -1,3 +1,6 @@
+using Humans.Finance.Contracts;
+using Humans.Shifts.Contracts;
+using Humans.Camps.Contracts;
 using Humans.Base.Configuration;
 using Humans.Budget.Contracts;
 using Humans.Development.Services;
@@ -10,8 +13,7 @@ using Humans.Users.Contracts;
 
 namespace Humans.Development.Controllers;
 
-// The two redirects below name "Index"/"Admin" as literals rather than
-// nameof(AdminController.Index): AdminController is Shell's and a section cannot name it.
+// "Index"/"Admin" redirects are literals: AdminController is Shell's and a section cannot name it.
 // AdminNavTreeRoutingTests walks the admin table against the running app.
 [Authorize]
 [Route("dev/seed")]
@@ -36,7 +38,7 @@ internal sealed class DevSeedController(
         return View();
     }
 
-    [Authorize(Policy = PolicyNames.FinanceAdminOrAdmin)]
+    [Authorize(Policy = FinancePolicies.Manage)]
     [HttpPost("budget")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> SeedBudget(CancellationToken cancellationToken)
@@ -66,7 +68,7 @@ internal sealed class DevSeedController(
         return RedirectToAction("Index", "Admin");
     }
 
-    [Authorize(Policy = PolicyNames.CampAdminOrAdmin)]
+    [Authorize(Policy = CampsPolicies.Manage)]
     [HttpPost("camp-roles")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> SeedCampRoles(CancellationToken cancellationToken)
@@ -108,7 +110,7 @@ internal sealed class DevSeedController(
             configRegistry, "DevAuth:Enabled", "Development", defaultValue: false);
     }
 
-    [Authorize(Policy = PolicyNames.ShiftDashboardAccess)]
+    [Authorize(Policy = ShiftsPolicies.Manage)]
     [HttpPost("dashboard")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> SeedDashboard(CancellationToken cancellationToken)

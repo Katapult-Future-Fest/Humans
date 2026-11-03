@@ -20,15 +20,6 @@ using Microsoft.Extensions.Localization;
 
 namespace Humans.Shifts.Tests.Services;
 
-/// <summary>
-/// Covers <c>Shifts.md</c> trigger line 259:
-/// "When a Bail or Remove drops the confirmed count below MinVolunteers,
-/// a ShiftCoverageGap actionable notification (priority High) is sent to
-/// the department's coordinators."
-///
-/// Lives in its own file so the notification mock can be captured as a field
-/// without disturbing the monster-sized <see cref="ShiftSignupServiceTests"/>.
-/// </summary>
 public sealed class ShiftSignupServiceCoverageGapTests : ShiftsTestHarness
 {
     private static readonly Instant TestNow = Instant.FromUtc(2026, 6, 15, 12, 0);
@@ -82,8 +73,7 @@ public sealed class ShiftSignupServiceCoverageGapTests : ShiftsTestHarness
     [HumansFact]
     public async Task BailAsync_DropsConfirmedBelowMinVolunteers_SendsShiftCoverageGapNotification()
     {
-        // Arrange: shift with MinVolunteers=2, exactly 2 Confirmed signups; bail
-        // by either drops it to 1 (below min).
+        // MinVolunteers=2 with exactly 2 Confirmed: either bail drops it below min.
         var (_, rota, _, userA, _) = await SeedScenarioAsync(
             minVolunteers: 2, maxVolunteers: 5);
         var coordinatorId = Guid.NewGuid();
@@ -92,14 +82,11 @@ public sealed class ShiftSignupServiceCoverageGapTests : ShiftsTestHarness
 
         var signupA = await ShiftsDb.ShiftSignups.FirstAsync(s => s.UserId == userA, Xunit.TestContext.Current.CancellationToken);
 
-        // Act
         var result = await _service.BailAsync(signupA.Id, userA, reason: null);
         result.Success.Should().BeTrue();
 
-        // Assert: an actionable High-priority ShiftCoverageGap notification was
-        // sent to the department coordinators.
         await _notificationService.Received(1).SendAsync(
-            NotificationSource.ShiftCoverageGap,
+            ShiftsNotificationSources.ShiftCoverageGap,
             NotificationClass.Actionable,
             NotificationPriority.High,
             Arg.Any<string>(),
@@ -147,19 +134,18 @@ public sealed class ShiftSignupServiceCoverageGapTests : ShiftsTestHarness
         // A pending withdrawal leaves staffing unchanged. A confirmed withdrawal
         // reduces it below the minimum. Both still produce an ordinary change notice.
         var sources = _notificationService.ReceivedCalls()
-            .Select(call => (NotificationSource)call.GetArguments()[0]!).ToList();
-        sources.Should().Contain(NotificationSource.ShiftSignupChange);
+            .Select(call => (NotificationSourceDefinition)call.GetArguments()[0]!).ToList();
+        sources.Should().Contain(ShiftsNotificationSources.ShiftSignupChange);
         if (confirmed)
-            sources.Should().ContainSingle(source => source == NotificationSource.ShiftCoverageGap);
+            sources.Should().ContainSingle(source => source == ShiftsNotificationSources.ShiftCoverageGap);
         else
-            sources.Should().NotContain(NotificationSource.ShiftCoverageGap);
+            sources.Should().NotContain(ShiftsNotificationSources.ShiftCoverageGap);
     }
 
     [HumansFact]
     public async Task BailAsync_LeavesConfirmedAtOrAboveMinVolunteers_DoesNotSendShiftCoverageGap()
     {
-        // Arrange: shift with MinVolunteers=1, 2 Confirmed signups; one bail
-        // leaves 1 (still at min) — coverage gap should NOT fire.
+        // MinVolunteers=1 with 2 Confirmed: one bail leaves it at min, so no coverage gap.
         var (_, rota, _, userA, _) = await SeedScenarioAsync(
             minVolunteers: 1, maxVolunteers: 5);
         var coordinatorId = Guid.NewGuid();
@@ -168,13 +154,11 @@ public sealed class ShiftSignupServiceCoverageGapTests : ShiftsTestHarness
 
         var signupA = await ShiftsDb.ShiftSignups.FirstAsync(s => s.UserId == userA, Xunit.TestContext.Current.CancellationToken);
 
-        // Act
         var result = await _service.BailAsync(signupA.Id, userA, reason: null);
         result.Success.Should().BeTrue();
 
-        // Assert: no ShiftCoverageGap notification (confirmed count 1 >= min 1).
         await _notificationService.DidNotReceive().SendAsync(
-            NotificationSource.ShiftCoverageGap,
+            ShiftsNotificationSources.ShiftCoverageGap,
             Arg.Any<NotificationClass>(),
             Arg.Any<NotificationPriority>(),
             Arg.Any<string>(),
@@ -192,8 +176,7 @@ public sealed class ShiftSignupServiceCoverageGapTests : ShiftsTestHarness
     [Xunit.InlineData(true)]
     public async Task RemoveAsync_DropsConfirmedBelowMinVolunteers_SendsShiftCoverageGapNotification(bool longName)
     {
-        // Arrange: shift with MinVolunteers=2, exactly 2 Confirmed signups; removing
-        // either drops it to 1 (below min).
+        // MinVolunteers=2 with exactly 2 Confirmed: either removal drops it below min.
         var (_, rota, _, userA, _) = await SeedScenarioAsync(
             minVolunteers: 2, maxVolunteers: 5);
         if (longName)
@@ -207,14 +190,11 @@ public sealed class ShiftSignupServiceCoverageGapTests : ShiftsTestHarness
 
         var signupA = await ShiftsDb.ShiftSignups.FirstAsync(s => s.UserId == userA, Xunit.TestContext.Current.CancellationToken);
 
-        // Act
         var result = await _service.RemoveSignupAsync(signupA.Id, Guid.NewGuid(), reason: null);
         result.Success.Should().BeTrue();
 
-        // Assert: an actionable High-priority ShiftCoverageGap notification was
-        // sent to the department coordinators.
         await _notificationService.Received(1).SendAsync(
-            NotificationSource.ShiftCoverageGap,
+            ShiftsNotificationSources.ShiftCoverageGap,
             NotificationClass.Actionable,
             NotificationPriority.High,
             Arg.Any<string>(),
@@ -231,7 +211,7 @@ public sealed class ShiftSignupServiceCoverageGapTests : ShiftsTestHarness
             notices.Should().HaveCount(2);
             foreach (var args in notices)
             {
-                if ((NotificationSource)args[0]! == NotificationSource.ShiftCoverageGap)
+                if ((NotificationSourceDefinition)args[0]! == ShiftsNotificationSources.ShiftCoverageGap)
                 {
                     args[3].Should().Be($"Coverage gap: {rota.Name} day {signupA.Shift.DayOffset}");
                     args[5].Should().Be("Only 1/2 volunteers confirmed.");

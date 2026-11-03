@@ -130,10 +130,6 @@ public class ExpenseReportServiceHoldedOutboxTests
             NullLogger<ExpenseReportBackgroundProcessor>.Instance);
     }
 
-    // ─── helpers ──────────────────────────────────────────────────────────────
-
-    /// <summary>One bookable line ("Wood", €50) — the minimum a real approved report carries, so
-    /// the per-line push has a doc to create. Tests that need other shapes override Lines.</summary>
     [HumansFact]
     public async Task GetHoldedBookingsAsync_lists_linked_lines_with_the_values_the_push_wrote()
     {
@@ -153,7 +149,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         var legacy = MakeReport("doc-legacy");
         _repo.GetAllAsync(Arg.Any<CancellationToken>()).Returns([report, legacy]);
 
-        var bookings = await new ExpenseHoldedBookingService(_repo, _userService).GetHoldedBookingsAsync(TestContext.Current.CancellationToken);
+        var bookings = await new ExpenseHoldedBookingService(_repo, _userService, _holdedClient).GetHoldedBookingsAsync(TestContext.Current.CancellationToken);
 
         bookings.Should().HaveCount(2);
         bookings[0].Should().Be(new ExpenseHoldedBooking(
@@ -165,7 +161,7 @@ public class ExpenseReportServiceHoldedOutboxTests
     [HumansFact]
     public async Task GetHoldedBookingsAsync_SubmitterMergedAway_NamesTheSurvivor()
     {
-        // #1704: the creditor binding sits on the survivor, so the booking has to name them too.
+        // The creditor binding sits on the survivor, so the booking has to name them too.
         var survivor = new User { Id = Guid.NewGuid(), DisplayName = "Alice Smith" };
         _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
             .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(
@@ -174,11 +170,77 @@ public class ExpenseReportServiceHoldedOutboxTests
         report = report with { Lines = [report.Lines[0] with { HoldedDocId = "doc-a" }] };
         _repo.GetAllAsync(Arg.Any<CancellationToken>()).Returns([report]);
 
-        var bookings = await new ExpenseHoldedBookingService(_repo, _userService).GetHoldedBookingsAsync(TestContext.Current.CancellationToken);
+        var bookings = await new ExpenseHoldedBookingService(_repo, _userService, _holdedClient).GetHoldedBookingsAsync(TestContext.Current.CancellationToken);
 
         bookings.Should().ContainSingle().Which.CreditorUserId.Should().Be(survivor.Id);
     }
 
+    [HumansFact]
+    public async Task GetHoldedReconLinesAsync_ApprovedLinesPushedOrNot_SkippedAndDeclinedAbsent()
+    {
+        // Cap 25 over 20 + 10 + 7: the second line is trimmed to 5, the third books nothing and gets no document.
+        var report = MakeReport() with { Total = 37m, MaxAmount = 25m, HoldedContactId = "c-1" };
+        report = report with
+        {
+            Lines =
+            [
+                report.Lines[0] with { Amount = 20m, SortOrder = 0, HoldedDocId = "doc-a" },
+                report.Lines[0] with { Id = Guid.NewGuid(), Description = "Nails", Amount = 10m, SortOrder = 1, HoldedDocId = null },
+                report.Lines[0] with { Id = Guid.NewGuid(), Description = "Skipped", Amount = 7m, SortOrder = 2, HoldedDocId = null },
+                report.Lines[0] with { Id = Guid.NewGuid(), Description = "Declined", Amount = 5m, SortOrder = 3, Declined = true },
+            ],
+        };
+        var failed = MakeEvent(report.Id, HoldedExpenseOutboxEventType.CreateIncomingDoc);
+        failed.FailedPermanently = true;
+        failed.ProcessedAt = Now;
+        _repo.GetAllAsync(Arg.Any<CancellationToken>()).Returns([report]);
+        _repo.GetLatestOutboxByReportAsync(Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<Guid, HoldedExpenseOutboxEvent> { [report.Id] = failed });
+
+        var lines = await new ExpenseHoldedBookingService(_repo, _userService, _holdedClient)
+            .GetHoldedReconLinesAsync(TestContext.Current.CancellationToken);
+
+        lines.Should().HaveCount(2);
+        lines[0].Should().Be(new ExpenseHoldedReconLine(
+            report.Id, report.Lines[0].Id, ExpenseReportStatus.Approved, SubmitterId, "c-1", "doc-a", "ER: Wood",
+            $"Expense report {report.Id}", 20m, report.SubmittedAt!.Value, ExpenseHoldedSyncState.Failed, Now));
+        lines[1].HoldedDocId.Should().BeNull();
+        lines[1].BookedAmount.Should().Be(5m);
+        await _repo.DidNotReceive().GetLatestOutboxForReportAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>());
+    }
+
+    [HumansFact]
+    public async Task GetHoldedReconLinesAsync_OtherStatusOnlyLinkedLines_LegacyIsOneReportLevelEntry()
+    {
+        var withdrawn = MakeReport() with { Status = ExpenseReportStatus.Withdrawn };
+        withdrawn = withdrawn with
+        {
+            Lines =
+            [
+                withdrawn.Lines[0] with { HoldedDocId = "doc-w" },
+                withdrawn.Lines[0] with { Id = Guid.NewGuid(), SortOrder = 1, HoldedDocId = null },
+            ],
+            Total = 100m,
+        };
+        var submitted = MakeReport() with { Status = ExpenseReportStatus.Submitted };
+        var legacy = MakeReport("doc-legacy");
+        _repo.GetAllAsync(Arg.Any<CancellationToken>()).Returns([withdrawn, submitted, legacy]);
+        _repo.GetLatestOutboxByReportAsync(Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<Guid, HoldedExpenseOutboxEvent>());
+
+        var lines = await new ExpenseHoldedBookingService(_repo, _userService, _holdedClient)
+            .GetHoldedReconLinesAsync(TestContext.Current.CancellationToken);
+
+        lines.Should().HaveCount(2);
+        lines[0].HoldedDocId.Should().Be("doc-w");
+        lines[0].ReportStatus.Should().Be(ExpenseReportStatus.Withdrawn);
+        lines[1].Should().Match<ExpenseHoldedReconLine>(l =>
+            l.LineId == null && l.HoldedDocId == "doc-legacy" && l.BookedAmount == 50m
+            && l.SyncState == ExpenseHoldedSyncState.NotQueued);
+    }
+
+    /// <summary>One bookable line ("Wood", €50) — the minimum a real approved report carries, so
+    /// the per-line push has a doc to create. Tests that need other shapes override Lines.</summary>
     private static ExpenseReportDto MakeReport(string? holdedDocId = null)
     {
         var reportId = Guid.NewGuid();
@@ -282,8 +344,6 @@ public class ExpenseReportServiceHoldedOutboxTests
             OccurredAt = Now,
         };
 
-    // ─── empty queue ──────────────────────────────────────────────────────────
-
     [HumansFact]
     public async Task EmptyQueue_NoClientCalls()
     {
@@ -295,8 +355,6 @@ public class ExpenseReportServiceHoldedOutboxTests
         await _holdedClient.DidNotReceiveWithAnyArgs()
             .CreatePurchaseDocumentAsync(null!, Arg.Any<CancellationToken>());
     }
-
-    // ─── one drain at a time ───────────────────────────────────────────────────
 
     private ExpenseReportBackgroundProcessor NewProcessor() => new(
         _repo, _fileStorage, _userService, _holdedClient, _holdedFinance, _holdedFinanceWrite, _auditLog, _clock,
@@ -367,8 +425,6 @@ public class ExpenseReportServiceHoldedOutboxTests
         await _repo.Received(1).MarkOutboxProcessedAsync(
             outboxEvent.Id, Now, Arg.Any<CancellationToken>());
     }
-
-    // ─── CreateIncomingDoc happy path ──────────────────────────────────────────
 
     [HumansFact]
     public async Task CreateIncomingDoc_HappyPath_ClientCalledAndDocIdPersisted()
@@ -603,8 +659,6 @@ public class ExpenseReportServiceHoldedOutboxTests
             Arg.Is<HoldedPurchaseDocumentInput>(i => i.Lines.Count == 1),
             Arg.Any<CancellationToken>());
     }
-
-    // ─── CreateIncomingDoc with attachments ───────────────────────────────────
 
     [HumansFact]
     public async Task CreateIncomingDoc_AttachmentsUploadedInOrder()
@@ -862,7 +916,7 @@ public class ExpenseReportServiceHoldedOutboxTests
             Arg.Any<CancellationToken>());
         // The trim is named in the audit entry alongside the doc ids.
         await _auditLog.Received(1).LogAsync(
-            AuditAction.ExpenseHoldedPushed, Arg.Any<string>(), report.Id,
+            ExpensesAuditActions.ExpenseHoldedPushed, Arg.Any<string>(), report.Id,
             Arg.Is<string>(s =>
                 s.Contains("doc-a, doc-b, doc-c") &&
                 s.Contains("'C' booked €50.00 of €100.00")),
@@ -908,7 +962,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         await _repo.Received(1).MarkOutboxProcessedAsync(
             outboxEvent.Id, Now, Arg.Any<CancellationToken>());
         await _auditLog.Received(1).LogAsync(
-            AuditAction.ExpenseHoldedPushed, Arg.Any<string>(), report.Id,
+            ExpensesAuditActions.ExpenseHoldedPushed, Arg.Any<string>(), report.Id,
             Arg.Is<string>(s =>
                 s.Contains("doc-first") &&
                 s.Contains("'second.pdf' (€100.00) not booked — authorized maximum reached.")),
@@ -942,7 +996,7 @@ public class ExpenseReportServiceHoldedOutboxTests
 
         var audit = _auditLog.ReceivedCalls().Single(c =>
             string.Equals(c.GetMethodInfo().Name, nameof(IAuditLogService.LogAsync), StringComparison.Ordinal)
-            && Equals(c.GetArguments()[0], AuditAction.ExpenseHoldedPushed));
+            && Equals(c.GetArguments()[0], ExpensesAuditActions.ExpenseHoldedPushed));
         var summary = (string)audit.GetArguments()[3]!;
         summary.Length.Should().BeLessThanOrEqualTo(3500);
         summary.Should().EndWith("…");
@@ -950,8 +1004,6 @@ public class ExpenseReportServiceHoldedOutboxTests
         encode.Should().NotThrow();
         await _repo.Received(1).MarkOutboxProcessedAsync(outboxEvent.Id, Now, Arg.Any<CancellationToken>());
     }
-
-    // ─── UpdateIncomingDocTag: v2 has no tag-update endpoint, so this just drains ──────────
 
     [HumansFact]
     public async Task UpdateIncomingDocTag_NoClientCall_MarkedProcessed()
@@ -974,8 +1026,6 @@ public class ExpenseReportServiceHoldedOutboxTests
         await _holdedClient.DidNotReceiveWithAnyArgs()
             .CreatePurchaseDocumentAsync(null!, Arg.Any<CancellationToken>());
     }
-
-    // ─── Transient error ──────────────────────────────────────────────────────
 
     [HumansTheory]
     [InlineData(false, 0)]
@@ -1008,7 +1058,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         if (writeoff)
         {
             await _auditLog.Received(1).LogAsync(
-                AuditAction.ExpenseHoldedFailed, Arg.Any<string>(), report.Id,
+                ExpensesAuditActions.ExpenseHoldedFailed, Arg.Any<string>(), report.Id,
                 Arg.Is<string>(s => s.Length <= 4000 && s.Contains(savedError, StringComparison.Ordinal)),
                 Arg.Any<string>());
         }
@@ -1086,7 +1136,7 @@ public class ExpenseReportServiceHoldedOutboxTests
         await _repo.DidNotReceiveWithAnyArgs()
             .IncrementOutboxRetryAsync(Guid.Empty, null!, default, Arg.Any<CancellationToken>());
         await _auditLog.Received(1).LogAsync(
-            AuditAction.ExpenseHoldedFailed, Arg.Any<string>(), report.Id,
+            ExpensesAuditActions.ExpenseHoldedFailed, Arg.Any<string>(), report.Id,
             Arg.Any<string>(), Arg.Any<string>());
     }
 
@@ -1101,8 +1151,6 @@ public class ExpenseReportServiceHoldedOutboxTests
         await _repo.DidNotReceiveWithAnyArgs()
             .GetUnprocessedOutboxAsync(default, 0, Arg.Any<CancellationToken>());
     }
-
-    // ─── attachment idempotency ───────────────────────────────────────────────
 
     [HumansFact]
     public async Task AlreadyUploadedAttachments_AreNotSentAgainOnARerun()
@@ -1169,11 +1217,9 @@ public class ExpenseReportServiceHoldedOutboxTests
         await _backgroundProcessor.DrainHoldedOutboxAsync(BatchSize, TestContext.Current.CancellationToken);
 
         await _auditLog.Received(1).LogAsync(
-            AuditAction.ExpenseHoldedPushed, Arg.Any<string>(), report.Id,
+            ExpensesAuditActions.ExpenseHoldedPushed, Arg.Any<string>(), report.Id,
             Arg.Is<string>(s => s.Contains("holded-doc-42")), Arg.Any<string>());
     }
-
-    // ─── purchase doc approval ─────────────────────────────────────────────────
 
     [HumansFact]
     public async Task CreateIncomingDoc_ApprovesTheDocAfterAttachments()
@@ -1223,8 +1269,6 @@ public class ExpenseReportServiceHoldedOutboxTests
         await _repo.Received(1).MarkOutboxProcessedAsync(
             outboxEvent.Id, Now, Arg.Any<CancellationToken>());
     }
-
-    // ─── sync state reported to finance ───────────────────────────────────────
 
     [HumansFact]
     public async Task GetHoldedTimelineAsync_ReportsQueued_ForAFreshEvent()
@@ -1311,8 +1355,6 @@ public class ExpenseReportServiceHoldedOutboxTests
         ids.Should().BeEquivalentTo(isFinanceAdmin ? [failed] : Array.Empty<Guid>());
     }
 
-    // ─── manual re-queue ──────────────────────────────────────────────────────
-
     [HumansFact]
     public async Task RequeueHoldedPushWithResultAsync_RequeuesAndAudits()
     {
@@ -1325,7 +1367,7 @@ public class ExpenseReportServiceHoldedOutboxTests
 
         result.Succeeded.Should().BeTrue();
         await _auditLog.Received(1).LogAsync(
-            AuditAction.ExpenseHoldedRequeued, Arg.Any<string>(), reportId,
+            ExpensesAuditActions.ExpenseHoldedRequeued, Arg.Any<string>(), reportId,
             Arg.Any<string>(), actorId);
     }
 
@@ -1340,7 +1382,7 @@ public class ExpenseReportServiceHoldedOutboxTests
 
         result.Succeeded.Should().BeFalse();
         await _auditLog.DidNotReceiveWithAnyArgs()
-            .LogAsync(default, null!, default, null!, Guid.Empty);
+            .LogAsync(null!, null!, default, null!, Guid.Empty);
     }
 
     [HumansFact]
@@ -1364,8 +1406,6 @@ public class ExpenseReportServiceHoldedOutboxTests
         await _repo.Received(1).SetHoldedContactLinkAsync(
             report.Id, "holded-contact-1", null, Now, Arg.Any<CancellationToken>());
     }
-
-    // ─── Permanent error ──────────────────────────────────────────────────────
 
     [HumansFact]
     public async Task PermanentException_MarkFailedPermanently_NotMarkedProcessed()
@@ -1391,8 +1431,6 @@ public class ExpenseReportServiceHoldedOutboxTests
         await _repo.DidNotReceiveWithAnyArgs().MarkOutboxProcessedAsync(Guid.Empty, default, Arg.Any<CancellationToken>());
         await _repo.DidNotReceiveWithAnyArgs().IncrementOutboxRetryAsync(Guid.Empty, null!, default, Arg.Any<CancellationToken>());
     }
-
-    // ─── IBAN never logged ────────────────────────────────────────────────────
 
     [HumansFact]
     public async Task PayeeIban_NeverAppearsInLogMessages()
@@ -1428,7 +1466,7 @@ public class ExpenseReportServiceHoldedOutboxTests
     [HumansFact]
     public async Task CreateIncomingDoc_SubmitterMergedAway_BindsTheCreditorToTheSurvivor()
     {
-        // #1704: the report stays under the archived id, but the human is the survivor now, so
+        // The report stays under the archived id, but the human is the survivor now, so
         // one member keeps one Holded contact rather than a second one under the old id.
         var survivorId = Guid.NewGuid();
         var survivor = new User { Id = survivorId, DisplayName = "Alice Smith" };

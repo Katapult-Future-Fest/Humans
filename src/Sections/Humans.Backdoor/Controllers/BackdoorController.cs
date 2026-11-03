@@ -11,14 +11,11 @@ using Microsoft.AspNetCore.Mvc;
 namespace Humans.Backdoor.Controllers;
 
 /// <summary>
-/// The section's one page, at <c>/Backdoor</c>: allocate, rotate and revoke the personal
-/// keys that open <c>/api/backdoor/*</c>.
+/// A freshly issued plaintext rides one redirect in TempData and is shown once. It is never stored, so a lost key is
+/// rotated, not recovered.
+/// Board reads the key list (who holds a key, never the key itself); only Admin issues, rotates or revokes.
 /// </summary>
-/// <remarks>
-/// A freshly issued plaintext rides one redirect in TempData and is shown once. It is never
-/// stored, so a lost key is rotated, not recovered.
-/// </remarks>
-[Authorize(Policy = PolicyNames.AdminOnly)]
+[Authorize(Policy = PolicyNames.BoardOrAdmin)]
 [Route("Backdoor")]
 internal sealed class BackdoorController(
     IBackdoorApiKeyService keys,
@@ -34,6 +31,7 @@ internal sealed class BackdoorController(
     }
 
     [HttpPost("Issue")]
+    [Authorize(Policy = PolicyNames.AdminOnly)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Issue(Guid ownerUserId, string label, CancellationToken ct)
     {
@@ -45,6 +43,7 @@ internal sealed class BackdoorController(
     }
 
     [HttpPost("{id:guid}/Rotate")]
+    [Authorize(Policy = PolicyNames.AdminOnly)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Rotate(Guid id, CancellationToken ct)
     {
@@ -56,6 +55,7 @@ internal sealed class BackdoorController(
     }
 
     [HttpPost("{id:guid}/Revoke")]
+    [Authorize(Policy = PolicyNames.AdminOnly)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Revoke(Guid id, CancellationToken ct)
     {
@@ -94,17 +94,14 @@ internal sealed class BackdoorController(
 
         var infos = await UserService.GetUserInfosAsync([.. eligibleIds.Union(rows.Select(r => r.UserId))], ct);
 
-        // A role assignment outlives a suspension, so the role sets alone name accounts the
-        // service refuses. Narrowing them by state gives the same two-part test
-        // IBackdoorApiKeyService applies at issue — used to populate the dropdown. Whether a
-        // listed key's owner still passes it is the service's own IsOwnerEligible.
+        // A role assignment outlives a suspension, so the role sets alone name accounts the service refuses. Narrowing
+        // by state gives the same two-part test IBackdoorApiKeyService applies at issue.
         var eligibleOwnerIds = eligibleIds
             .Where(id => infos.GetValueOrDefault(id)?.State == UserState.Active)
             .ToHashSet();
 
         return new BackdoorKeysViewModel
         {
-            // Newest first — a display sort, so it lives here rather than in the repository.
             Keys = [.. rows.OrderByDescending(r => r.CreatedAt).Select(r => new BackdoorKeyListItem(
                 r.Id,
                 r.UserId,

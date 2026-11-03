@@ -26,6 +26,11 @@ public abstract class RideshareTestHarness : IDisposable
 {
     public const int Year = 2026;
 
+    /// <summary>The active event, of <see cref="Year"/>. Seeded rows carry no event id, so they reach it through the year fallback.</summary>
+    private protected static readonly EventSettingsInfo Burn = BurnFixtures.Burn(eventName: "Test Burn", year: Year);
+
+    private protected static Guid EventId => Burn.Id;
+
     /// <summary>What the route provider geocodes every label to unless a test says otherwise.</summary>
     private protected static readonly GeoPoint DefaultPoint = new(48.8566, 2.3522);
 
@@ -59,7 +64,9 @@ public abstract class RideshareTestHarness : IDisposable
 
         BurnSettings = Substitute.For<ISettingsService>();
         BurnSettings.GetActiveEventSettingsAsync(Arg.Any<CancellationToken>())
-            .Returns(BurnFixtures.Burn(year: Year));
+            .Returns(Burn);
+        BurnSettings.GetAllEventSettingsAsync(Arg.Any<CancellationToken>())
+            .Returns([Burn]);
 
         Notifications = Substitute.For<INotificationEmitter>();
         AuditLog = Substitute.For<IAuditLogService>();
@@ -92,8 +99,6 @@ public abstract class RideshareTestHarness : IDisposable
 
     /// <summary>A fresh context over the same store — what a test reads back through, so it never sees <see cref="Db"/>'s stale tracked rows.</summary>
     private protected RideshareDbContext OpenContext() => DbFactory.CreateDbContext();
-
-    // ── Seeders ───────────────────────────────────────────────────────────
 
     /// <summary>Registers a human the <see cref="IUserService"/> substitute knows by burner name.</summary>
     protected Guid SeedUser(string burnerName = "Test Human", Guid? id = null)
@@ -211,8 +216,6 @@ public abstract class RideshareTestHarness : IDisposable
         return interest;
     }
 
-    // ── Command builders ──────────────────────────────────────────────────
-
     private protected static TripSave NewTripSave(
         RideshareDirection direction = RideshareDirection.Inbound,
         string place = "Paris",
@@ -237,8 +240,6 @@ public abstract class RideshareTestHarness : IDisposable
         new(direction, place, latitude, longitude, desiredDate ?? new LocalDate(Year, 7, 3),
             partySize, LuggageSize.Minimal, CanContributeToFuel: true, null);
 
-    // ── Read-back helpers ─────────────────────────────────────────────────
-
     private protected static IReadOnlyList<string> WaypointLabels(string? waypointsJson) =>
         string.IsNullOrEmpty(waypointsJson)
             ? []
@@ -254,7 +255,7 @@ public abstract class RideshareTestHarness : IDisposable
 
     private static UserInfo UserInfoFor(Guid id, string burnerName) => new(
         id, burnerName, false, "en", null, Instant.FromUtc(2026, 1, 1, 0, 0),
-        null, null, null, null, null, null, null,
+        null, null, null, null, null, null,
         null, null, null, [], [], [], null, []);
 
     public void Dispose()

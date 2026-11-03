@@ -53,7 +53,7 @@ public class SepaWithdrawTests
                 [UserId] = new(
                     Id: UserId, BurnerName: "Paul", IsGdprAnonymized: false, PreferredLanguage: "fr",
                     FallbackPictureUrl: null, CreatedAt: FixedNow, LastLoginAt: null,
-                    LastConsentReminderSentAt: null, DeletionRequestedAt: null, DeletionScheduledFor: null,
+                    DeletionRequestedAt: null, DeletionScheduledFor: null,
                     DeletionEligibleAfter: null,
                     ContactSource: null,
                     ExternalSourceId: null, MergedToUserId: null, MergedAt: null, IdentityEmailColumn: null,
@@ -102,7 +102,7 @@ public class SepaWithdrawTests
         result.Message.Should().Contain("4800.00 EUR").And.Contain("payable again");
         await _repo.Received(1).SaveSepaTransferWithdrawnAsync(TransferId, FixedNow, Actor, Arg.Any<CancellationToken>());
         await _audit.Received(1).LogAsync(
-            AuditAction.SepaPayoutTransferWithdrawn, nameof(SepaPayoutTransfer), TransferId,
+            FinanceAuditActions.SepaPayoutTransferWithdrawn, nameof(SepaPayoutTransfer), TransferId,
             Arg.Is<string>(d => d.Contains("WITHDRAWN", StringComparison.Ordinal)
                                 && d.Contains("ES79****789", StringComparison.Ordinal)
                                 && d.Contains("nobodies-20261018-m929be69.xml", StringComparison.Ordinal)

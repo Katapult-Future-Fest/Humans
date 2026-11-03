@@ -25,8 +25,8 @@ using Xunit;
 namespace Humans.Finance.Tests;
 
 /// <summary>
-/// The bank line drives SEPA booking (nobodies-collective/Humans#1185): one test per acceptance
-/// criterion, over the fake <see cref="IHoldedClient"/> the rest of this project already uses.
+/// One test per acceptance criterion of bank-line-driven SEPA booking, over the fake
+/// <see cref="IHoldedClient"/> the rest of this project already uses.
 /// </summary>
 public class SepaBankBookingTests
 {
@@ -89,14 +89,11 @@ public class SepaBankBookingTests
             .Returns("e-1");
     }
 
-    // ─── AC 1: many documents, and a retry that posts nothing twice ──────────────
-
     [HumansFact]
     public async Task Booking_TwentyFiveDocs_PaysThemAll_AndStampsTheRow()
     {
-        // The column holding the payment ids overflowed at about 20 — the reason for
-        // nobodies-collective/Humans#1185. It is unbounded now, so 25 is just 25, and every id
-        // is on the row for the sweep to re-issue the reconcile from.
+        // 25 ids, past the ~20 an earlier bounded column overflowed at: every id must be on the
+        // row for the sweep to re-issue the reconcile from.
         SeedTransfer(250m);
         SeedRows(Row(TransferId, _userId, amount: 250m));
         SeedMovements(Movement(amount: -250m));
@@ -134,7 +131,7 @@ public class SepaBankBookingTests
         await _repo.DidNotReceiveWithAnyArgs().SaveSepaTransferBookingAsync(
             default, default, default, default!, default, default);
         await _audit.Received(1).LogAsync(
-            AuditAction.SepaPayoutTransferBooked, Arg.Any<string>(), TransferId,
+            FinanceAuditActions.SepaPayoutTransferBooked, Arg.Any<string>(), TransferId,
             Arg.Is<string>(d => d.Contains("PARTIAL", StringComparison.Ordinal)
                                 && d.Contains("pay-d1", StringComparison.Ordinal)),
             Arg.Any<Guid>(), Arg.Any<Guid?>(), Arg.Any<string>());
@@ -198,12 +195,10 @@ public class SepaBankBookingTests
             TransferId, FixedNow, Arg.Any<Guid?>(), MovementId, Arg.Any<Instant?>(), Arg.Any<string?>(),
             Arg.Any<CancellationToken>());
         await _audit.Received(1).LogAsync(
-            AuditAction.SepaPayoutTransferBooked, Arg.Any<string>(), TransferId,
+            FinanceAuditActions.SepaPayoutTransferBooked, Arg.Any<string>(), TransferId,
             Arg.Is<string>(d => d.Contains("resumed (30.00 EUR already posted)", StringComparison.Ordinal)),
             Arg.Any<Guid>(), Arg.Any<Guid?>(), Arg.Any<string>());
     }
-
-    // ─── AC 2: the live creditor balance ────────────────────────────────────────
 
     [HumansFact]
     public async Task Booking_LiveBalanceOwesLessThanTheTransfer_BooksTheWholeTransfer_AndAuditsTheOverpayment()
@@ -225,7 +220,7 @@ public class SepaBankBookingTests
             TransferId, FixedNow, Arg.Any<Guid?>(), MovementId, Arg.Any<Instant?>(), Arg.Any<string?>(),
             Arg.Any<CancellationToken>());
         await _audit.Received(1).LogAsync(
-            AuditAction.SepaPayoutTransferBooked, Arg.Any<string>(), TransferId,
+            FinanceAuditActions.SepaPayoutTransferBooked, Arg.Any<string>(), TransferId,
             Arg.Is<string>(d => d.Contains("OVERPAID", StringComparison.Ordinal)
                                 && d.Contains("owed 20.00 EUR", StringComparison.Ordinal)
                                 && d.Contains("10.00 EUR in credit", StringComparison.Ordinal)),
@@ -242,12 +237,10 @@ public class SepaBankBookingTests
 
         result.Succeeded.Should().BeTrue();
         await _audit.DidNotReceive().LogAsync(
-            AuditAction.SepaPayoutTransferBooked, Arg.Any<string>(), TransferId,
+            FinanceAuditActions.SepaPayoutTransferBooked, Arg.Any<string>(), TransferId,
             Arg.Is<string>(d => d.Contains("OVERPAID", StringComparison.Ordinal)),
             Arg.Any<Guid>(), Arg.Any<Guid?>(), Arg.Any<string>());
     }
-
-    // ─── AC 3: dated by the bank line, and the line ends up reconciled ──────────
 
     [HumansFact]
     public async Task Booking_UsesTheBankLineDate_ForEveryPosting()
@@ -298,7 +291,7 @@ public class SepaBankBookingTests
         await _repo.DidNotReceiveWithAnyArgs().MarkSepaTransferReconciledAsync(
             default, default);
         await _audit.Received(1).LogAsync(
-            AuditAction.SepaPayoutTransferBooked, Arg.Any<string>(), TransferId,
+            FinanceAuditActions.SepaPayoutTransferBooked, Arg.Any<string>(), TransferId,
             Arg.Is<string>(d => d.Contains("RECONCILE PENDING", StringComparison.Ordinal)
                                 && d.Contains("journal entry cannot be linked", StringComparison.Ordinal)),
             actor, _userId, Arg.Any<string>());
@@ -616,12 +609,10 @@ public class SepaBankBookingTests
         await _repo.DidNotReceiveWithAnyArgs().MarkSepaTransferReconciledAsync(
             default, default);
         await _audit.Received(1).LogAsync(
-            AuditAction.SepaPayoutTransferBooked, Arg.Any<string>(), TransferId,
+            FinanceAuditActions.SepaPayoutTransferBooked, Arg.Any<string>(), TransferId,
             Arg.Is<string>(d => d.Contains("RECONCILE PENDING", StringComparison.Ordinal)),
             Arg.Any<Guid>(), Arg.Any<Guid?>(), Arg.Any<string>());
     }
-
-    // ─── AC 4 and 5: the shape of a partial payout, and a loan ──────────────────
 
     [HumansFact]
     public async Task Booking_PartialPayout_PaysOldestDocsFully_OneDocPartly_RestUntouched()
@@ -659,8 +650,6 @@ public class SepaBankBookingTests
             LineDate, Account, 57200001, 30m, Tag, Arg.Any<CancellationToken>());
     }
 
-    // ─── AC 6: the Holded ids live in the audit entry, the row keeps the line ───
-
     [HumansFact]
     public async Task Booking_AuditEntry_CarriesEveryHoldedId_AndMasksTheIban()
     {
@@ -670,7 +659,7 @@ public class SepaBankBookingTests
         await MakeService().BookSepaTransferAsync(TransferId, MovementId, actor);
 
         await _audit.Received(1).LogAsync(
-            AuditAction.SepaPayoutTransferBooked, Arg.Any<string>(), TransferId,
+            FinanceAuditActions.SepaPayoutTransferBooked, Arg.Any<string>(), TransferId,
             Arg.Is<string>(d => d.Contains("d1 10.00 EUR pay-d1", StringComparison.Ordinal)
                                 && d.Contains("journal entry for 20.00 EUR (e-1)", StringComparison.Ordinal)
                                 && d.Contains(MovementId, StringComparison.Ordinal)
@@ -695,8 +684,6 @@ public class SepaBankBookingTests
         await _repo.Received(1).MarkSepaTransferReconciledAsync(
             TransferId, FixedNow, Arg.Any<CancellationToken>());
     }
-
-    // ─── AC 7: a line nobody can place is surfaced, and nothing is posted ───────
 
     [HumansFact]
     public async Task Sweep_BankLineWithNoMatchingTransfer_PostsNothing()
@@ -729,8 +716,6 @@ public class SepaBankBookingTests
 
         await AssertNothingPostedAsync();
     }
-
-    // ─── The pairing the service re-validates, whoever posted it ────────────────
 
     [HumansFact]
     public async Task Booking_MovementAlreadyBookedToAnotherTransfer_Refuses()
@@ -771,8 +756,6 @@ public class SepaBankBookingTests
         await AssertNothingPostedAsync();
     }
 
-    // ─── The sweep itself ───────────────────────────────────────────────────────
-
     [HumansFact]
     public async Task Sweep_BooksEveryMatchedTransfer_AndKeepsGoingPastOneRefusal()
     {
@@ -809,7 +792,7 @@ public class SepaBankBookingTests
         await _repo.Received(1).MarkSepaTransferReconciledAsync(
             TransferId, FixedNow, Arg.Any<CancellationToken>());
         await _audit.Received(1).LogAsync(
-            AuditAction.SepaPayoutTransferBooked, Arg.Any<string>(), TransferId,
+            FinanceAuditActions.SepaPayoutTransferBooked, Arg.Any<string>(), TransferId,
             Arg.Is<string>(d => d.Contains("RECONCILED", StringComparison.Ordinal)
                                 && d.Contains(MovementId, StringComparison.Ordinal)),
             "sepa-bank-booking", _userId, Arg.Any<string>());
@@ -845,7 +828,7 @@ public class SepaBankBookingTests
         await _repo.Received(stamped ? 1 : 0).MarkSepaTransferReconciledAsync(
             TransferId, FixedNow, Arg.Any<CancellationToken>());
         await _audit.Received(stamped ? 1 : 0).LogAsync(
-            AuditAction.SepaPayoutTransferBooked, Arg.Any<string>(), TransferId,
+            FinanceAuditActions.SepaPayoutTransferBooked, Arg.Any<string>(), TransferId,
             Arg.Is<string>(d => d.Contains("RECONCILED", StringComparison.Ordinal)),
             "sepa-bank-booking", _userId, Arg.Any<string>());
     }
@@ -917,10 +900,9 @@ public class SepaBankBookingTests
     [HumansFact]
     public async Task Sweep_ReconcilePendingRow_BookedDaysAfterItsLine_StillReadsBackFarEnough()
     {
-        // The reconcile call failed when this was booked, 11 days after the file was generated. The
-        // feed window has to reach the line's own date — keying it off BookedAt starts the read
-        // after the line, so the sweep never sees the human's later reconcile and ReconciledAt and
-        // its audit entry stay missing forever.
+        // Booked 11 days after the file was generated, when the reconcile failed. The feed window
+        // must reach the line's own date: keyed off BookedAt it starts after the line, and
+        // ReconciledAt and its audit entry stay missing forever.
         var generatedAt = Instant.FromUtc(2026, 4, 19, 10, 0);
         var lineDate = new LocalDate(2026, 4, 19);
         SeedRows(Row(TransferId, _userId, bookedAt: FixedNow - Duration.FromDays(1),
@@ -942,10 +924,9 @@ public class SepaBankBookingTests
     [HumansFact]
     public async Task Sweep_ReconcilePendingRow_OlderThanTheFeedWindow_IsStillReadBack()
     {
-        // The 90-day floor is about matching new transfers. A reconcile-pending row is already
-        // booked against a known line, so the read has to reach that line however old it is —
-        // otherwise a human's later reconcile is never seen and ReconciledAt plus its audit entry
-        // stay missing forever.
+        // The 90-day floor is for matching new transfers. A reconcile-pending row is already booked
+        // against a known line, so the read must reach that line however old it is, or a human's
+        // later reconcile is never seen.
         var generatedAt = FixedNow - Duration.FromDays(200);
         var lineDate = new LocalDate(2025, 10, 13);
         SeedRows(Row(TransferId, _userId, bookedAt: FixedNow - Duration.FromDays(199),
@@ -976,8 +957,6 @@ public class SepaBankBookingTests
             default!, default, default);
         await AssertNothingPostedAsync();
     }
-
-    // ─── peterdrier/Humans#1946: one stuck line cannot block the feed forever ───
 
     /// <summary>A feed where <paramref name="stuckIds"/> are pending outgoing lines with no readable
     /// date: the client fails closed on the first one unless it was told to skip it.</summary>
@@ -1010,7 +989,7 @@ public class SepaBankBookingTests
 
         await AssertNothingPostedAsync();
         await _audit.DidNotReceive().LogAsync(
-            AuditAction.SepaBankLineSkipped, Arg.Any<string>(), Arg.Any<Guid>(), Arg.Any<string>(),
+            FinanceAuditActions.SepaBankLineSkipped, Arg.Any<string>(), Arg.Any<Guid>(), Arg.Any<string>(),
             Arg.Any<string>(), Arg.Any<Guid?>(), Arg.Any<string?>());
     }
 
@@ -1026,7 +1005,7 @@ public class SepaBankBookingTests
         await _repo.Received(1).SaveSepaTransferBookingAsync(
             TransferId, FixedNow, null, MovementId, Arg.Any<Instant?>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
         await _audit.Received(1).LogAsync(
-            AuditAction.SepaBankLineSkipped, "SepaBankLine", Guid.Empty,
+            FinanceAuditActions.SepaBankLineSkipped, "SepaBankLine", Guid.Empty,
             Arg.Is<string>(d => d.Contains("stuck-1", StringComparison.Ordinal)),
             "sepa-bank-booking", Arg.Any<Guid?>(), Arg.Any<string?>());
     }
@@ -1039,7 +1018,7 @@ public class SepaBankBookingTests
         await RunSweepAsync(5);
 
         await _audit.Received(1).LogAsync(
-            AuditAction.SepaBankLineSkipped, Arg.Any<string>(), Arg.Any<Guid>(), Arg.Any<string>(),
+            FinanceAuditActions.SepaBankLineSkipped, Arg.Any<string>(), Arg.Any<Guid>(), Arg.Any<string>(),
             Arg.Any<string>(), Arg.Any<Guid?>(), Arg.Any<string?>());
     }
 
@@ -1059,7 +1038,7 @@ public class SepaBankBookingTests
         await RunSweepAsync(2);
 
         await _audit.Received(1).LogAsync(
-            AuditAction.SepaBankLineSkipped, Arg.Any<string>(), Arg.Any<Guid>(), Arg.Any<string>(),
+            FinanceAuditActions.SepaBankLineSkipped, Arg.Any<string>(), Arg.Any<Guid>(), Arg.Any<string>(),
             Arg.Any<string>(), Arg.Any<Guid?>(), Arg.Any<string?>());
     }
 
@@ -1091,11 +1070,9 @@ public class SepaBankBookingTests
         await RunSweepAsync(2);
 
         await _audit.DidNotReceive().LogAsync(
-            AuditAction.SepaBankLineSkipped, Arg.Any<string>(), Arg.Any<Guid>(), Arg.Any<string>(),
+            FinanceAuditActions.SepaBankLineSkipped, Arg.Any<string>(), Arg.Any<Guid>(), Arg.Any<string>(),
             Arg.Any<string>(), Arg.Any<Guid?>(), Arg.Any<string?>());
     }
-
-    // ─── H1-H3: the ways a booking could still over-post or over-claim ──────────
 
     [HumansFact]
     public async Task Booking_WhileAnotherBookingOfTheSameTransferRuns_PostsNothingASecondTime()
@@ -1144,7 +1121,7 @@ public class SepaBankBookingTests
     [HumansFact]
     public async Task Booking_ResumesFromAPostingDatedTheClick_NotTheBankLine()
     {
-        // A pre-#1185 run dated its postings the day the treasurer clicked, which can be weeks off
+        // An older run dated its postings the day the treasurer clicked, which can be weeks off
         // the bank line. Read a window that misses it and the whole amount goes in a second time.
         var generatedOn = new LocalDate(2026, 3, 22);          // 40 days before "today"
         var clickDate = new LocalDate(2026, 4, 10);            // 18 days before the bank line
@@ -1183,7 +1160,7 @@ public class SepaBankBookingTests
             TransferId, FixedNow, Arg.Any<Guid?>(), MovementId, Arg.Any<Instant?>(), Arg.Any<string?>(),
             Arg.Any<CancellationToken>());
         await _audit.Received(1).LogAsync(
-            AuditAction.SepaPayoutTransferBooked, Arg.Any<string>(), TransferId,
+            FinanceAuditActions.SepaPayoutTransferBooked, Arg.Any<string>(), TransferId,
             Arg.Is<string>(d => d.Contains("resumed (5.00 EUR already posted)", StringComparison.Ordinal)
                                 && d.Contains("15.00 EUR in credit", StringComparison.Ordinal)),
             Arg.Any<Guid>(), Arg.Any<Guid?>(), Arg.Any<string>());
@@ -1231,14 +1208,12 @@ public class SepaBankBookingTests
         result.Succeeded.Should().BeFalse();
         result.Message.Should().Contain("could not be saved");
         await _audit.Received(1).LogAsync(
-            AuditAction.SepaPayoutTransferBooked, Arg.Any<string>(), TransferId,
+            FinanceAuditActions.SepaPayoutTransferBooked, Arg.Any<string>(), TransferId,
             Arg.Is<string>(d => d.Contains("PARTIAL", StringComparison.Ordinal)
                                 && d.Contains("pay-d1", StringComparison.Ordinal)
                                 && d.Contains("could not be saved", StringComparison.Ordinal)),
             Arg.Any<Guid>(), Arg.Any<Guid?>(), Arg.Any<string>());
     }
-
-    // ─── AC 7, the page's half: what the treasurer is shown ─────────────────────
 
     [HumansFact]
     public async Task Page_MatchedLine_OffersItOnTheRow_WithItsDateAmountAndText()
@@ -1284,8 +1259,6 @@ public class SepaBankBookingTests
         line.ParsedAccountNum.Should().BeNull();
         line.Reason.Should().Contain("names no creditor account").And.Contain("no unbooked transfer is for");
     }
-
-    // ─── Sabadell's live shape: one line per transfer, no remittance text ───────
 
     private const string Textless = "TRANSFERENCIA EMITIDA";
     private const int OtherAccount = 40000007;
@@ -1404,8 +1377,6 @@ public class SepaBankBookingTests
 
         await AssertNothingPostedAsync();
     }
-
-    // ─── The editable tolerance: days either side of the file date ──────────────
 
     /// <summary>Three days after the file (generated 2026-04-28): outside the default two.</summary>
     private static readonly LocalDate LateLineDate = new(2026, 5, 1);
@@ -1583,8 +1554,6 @@ public class SepaBankBookingTests
         await AssertNothingPostedAsync();
     }
 
-    // ─── Withdrawn transfers: cancelled at the bank, out of every matcher ──────────
-
     [HumansFact]
     public async Task BookFile_WithdrawnTransferInTheFile_GateIsOverTheRest_AndBooksThem()
     {
@@ -1697,8 +1666,6 @@ public class SepaBankBookingTests
             .And.Contain(OtherAccount.ToString());
         await AssertNothingPostedAsync();
     }
-
-    // ─── Equal amounts: indistinguishable lines and transfers pair as a set ─────────
 
     /// <summary>One file of <paramref name="transfers"/> transfers of €30 to as many members, and
     /// <paramref name="lines"/> textless €30 lines dated inside its window. The first member is the
@@ -1882,8 +1849,6 @@ public class SepaBankBookingTests
             .Should().Contain("settle it in Holded by hand");
     }
 
-    // ─── Review round 1: a line only pairs with a transfer it could actually have paid ──
-
     [HumansFact]
     public async Task Booking_LineDatedBeforeTheFileWasGenerated_Refuses()
     {
@@ -1969,8 +1934,6 @@ public class SepaBankBookingTests
         await AssertNothingPostedAsync();
     }
 
-    // ─── Review round 5: an unconfirmed entry, and the feed window's date slack ──
-
     [HumansTheory]
     [InlineData("partial", false)]
     [InlineData("reconciled", true)]
@@ -2040,9 +2003,6 @@ public class SepaBankBookingTests
                 ? [Movement(date: lineDate)]
                 : []);
     }
-
-
-    // ─── One bank line for a whole file: the manual Process ─────────────────────
 
     private static readonly Guid BatchFileId = Guid.Parse("44444444-4444-4444-4444-444444444444");
     private const string BatchMovementId = "mov-batch";
@@ -2303,8 +2263,6 @@ public class SepaBankBookingTests
 
         await AssertNothingPostedAsync();
     }
-
-    // ─── Seeding ────────────────────────────────────────────────────────────────
 
     private async Task AssertNothingPostedAsync()
     {

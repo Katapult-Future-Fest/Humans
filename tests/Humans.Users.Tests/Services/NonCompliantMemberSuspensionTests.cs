@@ -16,9 +16,8 @@ using Humans.Users.Tests.Infrastructure;
 namespace Humans.Users.Tests.Services;
 
 /// <summary>
-/// The body of the nightly non-compliance sweep. The job class
-/// itself stays in <c>Humans.Infrastructure</c> because Hangfire pins its serialized type
-/// name; what is left of it is a start log, a try/catch and a failure metric.
+/// The nightly sweep's body: the job class stays in <c>Humans.Infrastructure</c> because
+/// Hangfire pins its serialized type name.
 /// </summary>
 public class NonCompliantMemberSuspensionTests : IDisposable
 {
@@ -90,7 +89,7 @@ public class NonCompliantMemberSuspensionTests : IDisposable
         await _userService.DidNotReceive().SuspendProfilesForMissingConsentAsync(
             Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>());
         await _auditLogService.DidNotReceive().LogAsync(
-            Arg.Any<AuditAction>(), Arg.Any<string>(), Arg.Any<Guid>(),
+            Arg.Any<AuditActionDefinition>(), Arg.Any<string>(), Arg.Any<Guid>(),
             Arg.Any<string>(), Arg.Any<string>(), Arg.Any<Guid?>(), Arg.Any<string?>());
     }
 
@@ -111,11 +110,11 @@ public class NonCompliantMemberSuspensionTests : IDisposable
         foreach (var userId in ids.Take(2))
         {
             await _auditLogService.Received(1).LogAsync(
-                AuditAction.MemberSuspended, nameof(User), userId,
+                UsersAuditActions.MemberSuspended, nameof(User), userId,
                 Arg.Any<string>(), "SuspendNonCompliantMembersJob", Arg.Any<Guid?>(), Arg.Any<string?>());
         }
         await _auditLogService.DidNotReceive().LogAsync(
-            Arg.Any<AuditAction>(), Arg.Any<string>(), ids[2],
+            Arg.Any<AuditActionDefinition>(), Arg.Any<string>(), ids[2],
             Arg.Any<string>(), Arg.Any<string>(), Arg.Any<Guid?>(), Arg.Any<string?>());
     }
 
@@ -178,7 +177,7 @@ public class NonCompliantMemberSuspensionTests : IDisposable
             Arg.Is<EmailMessage>(m => m.TemplateName == "access_suspended"), Arg.Any<CancellationToken>());
 
         await _auditLogService.DidNotReceive().LogAsync(
-            Arg.Any<AuditAction>(), Arg.Any<string>(), Arg.Any<Guid>(),
+            Arg.Any<AuditActionDefinition>(), Arg.Any<string>(), Arg.Any<Guid>(),
             Arg.Any<string>(), Arg.Any<string>(),
             Arg.Any<Guid?>(), Arg.Any<string?>());
     }
@@ -236,7 +235,7 @@ public class NonCompliantMemberSuspensionTests : IDisposable
         await _sut.SuspendNonCompliantAsync(TestContext.Current.CancellationToken);
 
         await _notificationService.Received(1).SendAsync(
-            NotificationSource.AccessSuspended,
+            UsersNotificationSources.AccessSuspended,
             NotificationClass.Actionable,
             NotificationPriority.Critical,
             Arg.Any<string>(),
@@ -260,7 +259,7 @@ public class NonCompliantMemberSuspensionTests : IDisposable
         await _sut.SuspendNonCompliantAsync(TestContext.Current.CancellationToken);
 
         await _auditLogService.Received(1).LogAsync(
-            AuditAction.MemberSuspended,
+            UsersAuditActions.MemberSuspended,
             nameof(User),
             user.Id,
             Arg.Is<string>(s => s.Contains("Test User")),
@@ -268,10 +267,6 @@ public class NonCompliantMemberSuspensionTests : IDisposable
             Arg.Any<Guid?>(),
             Arg.Any<string?>());
     }
-
-    // ------------------------------------------------------------------
-    // Helpers
-    // ------------------------------------------------------------------
 
     private User SetupUser()
     {

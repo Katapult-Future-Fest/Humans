@@ -1,42 +1,53 @@
+using Humans.Base.Authorization;
 using Humans.Base.Constants;
+using Humans.Base.Extensions;
+using Humans.Base.Hosting;
 using Humans.Base.Interfaces;
 using Humans.Base.Interfaces.Caching;
-using Humans.Email.Contracts;
-using Humans.Gdpr.Contracts;
 using Humans.Consent.Contracts;
-using Humans.Issues.Contracts;
 using Humans.Consent.Data;
 using Humans.Consent.Jobs;
 using Humans.Consent.Services;
-using Humans.Base.Hosting;
+using Humans.Consent.ViewComponents;
+using Humans.Email.Contracts;
+using Humans.Gdpr.Contracts;
+using Humans.Issues.Contracts;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.Extensions.Configuration;
+using Humans.Notifications.Contracts;
 using Microsoft.Extensions.DependencyInjection;
+using Humans.AuditLog.Contracts;
 
 namespace Humans.Consent;
 
-/// <summary>
-/// Consent's DI entry point, at the project root by convention. Discovered by Shell —
-/// nothing names it, so it needs no section prefix.
-/// </summary>
-/// <remarks>
-/// <c>SyncLegalDocumentsJob</c> and <c>SendReConsentReminderJob</c> live in <c>Jobs/</c>;
-/// their schedules are contributed via <c>SectionJobs.cs</c>.
-/// </remarks>
-public sealed class Section : ISection, IIssueQueueOwner
+public sealed class Section :
+    ISection,
+    IIssueQueueOwner,
+    ISectionRoles,
+    ISectionAdminNav,
+    ISectionDataMigrations,
+    ISectionJobs,
+    ISectionPolicies,
+    IUserPart
 {
+    IReadOnlyList<RoleDefinition> ISectionRoles.Roles { get; } =
+    [
+        new(ConsentRoles.ConsentCoordinator, "Consent Coordinator",
+            "Guardians of trust and safety. They review every new human's consent journey, ensuring our community standards are understood and upheld from day one.",
+            "fa-solid fa-shield-heart"),
+    ];
+
     public void Register(IServiceCollection services, IConfiguration configuration)
     {
+        services.AddSingleton<IAuditActionContributor, ConsentAuditActions>();
+        services.AddSingleton<INotificationSourceContributor, ConsentNotificationSources>();
         services.AddSectionDbContext<LegalDbContext>(sentinelTable: "legal_documents");
 
-        // Legal documents. GitHub I/O behind IGitHubLegalDocumentConnector keeps the
-        // section's services free of Octokit.
         services.AddSingleton<ILegalDocumentRepository, LegalDocumentRepository>();
         services.AddScoped<IGitHubLegalDocumentConnector, GitHubLegalDocumentConnector>();
 
-        // Keyed-Scoped inner + Singleton decorator. LegalDocumentSyncService is the sole writer for
-        // legal_documents/document_versions (nobodies-collective/Humans#751) and implements both
-        // ILegalDocumentSyncManagement and IAdminLegalDocumentService; IAdminLegalDocumentService forwards
-        // to the same keyed inner instance so admin writes and GitHub-sync writes share one service.
+        // LegalDocumentSyncService is the sole writer and serves IAdminLegalDocumentService from the same keyed
+        // inner instance, so admin and sync writes share one service.
         services.AddKeyedScoped<ILegalDocumentSyncManagement, LegalDocumentSyncService>(
             CachingLegalDocumentSyncService.InnerServiceKey);
         services.AddScoped<IAdminLegalDocumentService>(sp =>
@@ -50,19 +61,15 @@ public sealed class Section : ISection, IIssueQueueOwner
         services.AddSingleton<ICacheStats>(sp =>
             sp.GetRequiredService<CachingLegalDocumentSyncService>());
 
-        // TrackedCache StartAsync drives WarmAllAsync (warmOnStartup: true).
         services.AddHostedService(sp => sp.GetRequiredService<CachingLegalDocumentSyncService>());
 
         services.AddScoped<ILegalDocumentService, LegalDocumentService>();
 
-        // Runner holds the sync + fan-out body; the job keeps only the schedule/metric/failure
-        // boundary.
         services.AddScoped<ILegalDocumentSyncRunner, LegalDocumentSyncRunner>();
 
-        // ConsentService. consent_records is append-only (design-rules §12).
         services.AddSingleton<IConsentRepository, ConsentRepository>();
 
-        // Two-layer cache: keyed inner + Singleton decorator. Unkeyed concrete forwards via cast so IUserDataContributor resolves the inner cleanly for GDPR-export tests.
+        // The unkeyed concrete forwards to the keyed inner so IUserDataContributor reaches the undecorated service.
         services.AddKeyedScoped<IConsentManagement, ConsentService>(
             CachingConsentService.InnerServiceKey);
         services.AddScoped<ConsentService>(sp =>
@@ -81,18 +88,13 @@ public sealed class Section : ISection, IIssueQueueOwner
         services.AddSingleton<ICacheStats>(sp =>
             sp.GetRequiredService<CachingConsentService>());
 
-        // Hosted for symmetry; warmOnStartup: false so StartAsync is a no-op.
         services.AddHostedService(sp => sp.GetRequiredService<CachingConsentService>());
 
-        // Consent Coordinator review (consent_reviews): reads ride IConsentService through
-        // ConsentService; IConsentWrite carries the annotations; export/erase slice.
         services.AddSingleton<IConsentReviewRepository, ConsentReviewRepository>();
         services.AddScoped<ConsentReviewService>();
         services.AddScoped<IConsentWrite>(sp => sp.GetRequiredService<ConsentReviewService>());
         services.AddScoped<IUserDataContributor>(sp => sp.GetRequiredService<ConsentReviewService>());
 
-        // Re-consent reminder cooldown stamps (consent_reminders): the reminder job's read and
-        // write, the consent.reminder-stamps copy and the export/erase slice.
         services.AddSingleton<IConsentReminderRepository, ConsentReminderRepository>();
         services.AddScoped<ConsentReminderService>();
         services.AddScoped<IUserDataContributor>(sp => sp.GetRequiredService<ConsentReminderService>());
@@ -100,26 +102,73 @@ public sealed class Section : ISection, IIssueQueueOwner
         services.AddScoped<SyncLegalDocumentsJob>();
         services.AddScoped<SendReConsentReminderJob>();
 
-        // Consent owns its email copy and its gallery samples; Email keeps the mechanics
-        // (memory/architecture/email-templates-live-in-sender.md).
         services.AddScoped<ConsentEmails>();
         services.AddScoped<IEmailPreviewContributor, ConsentEmailPreviews>();
 
-        // Consent's active-required-documents gauge.
         services.AddSingleton<ConsentMetricsService>();
         services.AddHostedService(sp => sp.GetRequiredService<ConsentMetricsService>());
     }
 
-    // This section owns the issue queue its members' reports land in; Issues discovers
-    // the seam rather than holding a list of sections (memory/architecture/section-contribution-seams.md).
-    // The key is "Legal", not "Consent": the section was renamed at the 2026-08-03 freeze and
-    // stored rows still carry the old string, so the queue keeps its name and the Consent
-    // Coordinator keeps seeing it.
+    // "Legal", not "Consent": stored issue rows still carry the section's old name.
     string IIssueQueueOwner.QueueKey => "Legal";
 
     string IIssueQueueOwner.AreaLabelResourceKey => "Issues_Area_Legal";
 
     IReadOnlyList<string> IIssueQueueOwner.PathSegments => ["legal", "consent"];
 
-    IReadOnlyList<string> IIssueQueueOwner.OwningRoles => [RoleNames.ConsentCoordinator];
+    IReadOnlyList<string> IIssueQueueOwner.OwningRoles => [ConsentRoles.ConsentCoordinator];
+
+    IEnumerable<AdminNavGroup> ISectionAdminNav.Groups() =>
+    [
+        new("Consent", [
+            new("Legal documents", "AdminLegalDocuments", "LegalDocuments", null, null, "fa-solid fa-scale-balanced", PolicyNames.BoardOrAdmin)
+        ])
+    ];
+
+    internal const string ProfileReviewKey = "consent.profile-review";
+
+    IEnumerable<DataMigration> ISectionDataMigrations.Migrations() =>
+    [
+        new(ProfileReviewKey, "Consent",
+            "Copy each Consent Coordinator review (consent check, approval, rejection) from profiles into consent_reviews, and record a legacy rejection as users.State = Rejected where the state never did",
+            "ConsentReviewService's legacy fallback, UserInfo.IsRejected's legacy arm, the review fields on ProfileInfo and LegacyConsentCheckStatus; then a drop PR for the profiles review columns",
+            StatusAsync, ApplyAsync),
+    ];
+
+    private static async Task<DataMigrationStatus> StatusAsync(IServiceProvider sp, CancellationToken ct) =>
+        new(["User", "Copy row", "Set Rejected state", "Status", "Approved", "Checked", "Rejected"],
+            [.. (await sp.GetRequiredService<ConsentReviewService>().GetUncopiedLegacyReviewsAsync(ct))
+                .Select(p => (IReadOnlyList<string>)[
+                    p.Review.UserId.ToString(),
+                    p.CopyRow ? "yes" : "no",
+                    p.SetRejectedState ? "yes" : "no",
+                    p.Review.Status?.ToString() ?? string.Empty,
+                    p.Review.IsApproved ? "yes" : "no",
+                    p.Review.CheckedAt.ToIso8601() ?? string.Empty,
+                    p.Review.RejectedAt.ToIso8601() ?? string.Empty])]);
+
+    private static Task<int> ApplyAsync(IServiceProvider sp, Guid actorUserId, CancellationToken ct) =>
+        sp.GetRequiredService<ConsentReviewService>().CopyLegacyReviewsAsync(ct);
+
+    IEnumerable<RecurringJobDescriptor> ISectionJobs.Jobs(IServiceProvider services)
+    {
+        // 04:00, 30 minutes before Users' SuspendNonCompliantMembersJob.
+        yield return new RecurringJobDescriptor(
+            "consent-reconsent-reminders", typeof(SendReConsentReminderJob), "0 4 * * *");
+
+        yield return new RecurringJobDescriptor(
+            "consent-legal-document-sync", typeof(SyncLegalDocumentsJob), "0 4 * * *");
+    }
+
+    void ISectionPolicies.AddPolicies(AuthorizationOptions options)
+    {
+        options.AddPolicy(PolicyNames.ConsentCoordinatorBoardOrAdmin, policy =>
+            policy.RequireRole(ConsentRoles.ConsentCoordinator, RoleNames.Board, RoleNames.Admin));
+    }
+
+    IEnumerable<UserPart> IUserPart.Parts() =>
+    [
+        new(UserPartSlots.AdminDetail, typeof(ConsentReviewCardViewComponent)),
+        new(UserPartSlots.AccountStatus, typeof(RejectionReasonViewComponent)),
+    ];
 }

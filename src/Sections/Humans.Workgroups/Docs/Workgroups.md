@@ -153,7 +153,7 @@ Forms advertise these bounds and the service rejects overflow before writing any
 Validation failures re-render the submitted form; admin lifecycle decisions (refuse, refer,
 withdraw, close, reactivate, coordinator override) are made from the group's Details page
 (Board/Admin actions panel) and redirect back to it, flashing any rule failure. Register
-alone stays on the queue.
+alone stays on the queue. Register-existing requires an explicit valid registration date before creating a group, Drive folder, budget account, audit or notice; an omitted date never becomes the type's default backdate. Explicit backdated dates remain supported.
 
 `WorkgroupLogKind` — system: Applied, Registered, Referred, Refused, Withdrawn, Ended,
 Reactivated, CoordinatorChanged, ScopeChanged, MemberJoined, MemberLeft,
@@ -265,6 +265,10 @@ Settings and Register an existing group on first setup or after clearing the que
 
 ## Invariants
 
+- Roster membership-tier badges use localized enum labels in all six cultures.
+
+- The section’s things-to-do contribution forwards caller cancellation through all data reads. Aborted reads propagate instead of being logged or converted into missing prompts.
+
 - Coordinator-picker prefills pair the resolved human’s name and ID, including when the form holds an archived account ID.
 
 - Opt-outable email builders capture the recipient/template culture on `EmailMessage` before restoring their rendering scope; Email renders the shared unsubscribe footer in that culture.
@@ -346,7 +350,7 @@ Settings and Register an existing group on first setup or after clearing the que
 - Comment/log/document responses stay possible after the comment window closes but not
   after the group leaves Active (`RequireAcceptsMemberWork` on the responding calls too).
 - A group's Slug never collides with a reserved route segment (`apply`, `admin`).
-- Budget: amount ≥ 0 or null; Refused/Withdrawn rejected; Finance is called before
+- Budget: amount ≥ 0 or null and must be whole cents (at most two decimal places; trailing zeroes are valid). Updates and existing-group registration refuse fractional cents before Finance, Drive creation or persistence, using literal feedback on the Board/Admin-only forms. Refused/Withdrawn rejected; Finance is called before
   anything is written, so a failed create or an unknown account number changes nothing;
   the first account bound is created as "Workgroups / {Name}" or linked to an existing
   account of that normalized name; clearing keeps the binding; rebinding never touches
@@ -436,6 +440,8 @@ should end is the Board's decision, taken on the register in front of them.
 
 ## Cross-Section Dependencies
 
+- **Audit actions:** declared on `WorkgroupsAuditActions` (`src/Sections/Humans.Workgroups/WorkgroupsAuditActions.cs`), one `AuditActionDefinition` each, written through `IAuditLogService`: `WorkgroupRegistered`, `WorkgroupReferred`, `WorkgroupRefused`, `WorkgroupWithdrawn`, `WorkgroupClosed`, `WorkgroupReactivated`, `WorkgroupCoordinatorsChanged`, `WorkgroupDispositionRecorded`, `WorkgroupRegisteredExisting`, `WorkgroupBudgetSet`, `WorkgroupApplicationOverdue`, `WorkgroupUpdateDueNotified`, `WorkgroupLogEntryDeleted`, `WorkgroupLogEntryUpdated`, `WorkgroupMeetingUpdated`, `WorkgroupMeetingDeleted`, `WorkgroupCommentHidden`, `WorkgroupsRootFolderUpdated`, `WorkgroupMembershipApproved`, `WorkgroupMembershipDeclined`, `WorkgroupMemberAdded`.
+- **Notifications:** `INotificationEmitter` (and `INotificationAutoResolve` where a source resolves). Its sources are declared in `WorkgroupsNotificationSources` (`src/Sections/Humans.Workgroups/WorkgroupsNotificationSources.cs`), one `NotificationSourceDefinition` each: `WorkgroupRegistrationPending` (actionable, to board role: a working group applies, or its application goes overdue); `WorkgroupRegistrationDecided` (informational, to the group's coordinators: registration decided (registered, refused, withdrawn, ended, reactivated)); `WorkgroupReportingDue` (informational, to the group's coordinators: thirty days without an update or meeting); `WorkgroupDocumentActivity` (informational (actionable to board when a document is delivered for disposition), to group members, comment authors, or Board role: document published, comment opened/answered, or delivered for disposition); `WorkgroupDispositionRecorded` (informational, to the group's current members: board records its written disposition on a delivered document); `WorkgroupMembershipRequested` (informational, to the group's coordinators: someone asks to join a working group); `WorkgroupMembershipDecided` (informational, to the requester or added person: join request approved or declined, or a coordinator adds the person directly).
 - **Users**: `IUserService` — names, approved-profile check;
   `IUserEmailService` — notification target addresses for lifecycle emails.
 - **Governance**: `IGovernanceService.GetMembershipTiersAsync` — roster tier badges and the budget-visibility tier check.
@@ -508,9 +514,10 @@ display-name reads.
   section's tables. Reads no-tracking; the whole register loads as one graph
   (`WorkgroupsGraph`) and the service works over it in memory — a few dozen rows.
 - **Decorator decision** — caching decorator (`CachingWorkgroupService`, Singleton). One
-  `TrackedCache<byte, IReadOnlyList<WorkgroupInfo>>` (`Workgroups.Register`), single
-  entry for the whole register, cleared on every write. Loads begun before a clear cannot
-  repopulate it with the old register. Nothing time-derived is cached —
+  `TrackedCache<byte, IReadOnlyList<WorkgroupInfo>>` inherited by the decorator
+  (`Workgroups.Register`), single
+  entry for the whole register, cleared on every write. The shared guarded loader prevents
+  loads begun before a clear from repopulating it with the old register. Nothing time-derived is cached —
   `WorkgroupRhythm` computes rhythm badges from the snapshot against the caller's clock.
 - **Display stitching** — `IUserService.GetUserInfosAsync` for burner names; `IGovernanceService.GetMembershipTiersAsync` (in `WorkgroupsController`) for tiers.
 - **Cross-section calls** — `IUserService`, `IUserEmailService`,

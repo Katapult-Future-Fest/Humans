@@ -42,14 +42,14 @@ internal sealed partial class PreapprovalService
             { ProgramId = program.Id, UserId = userId, AddedByUserId = actorUserId, AddedAt = now });
         await repository.AddProgramAsync(program, ct);
 
-        await AuditProgramAsync(AuditAction.PreapprovalProgramCreated, program,
+        await AuditProgramAsync(PreapprovalsAuditActions.PreapprovalProgramCreated, program,
             $"Program \"{program.Name}\" created: {program.Kind}, " +
             $"{(program.PerPersonAmount is { } per ? $"{Euros(per)} per person, " : "")}" +
             $"ceiling {(program.TotalCeiling is { } c ? Euros(c) : "none")}, account {program.HoldedAccountNumber}, " +
             $"claim by {program.ClaimBy.ToInvariantDate()}, {program.Status}.",
             actorUserId);
         foreach (var manager in program.Managers)
-            await AuditProgramAsync(AuditAction.PreapprovalProgramManagerAdded, program,
+            await AuditProgramAsync(PreapprovalsAuditActions.PreapprovalProgramManagerAdded, program,
                 $"Manager added to \"{program.Name}\".", actorUserId, relatedUserId: manager.UserId);
 
         return new(program.Id);
@@ -85,7 +85,7 @@ internal sealed partial class PreapprovalService
         Change(changes, "accepts applications", program.AcceptsApplications, save.AcceptsApplications, v => program.AcceptsApplications = v);
         Change(changes, "claim by", program.ClaimBy, save.ClaimBy, v => program.ClaimBy = v, d => d.ToInvariantDate());
         Change(changes, "status", program.Status, save.Status, v => program.Status = v);
-        program.Kind = save.Kind;
+        Change(changes, "kind", program.Kind, save.Kind, v => program.Kind = v);
         program.UpdatedAt = now;
         await repository.UpdateProgramAsync(program, ct);
         // The program committed; finish manager changes, audit and deadline notices independently of the browser.
@@ -103,14 +103,14 @@ internal sealed partial class PreapprovalService
         if (changes.Count > 0)
             await AuditProgramAsync(
                 wasOpen && program.Status == ProgramStatus.Closed
-                    ? AuditAction.PreapprovalProgramClosed
-                    : AuditAction.PreapprovalProgramEdited,
+                    ? PreapprovalsAuditActions.PreapprovalProgramClosed
+                    : PreapprovalsAuditActions.PreapprovalProgramEdited,
                 program, $"Program \"{program.Name}\" edited: {string.Join("; ", changes)}.", actorUserId);
         foreach (var id in added)
-            await AuditProgramAsync(AuditAction.PreapprovalProgramManagerAdded, program,
+            await AuditProgramAsync(PreapprovalsAuditActions.PreapprovalProgramManagerAdded, program,
                 $"Manager added to \"{program.Name}\".", actorUserId, relatedUserId: id);
         foreach (var id in removed)
-            await AuditProgramAsync(AuditAction.PreapprovalProgramManagerRemoved, program,
+            await AuditProgramAsync(PreapprovalsAuditActions.PreapprovalProgramManagerRemoved, program,
                 $"Manager removed from \"{program.Name}\".", actorUserId, relatedUserId: id);
 
         if (program.ClaimBy != oldClaimBy)
@@ -120,9 +120,7 @@ internal sealed partial class PreapprovalService
     }
 
     /// <summary>
-    /// Every Open holder gets the stale "file by" prompt resolved and a new one with the new
-    /// date, in app and by email. Reminder markers carry the deadline they announced, so the
-    /// reminders simply run again for the new date; nothing else is touched.
+    /// Reminder markers carry the deadline they announced, so the reminders simply run again for the new date.
     /// </summary>
     private async Task DeadlineMovedAsync(PreapprovalProgram program, Guid actorUserId, CancellationToken ct)
     {
@@ -143,23 +141,20 @@ internal sealed partial class PreapprovalService
         if (save.Kind == ProgramKind.FixedPerPerson)
         {
             if (save.PerPersonAmount is not { } per) return new(PreapprovalErrorKeys.PerPersonAmountRequired);
-            if (per <= 0) return new(PreapprovalErrorKeys.AmountPositive);
+            if (MoneyRefusal(per) is { } amountRefusal) return amountRefusal;
         }
         else if (save.PerPersonAmount is not null)
         {
             return new(PreapprovalErrorKeys.PerPersonAmountNotAllowed);
         }
-        if (save.TotalCeiling is { } ceiling && ceiling <= 0) return new(PreapprovalErrorKeys.AmountPositive);
+        if (save.TotalCeiling is { } ceiling && MoneyRefusal(ceiling) is { } ceilingRefusal) return ceilingRefusal;
         // The kind decides how every grant is sized; once one exists it cannot change under them.
         if (existing is { Grants.Count: > 0 } && existing.Kind != save.Kind)
             return new(PreapprovalErrorKeys.KindLocked);
         return null;
     }
 
-    /// <summary>
-    /// The account id for a number Finance offers today. An unchanged number on an existing
-    /// program is kept as is, so an account retired since never blocks a deadline edit.
-    /// </summary>
+    /// <summary>An unchanged number keeps its id, so an account retired since never blocks a deadline edit.</summary>
     private async Task<string?> ResolveAccountAsync(int accountNumber, PreapprovalProgram? keep, CancellationToken ct)
     {
         if (keep is not null && keep.HoldedAccountNumber == accountNumber) return keep.HoldedAccountId;
