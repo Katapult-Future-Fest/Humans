@@ -1,0 +1,66 @@
+@model HoldedPurchaseDocMirror
+@{
+    ViewData["Title"] = "Holded purchase documents";
+}
+
+<page-header title="Holded purchase documents">
+    <page-header-subtitle>
+        Every purchase document Holded lists, as of the last sync
+        (@(Model.LastSyncAt is { } at ? at.ToDateTime() : "never")). Notes are read one document at a time, up to
+        50 a sync, newest first; "—" means not read yet. Which budget category a document counts toward is
+        Finance's call, shown on the budget year and the
+        <a asp-controller="Finance" asp-action="HoldedUnmatched">unmatched documents</a> page.
+    </page-header-subtitle>
+</page-header>
+
+@if (Model.Docs.Count == 0)
+{
+    <div class="card"><div class="card-body text-muted">No documents mirrored yet — run a sync from the summary.</div></div>
+}
+else
+{
+    <div class="card">
+        @{
+            Func<HoldedPurchaseDocInfo, IHtmlContent> dateCell = @<text>@item.Date.ToDate()</text>;
+            Func<HoldedPurchaseDocInfo, IHtmlContent> docCell = @<text>
+                <a href="@item.HoldedUrl" target="_blank" rel="noopener noreferrer" title="Open in Holded">
+                    @(string.IsNullOrWhiteSpace(item.DocNumber) ? item.Id : item.DocNumber)<i class="fa-solid fa-arrow-up-right-from-square ms-1 small"></i>
+                </a>
+
+            </text>;
+            Func<HoldedPurchaseDocInfo, IHtmlContent> contactCell = @<text>
+                @item.ContactName
+                @if (item.Description is not null)
+                {
+                    <div class="small text-muted">@item.Description</div>
+                }
+
+            </text>;
+            Func<HoldedPurchaseDocInfo, IHtmlContent> totalCell = @<text>@item.Total.ToEuro()</text>;
+            Func<HoldedPurchaseDocInfo, IHtmlContent> approvedCell = @<text>
+                @if (item.IsApproved)
+                {
+                    <i class="fa-solid fa-check text-success" title="Approved in Holded"></i>
+                }
+                else
+                {
+                    <span class="text-muted" title="Still a draft in Holded">—</span>
+                }
+
+            </text>;
+            Func<HoldedPurchaseDocInfo, IHtmlContent> tagsCell = @<text>@string.Join(", ", item.Tags)</text>;
+            var docsTable = TableModel.For(Model.Docs)
+                .Template("Date", dateCell, o => o.Css("text-nowrap"), sortBy: d => d.Date)
+                .Template("Doc #", docCell, o => o.Css("text-nowrap"), sortBy: d => d.DocNumber)
+                .Template("Contact", contactCell, sortBy: d => d.ContactName)
+                .Template("Total", totalCell, o => o.Css("text-nowrap").End(), sortBy: d => d.Total)
+                .Template("Approved", approvedCell, sortBy: d => d.IsApproved ? 1 : 0)
+                .Column("Booked account", r => r.BookedAccountId ?? "—", o => o.Css("small").Code())
+                .Template("Tags", tagsCell, o => o.Css("small"))
+                .Column("Notes", r => r.Notes ?? "—", o => o.Css("small text-muted"))
+                .Css("align-middle")
+                .Build();
+        }
+        <partial name="_Table" model="docsTable" />
+    </div>
+}

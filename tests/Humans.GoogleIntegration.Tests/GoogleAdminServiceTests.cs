@@ -71,6 +71,59 @@ public class GoogleAdminServiceTests
     }
 
     [HumansTheory]
+    [Xunit.InlineData(false, false)]
+    [Xunit.InlineData(false, true)]
+    [Xunit.InlineData(true, false)]
+    [Xunit.InlineData(true, true)]
+    public async Task DetectEmailRenamesAsync_SeparatesCallerAndDependencyCancellation(bool duringAccountRead, bool callerAborted)
+    {
+        using var cancellation = new CancellationTokenSource();
+        if (callerAborted) await cancellation.CancelAsync();
+        var failure = new OperationCanceledException(cancellation.Token);
+        var first = Guid.NewGuid();
+        var second = Guid.NewGuid();
+        if (duringAccountRead)
+        {
+            _userService.GetAllUserInfosAsync(Arg.Any<CancellationToken>()).Returns([
+                UserInfo.Create(new User { Id = first }, [], [], null),
+                UserInfo.Create(new User { Id = second }, [], [], null),
+            ]);
+            _workspaceIdentities.GetWorkspaceIdentitiesAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
+                .Returns(new Dictionary<Guid, WorkspaceIdentity>
+                {
+                    [first] = new(first, "first@nobodies.team", GoogleEmailStatus.Valid),
+                    [second] = new(second, "second@nobodies.team", GoogleEmailStatus.Valid),
+                });
+            _teamService.GetUserTeamMembershipsAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns([]);
+            _workspaceUserService.GetAccountAsync("first@nobodies.team", Arg.Any<CancellationToken>()).ThrowsAsync(failure);
+        }
+        else
+        {
+            _userService.GetAllUserInfosAsync(Arg.Any<CancellationToken>()).ThrowsAsync(failure);
+        }
+
+        var act = () => _service.DetectEmailRenamesAsync(cancellation.Token);
+        if (callerAborted)
+            (await act.Should().ThrowAsync<OperationCanceledException>()).Which.Should().BeSameAs(failure);
+        else
+        {
+            var result = await act();
+            if (duringAccountRead) result.ErrorMessage.Should().BeNull();
+            else result.ErrorMessage.Should().NotBeNull();
+        }
+        if (duringAccountRead)
+        {
+            if (callerAborted)
+                await _workspaceUserService.DidNotReceive().GetAccountAsync("second@nobodies.team", Arg.Any<CancellationToken>());
+            else
+                await _workspaceUserService.Received(1).GetAccountAsync("second@nobodies.team", cancellation.Token);
+        }
+        var args = _logger.ReceivedCalls().Should().ContainSingle().Subject.GetArguments();
+        args[0].Should().Be(callerAborted || duringAccountRead ? LogLevel.Warning : LogLevel.Error);
+        args[3].Should().BeSameAs(callerAborted ? null : failure);
+    }
+
+    [HumansTheory]
     [Xunit.InlineData(false)]
     [Xunit.InlineData(true)]
     public async Task GetWorkspaceAccountListAsync_SeparatesCallerAndDependencyCancellation(bool callerAborted)
@@ -257,6 +310,45 @@ public class GoogleAdminServiceTests
             Arg.Any<string>(), Arg.Any<Guid>(),
             Arg.Any<string>(), _actorUserId,
             Arg.Any<Guid?>(), Arg.Any<string?>());
+    }
+
+    [HumansTheory]
+    [Xunit.InlineData(false)]
+    [Xunit.InlineData(true)]
+    public async Task ProvisionStandaloneAccountAsync_DeliversCommittedPasswordDespiteAuditFailure(bool workspaceFails)
+    {
+        _workspaceUserService.GetAccountAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns((WorkspaceUserAccount?)null);
+        string? issuedPassword = null;
+        _workspaceUserService.ProvisionAccountAsync(
+                Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(),
+                Arg.Any<string?>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                if (workspaceFails) throw new InvalidOperationException("Workspace unavailable");
+                issuedPassword = call.ArgAt<string>(3);
+                return new WorkspaceUserAccount("person@nobodies.team", "Person", "Test", false,
+                    DateTime.UtcNow, null, IsEnrolledIn2Sv: false);
+            });
+        _auditLogService.LogAsync(GoogleIntegrationAuditActions.WorkspaceAccountProvisioned,
+                Arg.Any<string>(), Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<Guid>(),
+                Arg.Any<Guid?>(), Arg.Any<string?>())
+            .ThrowsAsync(new InvalidOperationException("Audit unavailable"));
+
+        var result = await _service.ProvisionStandaloneAccountAsync(
+            "person", "Person", "Test", _actorUserId, Xunit.TestContext.Current.CancellationToken);
+
+        result.Success.Should().Be(!workspaceFails);
+        result.TemporaryPassword.Should().Be(issuedPassword);
+        if (!workspaceFails)
+        {
+            result.TemporaryPassword.Should().NotBeNullOrEmpty();
+            _logger.Received(1).Log(LogLevel.Critical, Arg.Any<EventId>(),
+                Arg.Is<object>(state => !state.ToString()!.Contains(issuedPassword!)),
+                Arg.Any<Exception?>(), Arg.Any<Func<object, Exception?, string>>());
+        }
+        else
+            _auditLogService.ReceivedCalls().Should().BeEmpty();
     }
 
     [HumansFact]
@@ -517,17 +609,25 @@ public class GoogleAdminServiceTests
         _userEmailService.MatchByEmailsAsync(Arg.Any<IReadOnlyCollection<string>>(), Arg.Any<CancellationToken>())
             .Returns([
                 new UserEmailMatch(
-                    "ben.tree@nobodies.team", linkedUserId,
+                    "bentree@gmail.com", Guid.NewGuid(),
+                    IsPrimary: true, IsVerified: false,
+                    UpdatedAt: Instant.FromUtc(2026, 10, 3, 0, 0)),
+                new UserEmailMatch(
+                    "ben.tree@gmail.com", Guid.NewGuid(),
+                    IsPrimary: true, IsVerified: true,
+                    UpdatedAt: Instant.FromUtc(2026, 10, 1, 0, 0)),
+                new UserEmailMatch(
+                    "ben.tree+burn@googlemail.com", linkedUserId,
                     IsPrimary: false, IsVerified: true,
-                    UpdatedAt: SystemClock.Instance.GetCurrentInstant())
+                    UpdatedAt: Instant.FromUtc(2026, 10, 2, 0, 0))
             ]);
 
-        await _service.ResetPasswordAsync("ben.tree@nobodies.team", _actorUserId, Xunit.TestContext.Current.CancellationToken);
+        await _service.ResetPasswordAsync("bentree@gmail.com", _actorUserId, Xunit.TestContext.Current.CancellationToken);
 
         await _auditLogService.Received(1).LogAsync(
             GoogleIntegrationAuditActions.WorkspaceAccountPasswordReset,
             "WorkspaceAccount", linkedUserId,
-            Arg.Is<string>(s => s.Contains("ben.tree@nobodies.team")),
+            Arg.Is<string>(s => s.Contains("bentree@gmail.com")),
             _actorUserId,
             Arg.Any<Guid?>(), Arg.Any<string?>());
     }

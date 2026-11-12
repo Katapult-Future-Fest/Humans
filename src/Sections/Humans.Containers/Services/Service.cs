@@ -30,24 +30,13 @@ internal sealed class Service(
     private const int MaxImageFileNameLength = 256;
     private const int MaxPlacementNotesLength = 5000;
 
-    public async Task<IReadOnlyList<ContainerDto>> GetByCampAsync(Guid campId, CancellationToken ct = default)
-    {
-        var containers = await repo.GetByCampAsync(campId, ct);
-        return await ToDtosAsync(containers, ct);
-    }
+    private readonly ContainerReader reader = new(repo, campService);
 
-    public async Task<IReadOnlyList<ContainerDto>> GetAllAsync(CancellationToken ct = default)
-    {
-        var containers = await repo.GetAllAsync(ct);
-        return await ToDtosAsync(containers, ct);
-    }
+    public Task<IReadOnlyList<ContainerDto>> GetByCampAsync(Guid campId, CancellationToken ct = default) => reader.GetByCampAsync(campId, ct);
 
-    public async Task<ContainerDto?> GetByIdAsync(Guid id, CancellationToken ct = default)
-    {
-        var container = await repo.GetByIdAsync(id, ct);
-        if (container is null) return null;
-        return ToDto(container, await repo.GetImagesAsync([id], ct));
-    }
+    public Task<IReadOnlyList<ContainerDto>> GetAllAsync(CancellationToken ct = default) => reader.GetAllAsync(ct);
+
+    public Task<ContainerDto?> GetByIdAsync(Guid id, CancellationToken ct = default) => reader.GetByIdAsync(id, ct);
 
     public async Task<ContainerMutationResult<ContainerDto>> CreateAsync(ContainerData data, Guid actorUserId, CancellationToken ct = default)
     {
@@ -92,7 +81,7 @@ internal sealed class Service(
             $"Created container '{created.Name}'",
             actorUserId,
             relatedEntityId: created.CampId, relatedEntityType: AuditEntityTypes.Camp);
-        return new(ToDto(created, await repo.GetImagesAsync([id], ct)));
+        return new(ToDto(created, await repo.GetImagesAsync([id], CancellationToken.None)));
     }
 
     public async Task<ContainerMutationResult<ContainerDto>> UpdateAsync(Guid id, ContainerData data, Guid actorUserId, CancellationToken ct = default)
@@ -134,46 +123,53 @@ internal sealed class Service(
         var nextSortOrder = existing.Except(removed).Select(i => i.SortOrder + 1).DefaultIfEmpty(0).Max();
         var images = await SaveImagesAsync(id, uploads, nextSortOrder, now, ct);
 
-        Container updated;
         try
         {
-            updated = await repo.UpdateAsync(container, images, removed.Select(i => i.Id).ToList(), ct);
+            var updated = await repo.UpdateAsync(container, images, removed.Select(i => i.Id).ToList(), ct);
+            await auditLog.LogAsync(
+                ContainersAuditActions.ContainerUpdated, AuditEntityTypes.Container, updated.Id,
+                $"Updated container '{updated.Name}'",
+                actorUserId,
+                relatedEntityId: updated.CampId, relatedEntityType: AuditEntityTypes.Camp);
+            return new(ToDto(updated, await repo.GetImagesAsync([id], CancellationToken.None)));
         }
-        catch
+        finally
         {
-            await DeleteUnlinkedGalleryImagesAsync(id, images);
-            throw;
+            await DeleteUnlinkedGalleryImagesAsync(id, images, obsoletePaths);
         }
-        await auditLog.LogAsync(
-            ContainersAuditActions.ContainerUpdated, AuditEntityTypes.Container, updated.Id,
-            $"Updated container '{updated.Name}'",
-            actorUserId,
-            relatedEntityId: updated.CampId, relatedEntityType: AuditEntityTypes.Camp);
-        await DeleteFilesAsync(obsoletePaths, id, "an update");
-        return new(ToDto(updated, await repo.GetImagesAsync([id], ct)));
     }
 
     public async Task DeleteAsync(Guid id, Guid actorUserId, CancellationToken ct = default)
     {
         var container = await repo.GetByIdAsync(id, ct)
             ?? throw new InvalidOperationException("Container not found.");
+        var candidates = (await repo.GetImagesAsync([id], ct)).Select(image => image.StoragePath)
+            .Concat((await repo.GetPlacementsAsync(null, ct)).Where(p => p.ContainerId == id)
+                .Select(p => p.PlacementImageStoragePath).OfType<string>()).ToList();
+        if (container.ImageStoragePath is { } legacyPath) candidates.Add(legacyPath);
 
-        var imagePaths = (await repo.GetImagesAsync([id], ct))
-            .Select(image => image.StoragePath)
-            .ToList();
-        if (container.ImageStoragePath is not null)
-            imagePaths.Add(container.ImageStoragePath);
-
-        // Orphaned placement-image files tolerated at this scale; see Docs/Containers.md.
-        await repo.DeleteAsync(id, ct);
-
-        await auditLog.LogAsync(
-            ContainersAuditActions.ContainerDeleted, AuditEntityTypes.Container, container.Id,
-            $"Deleted container '{container.Name}'",
-            actorUserId,
-            relatedEntityId: container.CampId, relatedEntityType: AuditEntityTypes.Camp);
-
-        await DeleteFilesAsync(imagePaths, id, "its deletion");
+        IReadOnlyList<string>? deletedPaths = null;
+        try
+        {
+            deletedPaths = await repo.DeleteAsync(id, ct);
+            await auditLog.LogAsync(
+                ContainersAuditActions.ContainerDeleted, AuditEntityTypes.Container, container.Id,
+                $"Deleted container '{container.Name}'",
+                actorUserId,
+                relatedEntityId: container.CampId, relatedEntityType: AuditEntityTypes.Camp);
+        }
+        finally
+        {
+            try
+            {
+                if (await repo.GetByIdAsync(id, CancellationToken.None) is null)
+                    await DeleteFilesAsync(deletedPaths ?? candidates, id, "its deletion");
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Could not verify container {ContainerId} deletion; retaining image files", id);
+            }
+        }
     }
 
     // Best effort: request cancellation must not strand files, and a failure is logged, not thrown.
@@ -193,28 +189,28 @@ internal sealed class Service(
         }
     }
 
-    private async Task DeleteUnlinkedGalleryImagesAsync(Guid containerId, IReadOnlyCollection<ContainerImage> images)
+    private async Task DeleteUnlinkedGalleryImagesAsync(
+        Guid containerId, IReadOnlyCollection<ContainerImage> images, IReadOnlyCollection<string>? obsoletePaths = null)
     {
-        if (images.Count == 0) return;
+        var candidates = images.Select(image => image.StoragePath).Concat(obsoletePaths ?? []).ToList();
+        if (candidates.Count == 0) return;
         try
         {
             // A failed acknowledgement may follow a committed save. Confirm references first.
+            var current = await repo.GetByIdAsync(containerId, CancellationToken.None);
             var linked = (await repo.GetImagesAsync([containerId], CancellationToken.None))
                 .Select(image => image.StoragePath).ToHashSet(StringComparer.Ordinal);
-            await DeleteFilesAsync(images.Where(image => !linked.Contains(image.StoragePath))
-                .Select(image => image.StoragePath), containerId, "a failed metadata write");
+            if (current?.ImageStoragePath is { } legacyPath) linked.Add(legacyPath);
+            await DeleteFilesAsync(candidates.Where(path => !linked.Contains(path)), containerId, "a metadata write");
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "Could not verify image references for container {ContainerId}; retaining staged files", containerId);
+            logger.LogWarning(ex, "Could not verify image references for container {ContainerId}; retaining files", containerId);
         }
     }
 
-    public async Task<IReadOnlyList<ContainerPlacementDto>> GetPlacementsByYearAsync(int year, CancellationToken ct = default)
-    {
-        var placements = await repo.GetPlacementsByYearAsync(year, ct);
-        return placements.Select(ToPlacementDto).ToList();
-    }
+    public Task<IReadOnlyList<ContainerPlacementDto>> GetPlacementsByYearAsync(int year, CancellationToken ct = default) =>
+        reader.GetPlacementsByYearAsync(year, ct);
 
     public async Task<ContainerMutationResult<ContainerPlacementDto>> SavePlacementAsync(Guid containerId, int year, string geoJson, Guid actorUserId, CancellationToken ct = default)
     {
@@ -337,71 +333,37 @@ internal sealed class Service(
         try
         {
             await repo.UpsertPlacementAsync(placement, ct);
+            await auditLog.LogAsync(
+                ContainersAuditActions.ContainerPlacementNotesUpdated, AuditEntityTypes.ContainerPlacement, containerId,
+                $"Updated placement notes for {year}",
+                actorUserId,
+                relatedEntityId: containerId, relatedEntityType: AuditEntityTypes.Container);
+            return new(ToPlacementDto(placement));
         }
-        catch
+        finally
         {
-            if (newImagePath is not null)
+            if (newImagePath is not null || (removeImage && previousImagePath is not null))
             {
                 try
                 {
                     var linked = await repo.GetPlacementAsync(containerId, year, CancellationToken.None);
-                    if (!string.Equals(linked?.PlacementImageStoragePath, newImagePath, StringComparison.Ordinal))
-                        await DeleteFilesAsync([newImagePath], containerId, "a failed metadata write", year);
+                    var candidates = new[] { previousImagePath, newImagePath }.OfType<string>();
+                    await DeleteFilesAsync(candidates.Where(path => !string.Equals(
+                        path, linked?.PlacementImageStoragePath, StringComparison.Ordinal)),
+                        containerId, "a placement image change", year);
                 }
                 catch (Exception ex)
                 {
                     logger.LogWarning(ex,
-                        "Could not verify placement image reference for container {ContainerId}, year {Year}; retaining staged file",
+                        "Could not verify placement image reference for container {ContainerId}, year {Year}; retaining files",
                         containerId, year);
                 }
             }
-            throw;
         }
-
-        await auditLog.LogAsync(
-            ContainersAuditActions.ContainerPlacementNotesUpdated, AuditEntityTypes.ContainerPlacement, containerId,
-            $"Updated placement notes for {year}",
-            actorUserId,
-            relatedEntityId: containerId, relatedEntityType: AuditEntityTypes.Container);
-
-        // The previous file remains usable until the new metadata is committed.
-        if (previousImagePath is not null
-            && !string.Equals(previousImagePath, placement.PlacementImageStoragePath, StringComparison.Ordinal))
-        {
-            await DeleteFilesAsync([previousImagePath], containerId, "a placement image replacement", year);
-        }
-
-        return new(ToPlacementDto(placement));
     }
 
-    public async Task<ContainerAdminOverview> GetAdminOverviewAsync(int year, CancellationToken ct = default)
-    {
-        var allContainers = await repo.GetAllAsync(ct);
-        var placements = await repo.GetPlacementsByYearAsync(year, ct);
-        var placementByContainerId = placements.ToDictionary(p => p.ContainerId, p => p);
-        var imagesByContainerId = await LoadImagesAsync(allContainers, ct);
-
-        var camps = await campService.GetCampsForYearAsync(year, ct);
-
-        ContainerWithPlacement Compose(Container c) => new(
-            ToDto(c, imagesByContainerId.GetValueOrDefault(c.Id, [])),
-            placementByContainerId.TryGetValue(c.Id, out var p) ? ToPlacementDto(p) : null);
-
-        var byCampId = allContainers
-            .GroupBy(c => c.CampId)
-            .ToDictionary(g => g.Key, g => g.ToList());
-
-        var campGroups = camps
-            .Select(camp => new ContainerCampGroup(
-                camp.Id,
-                camp.Seasons.First(s => s.Year == year).Name,
-                byCampId.TryGetValue(camp.Id, out var cs)
-                    ? cs.Select(Compose).ToList()
-                    : []))
-            .ToList();
-
-        return new ContainerAdminOverview(year, campGroups);
-    }
+    public Task<ContainerAdminOverview> GetAdminOverviewAsync(int year, CancellationToken ct = default) =>
+        reader.GetAdminOverviewAsync(year, ct);
 
     private static ValidationError? ValidateName(string name) => name.IndexOfAny(InvalidNameChars) >= 0
         ? new("Containers_Error_InvalidName") : null;
@@ -476,47 +438,7 @@ internal sealed class Service(
     private static string DisplayFileName(string fileName) =>
         fileName.Split('/', '\\').Last();
 
-    private async Task<IReadOnlyList<ContainerDto>> ToDtosAsync(
-        IReadOnlyList<Container> containers, CancellationToken ct)
-    {
-        var imagesByContainerId = await LoadImagesAsync(containers, ct);
-        return containers
-            .Select(c => ToDto(c, imagesByContainerId.GetValueOrDefault(c.Id, [])))
-            .ToList();
-    }
+    private static ContainerDto ToDto(Container c, IReadOnlyList<ContainerImage> images) => ContainerReader.ToDto(c, images);
 
-    private async Task<Dictionary<Guid, List<ContainerImage>>> LoadImagesAsync(
-        IReadOnlyList<Container> containers, CancellationToken ct)
-    {
-        var images = await repo.GetImagesAsync(containers.Select(c => c.Id).ToList(), ct);
-        return images
-            .GroupBy(i => i.ContainerId)
-            .ToDictionary(g => g.Key, g => g.ToList());
-    }
-
-    private static ContainerDto ToDto(Container c, IReadOnlyList<ContainerImage> images)
-    {
-        var gallery = new List<ContainerImageDto>(images.Count + 1);
-        // Legacy containers still hold their single image in the containers columns;
-        // Guid.Empty addresses it so callers see one uniform, removable gallery.
-        if (c.ImageStoragePath is not null)
-        {
-            gallery.Add(new ContainerImageDto(Guid.Empty, $"/{c.ImageStoragePath}", c.ImageFileName));
-        }
-        gallery.AddRange(images
-            .OrderBy(i => i.SortOrder)
-            .Select(i => new ContainerImageDto(i.Id, $"/{i.StoragePath}", i.FileName)));
-
-        return new ContainerDto(c.Id, c.CampId, c.Name, c.Description, gallery, c.CreatedAt, c.UpdatedAt);
-    }
-
-    private static ContainerPlacementDto ToPlacementDto(ContainerPlacement p) => new(
-        p.ContainerId,
-        p.Year,
-        p.LocationGeoJson,
-        p.PlacementNotes,
-        p.PlacementImageStoragePath is not null ? $"/{p.PlacementImageStoragePath}" : null,
-        p.PlacementImageFileName,
-        p.CreatedAt,
-        p.UpdatedAt);
+    private static ContainerPlacementDto ToPlacementDto(ContainerPlacement p) => ContainerReader.ToPlacementDto(p);
 }

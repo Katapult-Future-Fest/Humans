@@ -10,14 +10,13 @@ using Humans.Teams.Contracts;
 using Humans.CityPlanning.Contracts;
 using Humans.Base.Constants;
 using Humans.Base.Enums;
-using Microsoft.AspNetCore.Identity;
 using Microsoft.Extensions.Options;
 using NodaTime;
 
 namespace Humans.Development.Services;
 
 internal sealed class DevPersonaSeeder(
-    UserManager<User> userManager,
+    IAccountProvisioningService accountProvisioning,
     IProfileEditorService profileEditorService,
     IUserEmailService userEmailService,
     IContactFieldService contactFieldService,
@@ -27,7 +26,7 @@ internal sealed class DevPersonaSeeder(
     ITeamSeeding teamSeeding,
     ISystemTeamSync systemTeamSync,
     IUserService userService,
-    IConsentWrite consentWrite,
+    IUserWrite userWrite,
     ICampService campService,
     ICampSeeding campSeeding,
     ICampRoleSeeding campRoleSeeding,
@@ -39,14 +38,19 @@ internal sealed class DevPersonaSeeder(
     RoleCatalog catalog,
     ILogger<DevPersonaSeeder> logger)
 {
+    private const string PersonaFakeReason = "Dev persona, auto-seeded";
+
     /// <summary>Returns the resolved user id: legacy personas keep their old hardcoded GUIDs.</summary>
     public async Task<Guid> EnsurePersonaAsync(string slug, string displayNameSuffix, Guid id)
     {
-        var existing = await userManager.FindByIdAsync(id.ToString());
-        if (existing is not null)
+        var isGuest = string.Equals(slug, "guest", StringComparison.OrdinalIgnoreCase);
+        if (await userService.GetUserInfoAsync(id) is not null)
         {
-            await EnsureActiveAsync(existing.Id);
-            return existing.Id;
+            // Personas seeded before the fake marker existed pick it up on their next sign-in.
+            if (!isGuest)
+                await userWrite.MarkFakeAsync(id, id, PersonaFakeReason);
+            await EnsureActiveAsync(id);
+            return id;
         }
 
         var email = $"dev-{slug}@localhost";
@@ -57,6 +61,8 @@ internal sealed class DevPersonaSeeder(
         if (byEmailUserId is not null)
         {
             logger.LogInformation("DEV: found legacy persona {Email} ({OldId}), reusing", email, byEmailUserId.Value);
+            if (!isGuest)
+                await userWrite.MarkFakeAsync(byEmailUserId.Value, byEmailUserId.Value, PersonaFakeReason);
             await EnsureActiveAsync(byEmailUserId.Value);
             return byEmailUserId.Value;
         }
@@ -64,7 +70,8 @@ internal sealed class DevPersonaSeeder(
         var now = clock.GetCurrentInstant();
         var displayName = $"Dev {displayNameSuffix}";
 
-        if (string.Equals(slug, "guest", StringComparison.OrdinalIgnoreCase))
+        // Guests stay unmarked: they exist to run onboarding end to end, review queue included.
+        if (isGuest)
         {
             await SeedProfilelessUserAsync(id, email, displayName, now);
             return id;
@@ -78,19 +85,10 @@ internal sealed class DevPersonaSeeder(
         var roleName = isCoordinatorPersona ? null : RoleNameFromSlug(slug);
         var roles = roleName is not null ? new[] { roleName } : Array.Empty<string>();
 
-        var user = new User
+        var errors = await accountProvisioning.CreateAccountAsync(id, displayName, now, lastLoginAt: now);
+        if (errors.Count > 0)
         {
-            Id = id,
-            BurnerName = displayName,
-            CreatedAt = now,
-            LastLoginAt = now
-        };
-
-        var result = await userManager.CreateAsync(user);
-        if (!result.Succeeded)
-        {
-            logger.LogError("Failed to create dev persona {Email}: {Errors}",
-                email, string.Join(", ", result.Errors.Select(e => e.Description)));
+            logger.LogError("Failed to create dev persona {Email}: {Errors}", email, string.Join(", ", errors));
             return id;
         }
 
@@ -110,17 +108,7 @@ internal sealed class DevPersonaSeeder(
             throw new InvalidOperationException("Dev persona profile validation failed.");
         var profileId = save.ProfileId!.Value;
 
-        // Mark approved + cleared so the dev persona skips the consent gate
-        // and lands on the dashboard (Consent's review row).
-        const string consentNotes = "Dev persona - auto-seeded";
-        var consentCheckResult = await consentWrite.RecordConsentCheckAsync(
-            id, ConsentCheckStatus.Cleared, id, consentNotes);
-        if (!consentCheckResult.Success)
-        {
-            logger.LogWarning(
-                "DEV: consent-check approval failed for persona {UserId}: {ErrorKey}",
-                id, consentCheckResult.ErrorKey);
-        }
+        await userWrite.MarkFakeAsync(id, id, PersonaFakeReason);
 
         await contactFieldService.SaveContactFieldsAsync(
             profileId,
@@ -257,19 +245,10 @@ internal sealed class DevPersonaSeeder(
 
     private async Task SeedProfilelessUserAsync(Guid id, string email, string displayName, Instant now)
     {
-        var user = new User
+        var errors = await accountProvisioning.CreateAccountAsync(id, displayName, now, lastLoginAt: now);
+        if (errors.Count > 0)
         {
-            Id = id,
-            BurnerName = displayName,
-            CreatedAt = now,
-            LastLoginAt = now
-        };
-
-        var result = await userManager.CreateAsync(user);
-        if (!result.Succeeded)
-        {
-            logger.LogError("Failed to create dev guest persona {Email}: {Errors}",
-                email, string.Join(", ", result.Errors.Select(e => e.Description)));
+            logger.LogError("Failed to create dev guest persona {Email}: {Errors}", email, string.Join(", ", errors));
             return;
         }
 

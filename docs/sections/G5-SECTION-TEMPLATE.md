@@ -17,7 +17,7 @@ owning no tables at all — no G4 gate, no `Humans.Infrastructure` reference, an
 whose enums had to move onto the contracts leaf, and the first to hand a Shell dev seeder a
 one-method contract), Calendar (the first to keep an *internal* `I<Section>ServiceRead` while
 shipping an empty `Contracts/`, the first whose name collided with a Base concern, and the first
-whose render test had to seed through a §15 caching decorator), Campaigns (the first moved
+whose render test had to seed through a caching decorator), Campaigns (the first moved
 section carrying an `Architecture/Baselines` row, and the first whose contracts leaf had to
 reference `Humans.Domain` — a project deleted in G5 lane 3b; that leaf now takes
 `Humans.Interfaces`, same namespaces), Feedback (the first whose `Contracts/` is a folder despite a
@@ -70,7 +70,7 @@ cross-section cow path by moving two call sites off a Base port onto its own lea
 own controller turned out to write only other sections' tables; the first plain
 `Microsoft.NET.Sdk` project to need a `FrameworkReference`; and the first whose leaf had to stop
 naming a *vertical* section's record). Step
-numbers match the former §15,
+numbers match the former design-rules §15 (now the unnumbered *Section caching pattern*),
 so an old "§15 step 3b" citation reads as "step 3b" here.
 
 **Where this template and `src/Sections/` disagree, the code is right.** Deviations are the
@@ -224,7 +224,7 @@ Git Bash.)
    `<FrameworkReference Include="Microsoft.AspNetCore.App" />`, with no `AddRazorSupportForMvc`,
    no `<Using>` group and no `Humans.UI` reference** — for a section that renders nothing but
    names an ASP.NET type anyway. Auth's are `AuthorizationHandler<,>` (its resource handler,
-   step 6) and `IHostedService` (its §15 decorator). Decide the framework reference from what the
+   step 6) and `IHostedService` (its caching decorator). Decide the framework reference from what the
    section *names*, never from whether it has views; Central Package Management has no
    `PackageVersion` for the AspNetCore packages, so the framework reference is the only way to
    get them (proven: Auth). With Razor: `<AddRazorSupportForMvc>true</AddRazorSupportForMvc>`,
@@ -303,7 +303,7 @@ Git Bash.)
    any `T` (`GateArchitectureTests.SectionTypesTakeNoStringLocalizer`), so the day someone adds
    copy the build tells them to carve a resource set first. Skip the rest of this step.
    Otherwise: carve the section's `.resx` — the `<Section>_*` and `Enum_<Section>*` keys move out of
-   `Humans.UI`'s set into `<Section>Resource.{resx,es,ca,de,fr,it}` at the project root beside a
+   `Humans.UI`'s set into `<Section>Resource.{resx,es,ca,de,fr,it,nl}` at the project root beside a
    `<Section>Resource.cs` in the section's namespace (root, not a `Resources/` folder — folder and
    namespace must agree, PR peterdrier/Humans#1365). The `.cs` and `.resx` must sit in the same
    folder, and the `.cs` namespace determines the manifest prefix — get it wrong and
@@ -313,7 +313,7 @@ Git Bash.)
    - **A key you *write* is prefixed with the section name; a key you *move* keeps its name.**
      New keys are `<Section>_…` — `Users_`, `Tickets_`, `CityPlanning_`
      (`memory/code/resource-key-prefix-matches-section.md`). A carve is a move, not a rename:
-     renaming in flight touches six language files and every call site, and a missed one renders
+     renaming in flight touches every culture's language file and every call site, and a missed one renders
      raw with no error. Carry the old prefixes over and let the backlog show up in
      `/section-doctor`'s conformance thread (`resource-key-prefix`), which reports it per section
      and never backfills as a side effect.
@@ -340,7 +340,7 @@ Git Bash.)
      but keys still read by one of Email's remaining renderer methods (e.g. `FacilitatedMessage`)
      stay in Email until that template moves too. Grep each candidate key's call sites before
      moving it, exactly as with `Enum_*` (proven: Feedback).
-   - If step 5 renames an enum, rename its `Enum_{TypeName}_*` keys in all six languages in the
+   - If step 5 renames an enum, rename its `Enum_{TypeName}_*` keys in all supported languages in the
      same commit — the key is the **live CLR type name** (proven the hard way: Store).
    - **…and the fourth direction: move the *markup* instead of the key.** "Carve by renderer"
      (above) leaves a key in Base because the renderer cannot see a section set. The other way
@@ -402,7 +402,7 @@ Git Bash.)
    - **A section can have a resource set and no localized page copy.** Email's two admin views
      carry zero `Localizer[…]` calls, so the step-12 resx assertion has nothing to hang on in
      the section's own HTML. The probe was the template-gallery page (`/Email/EmailPreview`),
-     which renders 20 templates in all six cultures in one response — a single GET proving the
+     which renders 20 templates in all supported cultures in one response — a single GET proving the
      neutral set *and* the satellite assemblies, with no `/Language/SetLanguage` round trip.
      Look for a page that renders the copy before assuming the language-switcher dance
      (proven: Email).
@@ -662,7 +662,7 @@ Git Bash.)
      `Humans.UI` references `Humans.Application`, and `Humans.Application` declares direct
      `ProjectReference`s on `Humans.Camps.Contracts`, `Humans.Governance.Contracts`,
      `Humans.Shifts.Contracts` and `Humans.Teams.Contracts`. Base *is* allowed to name a leaf —
-     that is the whole reason leaves exist (§15.5b); what it may not name is a section
+     that is the whole reason leaves exist (step 5b); what it may not name is a section
      **project**. `TeamMemberRole`, `TeamJoinRequestStatus` and `RolePeriod` moved onto
      `Humans.Teams.Contracts` with `_RoleBadge.cshtml` needing one `@using` line and nothing
      else. `SystemTeamType` stayed, for the unrelated reason that it has no single section
@@ -768,7 +768,7 @@ Git Bash.)
      A read interface that has *members* is a different question — that one moves.
      - **…and "moves" can mean "stays inside the section, `internal`".** A populated
        `I<Section>ServiceRead` whose only consumers are the section's own controller is not a
-       cross-section contract; it is the seam between the §15 caching decorator and the write
+       cross-section contract; it is the seam between the caching decorator and the write
        path, and it belongs in `Services/` beside `I<Section>Service`. Promoting it to
        `Contracts/` because it is named `…Read` publishes a boundary nobody crosses — the same
        mistake as carrying the empty one, one step later. Decide from the *consumer list*, never
@@ -1260,7 +1260,7 @@ Git Bash.)
      `Stores/`.** `GuideContentService` is `IGuideContentService`, the type the controller
      injects; relocating it to dodge the sweep's namespace predicate would be the dodge step 6a
      says `Stores/` is not. Guide has no tables to decorate and guide HTML is not an entity
-     read, so §15's other two options do not exist either — it went on the allowlist with that
+     read, so the caching pattern's other two options do not exist either — it went on the allowlist with that
      rationale, beside Finance's and Feedback's. Note what surfaced it: the code was unchanged
      and had sat in `Humans.Infrastructure`, which the sweep covers neither before nor after;
      it became visible only because the sweep scans **section assemblies**. Email's "ask whether
@@ -1850,7 +1850,7 @@ Git Bash.)
         section is untestable at step 12; if none does, the `grep '<Section>'
         src/Humans.Web/Humans.Web.csproj` check from step 1 is the whole of your coverage
         (proven: Gdpr).
-    - **A §15-decorated section's render test must seed through the service, not the
+    - **A decorator-caching section's render test must seed through the service, not the
       `DbContext`.** The decorator is a Singleton that warms at startup, i.e. before the test
       body runs, so a row written straight into `<Section>DbContext` is invisible to every
       snapshot-scan read — the section's list/index/window pages render empty and the resx-carve

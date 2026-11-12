@@ -232,17 +232,11 @@ public class ShiftsControllerUserActiveSignupsTests
         Assert.Equal("Keeper", Assert.Single(model.UserActiveSignups).RotaName);
     }
 
-    [HumansTheory]
-    [InlineData("en")]
-    [InlineData("es")]
-    [InlineData("de")]
-    [InlineData("it")]
-    [InlineData("fr")]
-    [InlineData("ca")]
-    public async Task BailRange_LocalizesRefusalKeysInTheMembersCulture(string culture)
+    [HumansFact]
+    public async Task BailRange_LocalizesRefusalKeysInTheMembersCulture()
     {
         const string key = "Shifts_BailRange_NotAuthorized";
-        using var scope = new Humans.Base.Extensions.CultureScope(culture);
+        using var scope = new Humans.Base.Extensions.CultureScope(Humans.Base.Extensions.CultureCatalog.DefaultCultureCode);
         var resources = new System.Resources.ResourceManager(typeof(ShiftsResource));
         var translated = resources.GetString(key, System.Globalization.CultureInfo.CurrentUICulture)!;
         _localizer[key].Returns(new LocalizedString(key, translated));
@@ -285,7 +279,7 @@ public class ShiftsControllerUserActiveSignupsTests
 
         var ctrl = new ShiftsController(
             _shiftMgmt, _burnSettings, _signupService, _volunteerTracking, _shiftView, _teamService,
-            _auditLog, _userService, _localizer, Substitute.For<IStringLocalizer<OnboardingResource>>(), _clock,
+            Substitute.For<IAuditViewerService>(), _userService, _localizer, Substitute.For<IStringLocalizer<OnboardingResource>>(), _clock,
             new ShiftBrowsePageBuilder(_shiftMgmt, _burnSettings, _teamService),
             NullLogger<ShiftsController>.Instance);
 
@@ -352,7 +346,6 @@ public class ShiftsControllerUserActiveSignupsTests
                 State = UserState.Active,
             },
             userEmails: [],
-            eventParticipations: [],
             externalLogins: [],
             profile: new Profile
             {
@@ -360,12 +353,10 @@ public class ShiftsControllerUserActiveSignupsTests
                 BurnerName = "Burner",
                 FirstName = "First",
                 LastName = "Last",
-                DietaryPreference = "None",
                 CreatedAt = Instant.FromUtc(2026, 1, 1, 0, 0),
                 UpdatedAt = Instant.FromUtc(2026, 1, 1, 0, 0),
             },
             contactFields: [],
             profileLanguages: [],
-            volunteerHistory: [],
-            communicationPreferences: []);
+            volunteerHistory: []);
 }

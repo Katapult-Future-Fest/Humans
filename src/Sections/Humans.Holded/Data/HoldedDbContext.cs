@@ -11,6 +11,9 @@ internal sealed class HoldedDbContext(DbContextOptions<HoldedDbContext> options)
     public DbSet<HoldedSyncState> HoldedSyncStates => Set<HoldedSyncState>();
     public DbSet<HoldedAccount> HoldedAccounts => Set<HoldedAccount>();
     public DbSet<HoldedApiCall> HoldedApiCalls => Set<HoldedApiCall>();
+    public DbSet<HoldedPurchaseDoc> HoldedPurchaseDocs => Set<HoldedPurchaseDoc>();
+    public DbSet<HoldedContact> HoldedContacts => Set<HoldedContact>();
+    public DbSet<HoldedBankMovement> HoldedBankMovements => Set<HoldedBankMovement>();
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
@@ -20,5 +23,8 @@ internal sealed class HoldedDbContext(DbContextOptions<HoldedDbContext> options)
         builder.ApplyConfiguration(new HoldedSyncStateConfiguration());
         builder.ApplyConfiguration(new HoldedAccountConfiguration());
         builder.ApplyConfiguration(new HoldedApiCallConfiguration());
+        builder.ApplyConfiguration(new HoldedPurchaseDocConfiguration());
+        builder.ApplyConfiguration(new HoldedContactConfiguration());
+        builder.ApplyConfiguration(new HoldedBankMovementConfiguration());
     }
 }

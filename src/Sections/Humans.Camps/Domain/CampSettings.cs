@@ -11,7 +11,6 @@ internal sealed class CampSettings
     /// matches the database; dropping it is a separate, Peter-approved follow-up.
     /// </summary>
     public int PublicYear { get; set; }
-    public List<int> OpenSeasons { get; set; } = [];
 
     /// <summary>
     /// Dead column: no longer read or written (<c>EventSettings.EarlyEntryStartOffset</c> replaced it). Mapped only so

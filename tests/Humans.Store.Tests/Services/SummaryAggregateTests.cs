@@ -27,7 +27,8 @@ public class SummaryAggregateTests
     private readonly ISettingsService _shifts = Substitute.For<ISettingsService>();
     private readonly IStripeService _stripe = Substitute.For<IStripeService>();
     private readonly FakeClock _clock = new(Instant.FromUtc(2026, 3, 14, 12, 0));
-    private readonly IHoldedClient _holded = Substitute.For<IHoldedClient>();
+    private readonly IHoldedService _holded = Substitute.For<IHoldedService>();
+    private readonly IHoldedWrite _holdedWrite = Substitute.For<IHoldedWrite>();
     private readonly StoreSectionOptions _storeOptions = new();
     private readonly Service _service;
 
@@ -35,7 +36,7 @@ public class SummaryAggregateTests
     {
         _teams.GetTeamsAsync(Arg.Any<CancellationToken>())
             .Returns(new Dictionary<Guid, TeamInfo>());
-        _service = new Service(_repo, _audit, _camps, _teams, _clock, _shifts, _stripe, _holded, Options.Create(_storeOptions), NullLogger<Service>.Instance);
+        _service = new Service(_repo, _audit, _camps, _teams, _clock, _shifts, _stripe, _holded, _holdedWrite, Options.Create(_storeOptions), NullLogger<Service>.Instance);
     }
 
     [HumansFact]
@@ -377,6 +378,61 @@ public class SummaryAggregateTests
 
         result.ByCounterparty.Should().BeEmpty();
         result.CrossTab.Counterparties.Should().BeEmpty();
+    }
+
+    [HumansTheory]
+    [Xunit.InlineData(true)]
+    [Xunit.InlineData(false)]
+    public async Task Summary_preserves_quantities_above_int_range(bool sameProduct)
+    {
+        var seasonId = Guid.NewGuid();
+        var productId = Guid.NewGuid();
+        var secondProductId = sameProduct ? productId : Guid.NewGuid();
+        _camps.GetCampsForYearAsync(2026, Arg.Any<CancellationToken>())
+            .Returns([MakeCampInfo(seasonId, "Large order", "large")]);
+        var products = new[] { productId, secondProductId }.Distinct().Select(id => new Product
+        {
+            Id = id,
+            Year = 2026,
+            Name = id.ToString(),
+            UnitPriceEur = 1m,
+            OrderableUntil = new LocalDate(2026, 12, 31),
+            IsActive = true
+        }).ToList();
+        _repo.GetAllProductsForYearAsync(2026, Arg.Any<CancellationToken>()).Returns(products);
+        var order = new Order
+        {
+            Id = Guid.NewGuid(),
+            CampSeasonId = seasonId,
+            State = OrderState.Open
+        };
+        foreach (var id in new[] { productId, secondProductId })
+            order.Lines.Add(new OrderLine
+            {
+                Id = Guid.NewGuid(),
+                OrderId = order.Id,
+                ProductId = id,
+                Qty = int.MaxValue,
+                UnitPriceSnapshot = 1m
+            });
+        _repo.GetOrdersForCampSeasonsWithLinesAndPaymentsAsync(
+            Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>()).Returns([order]);
+
+        var result = await _service.GetStoreSummaryAsync(2026, Xunit.TestContext.Current.CancellationToken);
+
+        const long expected = 2L * int.MaxValue;
+        result.ByItem.Sum(item => (long)item.TotalQty).Should().Be(expected);
+        result.CrossTab.Products.Sum(column => (long)column.TotalQty).Should().Be(expected);
+        var row = result.CrossTab.Counterparties.Should().ContainSingle().Subject;
+        ((long)row.TotalQty).Should().Be(expected);
+        foreach (var product in products)
+        {
+            var quantity = sameProduct ? expected : int.MaxValue;
+            ((long)result.ByItem.Single(item => item.ProductId == product.Id).TotalQty).Should().Be(quantity);
+            ((long)result.CrossTab.Products.Single(column => column.ProductId == product.Id).TotalQty).Should().Be(quantity);
+            ((long)row.QtyByProduct[product.Id]).Should().Be(quantity);
+        }
+        result.ByCounterparty.Should().ContainSingle().Which.TotalDueEur.Should().Be((decimal)expected);
     }
 
     private static CampInfo MakeCampInfo(Guid seasonId, string name, string slug)

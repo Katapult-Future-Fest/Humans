@@ -2,7 +2,6 @@ namespace Humans.Base.Caching;
 
 public static class CacheKeys
 {
-    public const string HoldedContacts = "HoldedContacts";
     public const string SepaStuckBankLines = "SepaStuckBankLines";
 
     public static string CampContactRateLimit(Guid userId, Guid campId) =>
@@ -30,9 +29,7 @@ public static class CacheKeys
     public static readonly IReadOnlyDictionary<string, CacheKeyMeta> Metadata =
         new Dictionary<string, CacheKeyMeta>(StringComparer.Ordinal)
         {
-            ["FeedbackBadgeCount"] = new("2 min", CacheKeyType.Static),
             ["NotificationMeters"] = new("2 min", CacheKeyType.Static),
-            ["HoldedContacts"] = new("2 min", CacheKeyType.Static),
             ["SepaStuckBankLines"] = new("until the lines read again", CacheKeyType.Static),
             ["CampContactRateLimit"] = new("10 min", CacheKeyType.RateLimit),
             ["NavBadge"] = new("2 min", CacheKeyType.PerUser),

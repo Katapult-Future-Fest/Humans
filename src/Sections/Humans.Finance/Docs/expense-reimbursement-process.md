@@ -29,6 +29,8 @@ Happy path. When something needs fixing it gets more complicated.
 2. **The department coordinator approves it**, setting a max if the report goes over what's
    allocated — the coordinator knows their department better than the treasurer does. Only when
    the category has a budget coordinator; with none assigned the report goes straight to step 3.
+   A report filed against a pre-approval has no category, so the program's named managers do this
+   first review in the coordinator's place.
    This step is the expected route, not an enforced gate: the treasurer can approve straight from
    Submitted when there is a rush, and the approval's audit entry records that they did.
 3. **The treasurer (finance admin) also approves it.**
@@ -53,8 +55,8 @@ Happy path. When something needs fixing it gets more complicated.
    name or IBAN change after the first push waits for the link-check sync (peterdrier/Humans#1777).
 5. **Holded tells Humans** that the member with that account is now owed, say, €132.45. Visible
    at the top of `/Expenses` and on `/Finance/Creditors`.
-6. **On pay day the treasurer selects who gets paid** on `/Finance/Creditors` and generates a
-   **SEPA file** (pain.001.001.09) — a bank file saying pay Sally 123, Joe 243, Fred 321, to the
+6. **On pay day the treasurer selects who gets paid** on `/Finance/Creditors`, confirms the batch
+   on a review page, and generates a **SEPA file** (pain.001.001.09) — a bank file saying pay Sally 123, Joe 243, Fred 321, to the
    right IBANs.
 7. **The file is uploaded to the bank** by the treasurer plus a second verifier, checking the
    totals (3 payments, totaling ####). Then the money goes bye-bye.
@@ -87,7 +89,7 @@ It's not exactly cake, but the shape is deliberate: **appropriate controls where
 robbed, automation everywhere else.**
 
 - Human approval before anything reaches the books (steps 2–3): the treasurer always, plus the
-  coordinator wherever the category has one.
+  coordinator (or, for a pre-approved report, the program's manager) wherever there is one.
 - The bank upload (step 7) — the one step that irreversibly moves money — stays manual, with the
   treasurer and a second verifier checking the totals.
 - Settlement booking (step 10) posts unattended only when the bank line's own text names the
@@ -100,9 +102,9 @@ robbed, automation everywhere else.**
   Holded's own payment API, plus one journal entry for whatever no open document covers, so the
   accountant sees a normal ledger.
 
-## Status (2026-10-29)
+## Status
 
-Steps 1–11 are in production. Since 2026-09-06, on `origin/main`:
+Steps 1–11 are in production, plus:
 
 - **Booking runs itself.** The two-hourly sweep (`sepa-bank-booking`) books each transfer once
   its Sabadell line appears; `/Finance/Sepa` keeps the manual Book, Book file and Process
@@ -110,10 +112,10 @@ Steps 1–11 are in production. Since 2026-09-06, on `origin/main`:
 - **The 17–18 Oct outbox race** pushed the same expense lines into Holded two or three times
   (430 extra purchase documents, €25,325.24, 20 members) before a payout file was generated
   from the inflated balances. `/Finance/HoldedDuplicates` removes the extras; a member with
-  duplicates cannot be paid out until they are gone, and the nightly doc sync logs a warning
-  while any remain.
+  duplicates cannot be paid out until they are gone, and the nightly expense reconciliation
+  logs a warning while any remain.
 - **The reconciliation report** (`/Finance/ExpenseRecon`, peterdrier/Humans#2207) compares what
-  Humans approved with what Holded holds, every line and every member balance, from local mirrors
-  only. It runs nightly at 03:30 and logs "Expense recon: 0 problems" or a warning with the
+  Humans approved with what Holded's ledger holds: every line by account, description and amount, and
+  every member's account split into expense purchases, SEPA payments and other movements. It runs nightly at 03:30 and logs "Expense recon: 0 problems" or a warning with the
   counts, and `/Finance/Creditors` shows a red banner while it has problems. The race went
   unnoticed until a payee's amount looked wrong; this makes the next one visible the next morning.

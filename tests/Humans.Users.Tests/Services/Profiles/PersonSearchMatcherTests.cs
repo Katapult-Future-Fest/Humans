@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Resources;
 using AwesomeAssertions;
 using Humans.Base.Extensions;
 using Humans.Users.Contracts;
@@ -10,15 +12,13 @@ namespace Humans.Users.Tests.Services.Profiles;
 public class PersonSearchMatcherTests
 {
     [HumansTheory]
-    [InlineData("en", "Name", "City", "Other", "Legal Name")]
-    [InlineData("es", "Nombre", "Ciudad", "Otro", "Nombre legal")]
-    [InlineData("de", "Name", "Stadt", "Sonstiges", "Bürgerlicher Name")]
-    [InlineData("it", "Nome", "Città", "Altro", "Nome legale")]
-    [InlineData("fr", "Nom", "Ville", "Autre", "Nom légal")]
-    [InlineData("ca", "Nom", "Ciutat", "Altres", "Nom legal")]
-    public void Built_in_match_labels_use_ui_culture_and_custom_labels_stay_verbatim(
-        string culture, string name, string city, string other, string legalName)
+    [MemberData(nameof(SupportedCultures.All), MemberType = typeof(SupportedCultures))]
+    public void Built_in_match_labels_use_ui_culture_and_custom_labels_stay_verbatim(string culture)
     {
+        var resources = new ResourceManager(typeof(UsersResource));
+        string Label(string key) => resources.GetString(key, CultureInfo.GetCultureInfo(culture))!;
+        var (name, legalName, city, other) = (Label("Users_Search_Name"), Label("Users_Profile_LegalName"),
+            Label("Users_ProfileEdit_City"), Label("Enum_ContactFieldType_Other"));
         using var scope = new CultureScope(culture);
         PersonSearchMatcher.Match(Human(burnerName: "Alice"), "Alice", PersonSearchFields.Name)!
             .Field.Should().Be(name);
@@ -50,12 +50,9 @@ public class PersonSearchMatcherTests
         string? medicalConditions = null,
         string? adminNotes = null,
         string? boardNotes = null,
-        string? iban = null,
-        string? consentCheckNotes = null,
-        string? rejectionReason = null,
         string? emergencyContactName = null,
         string? contactLabel = null,
-        Instant? rejectedAt = null,
+        bool isRejected = false,
         IEnumerable<(string Value, ContactFieldVisibility Vis)>? contactFields = null,
         IEnumerable<(string Email, bool Verified, ContactFieldVisibility? Vis)>? emails = null,
         IEnumerable<(string EventName, string? Description)>? cv = null)
@@ -77,11 +74,7 @@ public class PersonSearchMatcherTests
             MedicalConditions = medicalConditions,
             AdminNotes = adminNotes,
             BoardNotes = boardNotes,
-            Iban = iban,
-            ConsentCheckNotes = consentCheckNotes,
-            RejectionReason = rejectionReason,
             EmergencyContactName = emergencyContactName,
-            RejectedAt = rejectedAt,
             CreatedAt = At,
             UpdatedAt = At,
         };
@@ -92,6 +85,7 @@ public class PersonSearchMatcherTests
             // Every real Profile save copies BurnerName onto the owning User row.
             BurnerName = burnerName,
             DisplayName = displayName,
+            State = isRejected ? UserState.Rejected : UserState.Active,
             PreferredLanguage = "en",
             CreatedAt = At,
         };
@@ -140,13 +134,11 @@ public class PersonSearchMatcherTests
         return UserInfoFactory.Create(
             user: user,
             userEmails: emailEntities,
-            eventParticipations: [],
             externalLogins: [],
             profile: profile,
             contactFields: contactEntities,
             profileLanguages: [],
-            volunteerHistory: cvEntities,
-            communicationPreferences: []);
+            volunteerHistory: cvEntities);
     }
 
     [HumansFact]
@@ -273,11 +265,25 @@ public class PersonSearchMatcherTests
     }
 
     [HumansFact]
-    public void Volunteer_cv_matches_under_Bio_scope()
+    public void Volunteer_cv_matches_newest_matching_entry_under_Bio_scope()
     {
-        var human = Human(burnerName: "Sparkle", cv: [("Nowhere 2024", "Gate crew")]);
+        var human = Human(burnerName: "Sparkle");
+        human = human with
+        {
+            Profile = human.Profile! with
+            {
+                VolunteerHistory =
+                [
+                    new(Guid.NewGuid(), new LocalDate(2024, 7, 1), "Elsewhere 2024", "Gate crew"),
+                    new(Guid.NewGuid(), new LocalDate(2026, 7, 1), "Unrelated event", "Kitchen crew"),
+                    new(Guid.NewGuid(), new LocalDate(2025, 7, 1), "Elsewhere 2025", "Gate crew"),
+                ]
+            }
+        };
 
-        PersonSearchMatcher.Match(human, "nowhere", PersonSearchFields.Bio).Should().NotBeNull();
+        var match = PersonSearchMatcher.Match(human, "elsewhere", PersonSearchFields.Bio);
+        match.Should().NotBeNull();
+        match!.Snippet.Should().Be("Elsewhere 2025");
     }
 
     [HumansFact]
@@ -291,6 +297,33 @@ public class PersonSearchMatcherTests
         PersonSearchMatcher.Match(pub, "publichandle", PersonSearchFields.Bio).Should().NotBeNull();
         PersonSearchMatcher.Match(priv, "privatehandle", PersonSearchFields.Bio).Should().BeNull();
         PersonSearchMatcher.Match(priv, "privatehandle", PersonSearchFields.AdminAll).Should().NotBeNull();
+    }
+
+    [HumansTheory]
+    [InlineData(ContactFieldVisibility.AllActiveProfiles, PersonSearchFields.Bio)]
+    [InlineData(ContactFieldVisibility.BoardOnly, PersonSearchFields.Admin)]
+    public void Contact_match_uses_authored_order_within_its_visibility_bucket(
+        ContactFieldVisibility visibility, PersonSearchFields fields)
+    {
+        var otherVisibility = visibility == ContactFieldVisibility.AllActiveProfiles
+            ? ContactFieldVisibility.BoardOnly : ContactFieldVisibility.AllActiveProfiles;
+        var human = Human(burnerName: "Sparkle");
+        human = human with
+        {
+            Profile = human.Profile! with
+            {
+                ContactFields =
+                [
+                    new(Guid.NewGuid(), ContactFieldType.Other, null, "handle-later", visibility, 2),
+                    new(Guid.NewGuid(), ContactFieldType.Other, null, "handle-other-bucket", otherVisibility, 0),
+                    new(Guid.NewGuid(), ContactFieldType.Other, null, "handle-first", visibility, 1),
+                ]
+            }
+        };
+
+        var match = PersonSearchMatcher.Match(human, "handle", fields);
+        match.Should().NotBeNull();
+        match!.Snippet.Should().Be("handle-first");
     }
 
     [HumansFact]
@@ -309,9 +342,6 @@ public class PersonSearchMatcherTests
     [HumansTheory]
     [InlineData("adminnote")]
     [InlineData("boardnote")]
-    [InlineData("consentnote")]
-    [InlineData("rejectreason")]
-    [InlineData("ES9121")]      // IBAN fragment
     [InlineData("penicillin")]  // medical
     [InlineData("janedoe")]     // emergency contact name
     public void Board_private_and_health_fields_never_match_even_under_AdminAll(string query)
@@ -320,9 +350,6 @@ public class PersonSearchMatcherTests
             burnerName: "Sparkle",
             adminNotes: "adminnote",
             boardNotes: "boardnote",
-            consentCheckNotes: "consentnote",
-            rejectionReason: "rejectreason",
-            iban: "ES9121000418450200051332",
             medicalConditions: "penicillin allergy",
             emergencyContactName: "Jane Doe");
 
@@ -332,7 +359,7 @@ public class PersonSearchMatcherTests
     [HumansFact]
     public void Rejected_profile_is_never_matched()
     {
-        var human = Human(burnerName: "Sparkle", rejectedAt: At);
+        var human = Human(burnerName: "Sparkle", isRejected: true);
 
         PersonSearchMatcher.Match(human, "sparkle", PersonSearchFields.AdminAll).Should().BeNull();
     }
@@ -342,8 +369,8 @@ public class PersonSearchMatcherTests
     {
         // The single-person lookups (/api/profiles/by-userid, allowEmail) read this same flag.
         Human().IsSearchable.Should().BeTrue();
-        Human(rejectedAt: At).IsSearchable.Should().BeFalse();
-        UserInfo.Create(new User { Id = Guid.NewGuid(), PreferredLanguage = "en" }, [], [], [], profile: null, [])
+        Human(isRejected: true).IsSearchable.Should().BeFalse();
+        UserInfo.Create(new User { Id = Guid.NewGuid(), PreferredLanguage = "en" }, [], [], profile: null)
             .IsSearchable.Should().BeFalse();
     }
 
@@ -376,7 +403,7 @@ public class PersonSearchMatcherTests
     [HumansFact]
     public void ExactName_never_matches_rejected_profile()
     {
-        var human = Human(burnerName: "Sparkle", rejectedAt: At);
+        var human = Human(burnerName: "Sparkle", isRejected: true);
 
         PersonSearchMatcher.Match(human, "sparkle", PersonSearchFields.ExactName).Should().BeNull();
     }

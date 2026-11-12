@@ -31,6 +31,9 @@ pages and data.
 
 ## Invariants
 
+- The manual check honours request cancellation during the account lookup before
+  scanning. Once started, the scan runs independently of the browser request.
+
 - Monitor owns no tables, repository, migrations, resource set, or views.
 - `DriveActivityMonitorService` calls other sections only through
   `IGoogleDriveActivityClient`, `ITeamResourceService`, `ISettingsService`,
@@ -44,7 +47,7 @@ pages and data.
 
 ## Negative Access Rules
 
-- A Volunteer **cannot** run the scan: `POST /Monitor/CheckDriveActivity` redirects them to `AccessDeniedPath` (policy at `Controllers/MonitorController.cs:21`, path set at `src/Humans.Web/Program.cs:161`).
+- A Volunteer **cannot** run the scan: `POST /Monitor/CheckDriveActivity` redirects them to `AccessDeniedPath` (policy on `MonitorController.CheckDriveActivity`, path set in `src/Humans.Web/Program.cs`).
 
 ## Triggers
 
@@ -56,7 +59,7 @@ pages and data.
 | Section | Through |
 |---|---|
 | GoogleIntegration | `IGoogleDriveActivityClient`, `ITeamResourceService` |
-| AuditLog | `IAuditLogService` |
+| AuditLog | `IAuditLogService` (append path, declared in `src/Humans.Base/AuditLog/IAuditLogService.cs`) |
 | Settings | `ISettingsService` |
 | Users | `IUserService` |
 

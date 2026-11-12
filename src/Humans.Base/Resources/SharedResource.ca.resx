@@ -55,6 +55,11 @@
   <data name="Common_Close" xml:space="preserve">
     <value>Tanca</value>
   </data>
+  <data name="Common_Previous" xml:space="preserve"><value>Anterior</value></data>
+  <data name="Common_Next" xml:space="preserve"><value>Següent</value></data>
+  <data name="Common_Pagination" xml:space="preserve"><value>Paginació</value></data>
+  <data name="Common_Breadcrumb" xml:space="preserve"><value>Ruta de navegació</value></data>
+  <data name="Common_Filter" xml:space="preserve"><value>Filtra</value></data>
   <data name="Common_FilterColumn" xml:space="preserve"><value>Filtra {0}</value></data>
   <data name="Common_All" xml:space="preserve"><value>Tots</value></data>
   <data name="SectionHelp_Title" xml:space="preserve"><value>Ajuda de la secció</value></data>
@@ -301,12 +306,6 @@
   <data name="LinkPreview_Expenses_Description" xml:space="preserve">
     <value>Sol·licituds de despeses i reemborsaments.</value>
   </data>
-  <data name="LinkPreview_Feedback_Title" xml:space="preserve">
-    <value>Comentaris</value>
-  </data>
-  <data name="LinkPreview_Feedback_Description" xml:space="preserve">
-    <value>Envia comentaris sobre Humans.</value>
-  </data>
   <data name="LinkPreview_Finance_Title" xml:space="preserve">
     <value>Finances</value>
   </data>
@@ -505,7 +504,7 @@
     <value>Campaments i barris</value>
   </data>
   <data name="Home_CampsDescription" xml:space="preserve">
-    <value>Registra el teu campament, descobreix veïns per ambient o zona de so, i confirma la teva participació cada temporada.</value>
+    <value>Registra el teu campament, descobreix veïns per ambient o zona de so, i confirma la teva participació cada temporada. Troba el teu lloc al mapa.</value>
   </data>
   <data name="Home_TicketsTitle" xml:space="preserve">
     <value>Entrades i esdeveniments</value>
@@ -591,7 +590,7 @@
     <value>Actualitza la teva info, foto, i tot això.</value>
   </data>
   <data name="Dashboard_ConsentsCardDescription" xml:space="preserve">
-    <value>El paperassa de ser human.</value>
+    <value>La paperassa de ser human.</value>
   </data>
   <data name="Dashboard_PrivacyCard" xml:space="preserve">
     <value>Privacitat</value>
@@ -670,7 +669,7 @@
     <value>Tria com vols participar:</value>
   </data>
   <data name="ProfileEdit_TierColaboradorDesc" xml:space="preserve">
-    <value>Vols involucrar-te més: unir-te a grups de treball, assistir a les Assemblees Generals i ser part de les converses organitzatives. Encara no estàs preparat/da (o no ets elegible) per a drets de vot complets, però vols contribuir activament.</value>
+    <value>Vols involucrar-te més: unir-te a grups de treball, assistir a les Assemblees Generals i ser part de les converses organitzatives. Encara no estàs preparat/da (o no ets elegible) per als drets de vot, però vols un seient sense vot a la taula.</value>
   </data>
   <data name="ProfileEdit_TierAsociadoDesc" xml:space="preserve">
     <value>Has liderat o contribuït de manera significativa a una àrea de l'esdeveniment o la comunitat, entens que aquest rol es tracta de prendre decisions de governança en nom de tota la comunitat, i estàs preparat/da per assumir aquesta responsabilitat.</value>
@@ -929,9 +928,6 @@
   <data name="Nav_City" xml:space="preserve">
     <value>Mapa</value>
   </data>
-  <data name="Nav_Rideshare" xml:space="preserve">
-    <value>Compartir cotxe</value>
-  </data>
   <data name="Nav_Budget" xml:space="preserve">
     <value>Pressupost</value>
   </data>
@@ -961,17 +957,8 @@
   <data name="Search_Title" xml:space="preserve">
     <value>Cerca Humans</value>
   </data>
-  <data name="Search_Placeholder" xml:space="preserve">
-    <value>Cerca per nom, ciutat, interessos, bio...</value>
-  </data>
-  <data name="Search_NoResults" xml:space="preserve">
-    <value>No s’han trobat humans amb aquesta cerca.</value>
-  </data>
   <data name="Search_MatchedIn" xml:space="preserve">
     <value>Coincidència a</value>
-  </data>
-  <data name="Search_MinChars" xml:space="preserve">
-    <value>Escriu almenys 2 caràcters per cercar.</value>
   </data>
   <data name="Camp_Plural" xml:space="preserve">
     <value>Barris</value>
@@ -1164,9 +1151,6 @@
   <data name="ShiftsSummary_ManageShifts" xml:space="preserve">
     <value>Gestionar torns</value>
   </data>
-  <data name="Medical_Badge" xml:space="preserve">
-    <value>Mèdic</value>
-  </data>
   <data name="Privacy_Lead" xml:space="preserve">
     <value>Humans gestiona la pertinença a Nobodies Collective i processa dades personals d'acord amb el RGPD i la llei espanyola de protecció de dades (LOPDGDD).</value>
   </data>
@@ -1174,7 +1158,7 @@
     <value>Responsable del tractament</value>
   </data>
   <data name="Privacy_DataControllerBody" xml:space="preserve">
-    <value>Una associació sense ànim de lucre espanyola registrada a Andalusia.</value>
+    <value>Una associació sense ànim de lucre espanyola amb seu a Madrid (NIF G26726299).</value>
   </data>
   <data name="Privacy_DataControllerDPO" xml:space="preserve">
     <value>Per a consultes sobre protecció de dades, contacta amb el nostre Delegat de Protecció de Dades a:</value>
@@ -1364,7 +1348,7 @@
   <data name="Todo_DietaryMedical_Done" xml:space="preserve"><value>Gràcies — ja tenim la informació</value></data>
   <data name="Todo_DietaryMedical_Action" xml:space="preserve"><value>Emplena</value></data>
   <data name="Todo_DietaryMedical_NoShift_Pending" xml:space="preserve"><value>Explica’ns les teves necessitats alimentàries perquè estiguem a punt quan t’hi apuntis.</value></data>
-  <data name="Common_Optional" xml:space="preserve"><value>Optional</value></data>
+  <data name="Common_Optional" xml:space="preserve"><value>Opcional</value></data>
 
   <!-- ======================== -->
   <!-- Survey                   -->
@@ -1408,13 +1392,16 @@
   <data name="About_License_BSD2" xml:space="preserve"><value>requereix avís de drets d'autor a la documentació.</value></data>
   <data name="About_License_BSD3MapLibre" xml:space="preserve"><value>requereix avís de drets d'autor; aquesta pàgina compleix aquesta obligació.</value></data>
   <data name="About_License_ISC" xml:space="preserve"><value>permissiva, funcionalment equivalent a BSD-2-Clause; cal avís de drets d'autor.</value></data>
+  <data name="About_License_AGPL30" xml:space="preserve"><value>la mateixa llicència que el mateix Humans; el codi font complet de Humans és públic, cosa que la compleix.</value></data>
+  <data name="About_License_CCBY40" xml:space="preserve"><value>cal atribució; aquesta pàgina compleix aquesta obligació.</value></data>
   <data name="About_License_LGPL30" xml:space="preserve"><value>la biblioteca ha de poder ser substituïble per l'usuari final. S'utilitza com a paquets NuGet sense modificar (enllaçats dinàmicament), complint les obligacions de la LGPL.</value></data>
   <data name="About_License_MIT" xml:space="preserve"><value>requereix avís de drets d'autor; aquesta pàgina compleix aquesta obligació.</value></data>
   <data name="About_License_PostgreSQL" xml:space="preserve"><value>permissiva, semblant a MIT; cal avís de drets d'autor.</value></data>
   <data name="About_License_SILOFL" xml:space="preserve"><value>lliure d'utilitzar i redistribuir; les tipografies no es poden vendre per separat.</value></data>
+  <data name="About_License_SourceAvailableAt" xml:space="preserve"><value>Codi font disponible a</value></data>
   <data name="About_LicenseBody" xml:space="preserve"><value>Humans és programari lliure, publicat sota la</value></data>
   <data name="About_LicenseComplianceHeading" xml:space="preserve"><value>Resum de compliment de llicències</value></data>
-  <data name="About_LicenseComplianceSummary" xml:space="preserve"><value>Totes les dependències de producció utilitzen llicències permissives o de copyleft feble. No s'ha trobat cap infracció.</value></data>
+  <data name="About_LicenseComplianceSummary" xml:space="preserve"><value>Totes les dependències de producció utilitzen llicències permissives, de copyleft feble o compatibles amb AGPL. No s'ha trobat cap infracció.</value></data>
   <data name="About_LicenseExplanation" xml:space="preserve"><value>Pots utilitzar, estudiar, modificar i redistribuir aquest programari. Si executes una versió modificada i permets que altres hi interactuïn a través d'una xarxa, has de posar a disposició el teu codi font modificat sota la mateixa llicència.</value></data>
   <data name="About_LicenseFullText" xml:space="preserve"><value>Text complet de la llicència:</value></data>
   <data name="About_LicenseHeading" xml:space="preserve"><value>Llicència</value></data>
@@ -1522,6 +1509,14 @@
   <data name="MarkdownHelp_TaskToDo" xml:space="preserve"><value>Per fer</value></data>
   <data name="MarkdownHelp_Title" xml:space="preserve"><value>Referència ràpida de Markdown</value></data>
   <data name="Privacy_ThirdParty_GooglePolicyLink" xml:space="preserve"><value>Política de privacitat de Google</value></data>
+  <data name="Privacy_ThirdParty_Gmail" xml:space="preserve"><value>Per a lliurar els correus que t'enviem (la teva adreça de correu, nom i el contingut del missatge)</value></data>
+  <data name="Privacy_ThirdParty_GoogleMaps" xml:space="preserve"><value>Per a la cerca d'ubicacions i els mapes (el lloc que cerques i la teva adreça IP, enviats pel teu navegador)</value></data>
+  <data name="Privacy_ThirdParty_Stripe" xml:space="preserve"><value>Per als pagaments amb targeta a la Botiga (nom i correu del comprador; les dades de la targeta s'introdueixen directament a Stripe)</value></data>
+  <data name="Privacy_ThirdParty_Holded" xml:space="preserve"><value>Per a la comptabilitat de l'associació (en reemborsaments de despeses: nom legal, nom burner, IBAN, detalls de la despesa i justificants; en factures de la Botiga: nom, NIF, adreça i correu del comprador)</value></data>
+  <data name="Privacy_ThirdParty_TicketTailor" xml:space="preserve"><value>Per a la venda i emissió d'entrades (nom del titular, adreça de correu i registres d'entrada)</value></data>
+  <data name="Privacy_ThirdParty_MailerLite" xml:space="preserve"><value>Per a les llistes de correu (adreça de correu i pertinença a llistes, com ara titular d'entrada o voluntari de torns; no es comparteix si has rebutjat els correus de màrqueting)</value></data>
+  <data name="Privacy_ThirdParty_Anthropic" xml:space="preserve"><value>Per a l'assistent d'ajuda de l'aplicació, només quan el fas servir (els teus missatges, a més del teu nom burner, idioma, nivell de membre, rols, equips i propers torns)</value></data>
+  <data name="Privacy_ThirdParty_PolicyLink" xml:space="preserve"><value>Política de privacitat</value></data>
   <data name="Onboarding_BurnerNameLabel" xml:space="preserve"><value>Nom burner</value></data>
   <data name="Onboarding_LegalFirstNameLabel" xml:space="preserve"><value>Nom legal</value></data>
   <data name="Onboarding_LegalLastNameLabel" xml:space="preserve"><value>Cognoms legals</value></data>

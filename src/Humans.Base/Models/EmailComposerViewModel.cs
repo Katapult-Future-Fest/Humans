@@ -7,7 +7,7 @@ namespace Humans.Base.Models;
 /// "To:" line naming who the send reaches, and a "Send to me" button that queues the same
 /// branded send to the signed-in human through <c>/Email/SendMarkdownToSelf</c>.
 /// Every human-composed send form (profile message, camp contact, rota messages, survey
-/// invitation, feedback reply, issue comment, campaign) renders through this one component
+/// invitation, issue comment, campaign) renders through this one component
 /// instead of its own subject/body/editor markup.
 /// </summary>
 public class EmailComposerViewModel
@@ -27,7 +27,7 @@ public class EmailComposerViewModel
 
     /// <summary>
     /// The single human the send reaches, rendered through <c>&lt;vc:human&gt;</c> on the "To:"
-    /// line (profile message, feedback reply, issue comment to the reporter).
+    /// line (profile message, issue comment to the reporter).
     /// </summary>
     public Guid? RecipientUserId { get; init; }
 
@@ -80,7 +80,7 @@ public class EmailComposerViewModel
     /// Distinguishes this instance's preview modal from any others on the same page. Needed only
     /// when a page hosts more than one composer at once (survey invitation's per-culture tabs) or
     /// supplies its own page-level modal that an AJAX-injected composer must target instead of
-    /// rendering a redundant, inert copy (Feedback/Issues detail panels, whose own markup never
+    /// rendering a redundant, inert copy (the Issues detail panel, whose own markup never
     /// executes). Null uses the classic shared "emailPreviewModal" id.
     /// </summary>
     public string? PreviewModalId { get; init; }

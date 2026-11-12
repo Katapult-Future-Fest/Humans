@@ -28,6 +28,9 @@ internal sealed class RoleAssignmentsController(
     ILogger<RoleAssignmentsController> logger,
     IStringLocalizer<SharedResource> localizer) : HumansControllerBase(userService)
 {
+    // Admin-only page: English per memory/code/localization-admin-exempt.md.
+    private const string NotesTooLongMessage = "Notes must be 2,000 characters or fewer.";
+
     [HttpGet("Auth/Admin/Roles")]
     public async Task<IActionResult> Roles(string? role, bool showInactive = false, int page = 1)
     {
@@ -83,7 +86,7 @@ internal sealed class RoleAssignmentsController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> AddRole(Guid id, CreateRoleAssignmentViewModel model)
     {
-        if (await UserService.GetRawUserInfoAsync(id) is null)
+        if (await UserService.GetRawUserInfoAsync(id, HttpContext.RequestAborted) is null)
             return NotFound();
 
         if (string.IsNullOrWhiteSpace(model.RoleName))
@@ -94,7 +97,7 @@ internal sealed class RoleAssignmentsController(
             return View(model);
         }
 
-        var currentUser = await GetCurrentUserInfoAsync();
+        var currentUser = await GetCurrentUserInfoAsync(HttpContext.RequestAborted);
         if (currentUser is null)
         {
             return Unauthorized();
@@ -115,6 +118,8 @@ internal sealed class RoleAssignmentsController(
 
         if (result.Success)
             SetSuccess(string.Format(localizer["Admin_RoleAssigned"].Value, model.RoleName));
+        else if (string.Equals(result.ErrorKey, "NotesTooLong", StringComparison.Ordinal))
+            SetError(NotesTooLongMessage);
         else
             SetError(string.Format(localizer["Admin_RoleAlreadyActive"].Value, model.RoleName));
 
@@ -126,14 +131,14 @@ internal sealed class RoleAssignmentsController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> EndRole(Guid id, Guid roleId, string? notes)
     {
-        var roleAssignment = await roleAssignmentService.GetByIdAsync(roleId);
+        var roleAssignment = await roleAssignmentService.GetByIdAsync(roleId, HttpContext.RequestAborted);
 
         if (roleAssignment is null)
         {
             return NotFound();
         }
 
-        var currentUser = await GetCurrentUserInfoAsync();
+        var currentUser = await GetCurrentUserInfoAsync(HttpContext.RequestAborted);
         if (currentUser is null)
         {
             return Unauthorized();
@@ -157,6 +162,8 @@ internal sealed class RoleAssignmentsController(
                 localizer["Admin_RoleEnded"].Value,
                 roleAssignment.RoleName,
                 roleAssignment.UserDisplayName));
+        else if (string.Equals(result.ErrorKey, "NotesTooLong", StringComparison.Ordinal))
+            SetError(NotesTooLongMessage);
         else
             SetError(localizer["Admin_RoleNotActive"].Value);
 

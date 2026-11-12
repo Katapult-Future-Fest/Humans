@@ -1,3 +1,4 @@
+using System.Transactions;
 using AwesomeAssertions;
 using Humans.AuditLog.Contracts;
 using Humans.Email.Contracts;
@@ -20,7 +21,7 @@ public sealed class ReminderTests : PreapprovalsTestHarness
         (int DaysLeft, ReminderKind? Expected)[] cases =
             [(15, null), (14, ReminderKind.D14), (4, ReminderKind.D14), (3, ReminderKind.D3), (0, ReminderKind.D3), (-1, null)];
         foreach (var (daysLeft, expected) in cases)
-            PreapprovalService.ReminderKindFor(Today, Today.PlusDays(daysLeft)).Should().Be(expected, $"{daysLeft} days left");
+            PreapprovalDeadlineReminders.ReminderKindFor(Today, Today.PlusDays(daysLeft)).Should().Be(expected, $"{daysLeft} days left");
     }
 
     [HumansFact]
@@ -29,18 +30,36 @@ public sealed class ReminderTests : PreapprovalsTestHarness
         var program = await SeedProgramAsync(claimBy: Today.PlusDays(10));
         var person = SeedUser("Person", language: "fr");
         var grant = await SeedGrantAsync(program, person);
-        var service = NewService();
+        var service = NewReminders();
+        Transaction? transaction = null;
+        Email.SendAsync(Arg.Any<EmailMessage>(), Arg.Any<CancellationToken>()).Returns(_ =>
+        {
+            transaction = Transaction.Current?.Clone();
+            return Task.CompletedTask;
+        });
+        var auditAfterCommit = false;
+        AuditLog.LogAsync(PreapprovalsAuditActions.PreapprovalReminderSent, AuditEntityTypes.Grant, grant.Id,
+            Arg.Any<string>(), PreapprovalDeadlineReminders.ReminderJobName, program.Id, AuditEntityTypes.Program).Returns(_ =>
+        {
+            auditAfterCommit = Transaction.Current is null
+                && transaction?.TransactionInformation.Status == TransactionStatus.Committed;
+            return Task.CompletedTask;
+        });
 
         await service.SendDeadlineRemindersAsync(Ct);
         await service.SendDeadlineRemindersAsync(Ct);
 
         await Notifications.Received(1).SendAsync(PreapprovalsNotificationSources.PreapprovalFileBy, NotificationClass.Actionable, NotificationPriority.Normal,
             Arg.Any<string>(), Arg.Is<IReadOnlyList<Guid>>(r => r.Single() == person), Arg.Any<string?>(), Arg.Any<string?>(),
-            Arg.Any<string?>(), Arg.Any<string?>(), PreapprovalService.FileBySourceKey(grant.Id), Arg.Any<CancellationToken>());
+            Arg.Any<string?>(), Arg.Any<string?>(), PreapprovalNotices.FileBySourceKey(grant.Id), Arg.Any<CancellationToken>());
         await Email.Received(1).SendAsync(Arg.Is<EmailMessage>(m => m.TemplateName == "preapproval_deadline_reminder" && m.Culture == "fr"), Arg.Any<CancellationToken>());
         await AuditLog.Received(1).LogAsync(PreapprovalsAuditActions.PreapprovalReminderSent, AuditEntityTypes.Grant, grant.Id,
-            Arg.Is<string>(d => d.StartsWith("14-day", StringComparison.Ordinal)), PreapprovalService.ReminderJobName, program.Id, AuditEntityTypes.Program);
+            Arg.Is<string>(d => d.StartsWith("14-day", StringComparison.Ordinal)), PreapprovalDeadlineReminders.ReminderJobName, program.Id, AuditEntityTypes.Program);
 
+        using (transaction)
+        {
+            auditAfterCommit.Should().BeTrue();
+        }
         await using var db = OpenContext();
         var markers = await db.RemindersSent.ToListAsync(Ct);
         markers.Should().ContainSingle().Which.Should().BeEquivalentTo(new { GrantId = grant.Id, Kind = ReminderKind.D14, ClaimBy = program.ClaimBy });
@@ -54,7 +73,7 @@ public sealed class ReminderTests : PreapprovalsTestHarness
     {
         var program = await SeedProgramAsync(claimBy: Today.PlusDays(10));
         var grant = await SeedGrantAsync(program);
-        var service = NewService();
+        var service = NewReminders();
         await service.SendDeadlineRemindersAsync(Ct);
         SetToday(Today.PlusDays(8));
 
@@ -62,7 +81,7 @@ public sealed class ReminderTests : PreapprovalsTestHarness
 
         await Notifications.Received(1).SendAsync(PreapprovalsNotificationSources.PreapprovalFileBy, NotificationClass.Actionable, NotificationPriority.High,
             Arg.Any<string>(), Arg.Any<IReadOnlyList<Guid>>(), Arg.Any<string?>(), Arg.Any<string?>(),
-            Arg.Any<string?>(), Arg.Any<string?>(), PreapprovalService.FileBySourceKey(grant.Id), Arg.Any<CancellationToken>());
+            Arg.Any<string?>(), Arg.Any<string?>(), PreapprovalNotices.FileBySourceKey(grant.Id), Arg.Any<CancellationToken>());
         await using var db = OpenContext();
         (await db.RemindersSent.Select(r => r.Kind).ToListAsync(Ct)).Should().BeEquivalentTo([ReminderKind.D14, ReminderKind.D3]);
     }
@@ -79,7 +98,7 @@ public sealed class ReminderTests : PreapprovalsTestHarness
         var expired = await SeedGrantAsync(past);
         await SeedGrantAsync(far);
 
-        await NewService().SendDeadlineRemindersAsync(Ct);
+        await NewReminders().SendDeadlineRemindersAsync(Ct);
 
         await Notifications.DidNotReceiveWithAnyArgs().SendAsync(default!, default, default, default!, default!);
         await using var db = OpenContext();
@@ -92,7 +111,7 @@ public sealed class ReminderTests : PreapprovalsTestHarness
     {
         var program = await SeedProgramAsync(claimBy: Today.PlusDays(10));
         var grant = await SeedGrantAsync(program);
-        var service = NewService();
+        var service = NewReminders();
         await service.SendDeadlineRemindersAsync(Ct);
 
         await using (var db = OpenContext())
@@ -104,30 +123,51 @@ public sealed class ReminderTests : PreapprovalsTestHarness
 
         await Notifications.Received(2).SendAsync(Arg.Any<NotificationSourceDefinition>(), Arg.Any<NotificationClass>(), Arg.Any<NotificationPriority>(),
             Arg.Any<string>(), Arg.Any<IReadOnlyList<Guid>>(), Arg.Any<string?>(), Arg.Any<string?>(),
-            Arg.Any<string?>(), Arg.Any<string?>(), PreapprovalService.FileBySourceKey(grant.Id), Arg.Any<CancellationToken>());
+            Arg.Any<string?>(), Arg.Any<string?>(), PreapprovalNotices.FileBySourceKey(grant.Id), Arg.Any<CancellationToken>());
         await using var check = OpenContext();
         (await check.RemindersSent.Select(r => r.ClaimBy).ToListAsync(Ct)).Should().BeEquivalentTo([Today.PlusDays(10), Today.PlusDays(12)]);
     }
 
-    [HumansFact]
-    public async Task Run_OneFailure_DoesNotStopTheOthers()
+    [HumansTheory]
+    [Xunit.InlineData(true)]
+    [Xunit.InlineData(false)]
+    public async Task Run_DeliveryFailure_LeavesNoMarker_ContinuesThenFails(bool notificationFails)
     {
         var program = await SeedProgramAsync(claimBy: Today.PlusDays(5));
         var broken = SeedUser("Broken");
         var fine = SeedUser("Fine");
-        await SeedGrantAsync(program, broken);
+        var failed = await SeedGrantAsync(program, broken);
         var ok = await SeedGrantAsync(program, fine);
-        Notifications.SendAsync(Arg.Any<NotificationSourceDefinition>(), Arg.Any<NotificationClass>(), Arg.Any<NotificationPriority>(),
-                Arg.Any<string>(), Arg.Is<IReadOnlyList<Guid>>(r => r.Contains(broken)), Arg.Any<string?>(), Arg.Any<string?>(),
-                Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
-            .Returns(_ => throw new InvalidOperationException("boom"));
-        Email.SendAsync(Arg.Is<EmailMessage>(m => m.RecipientEmail.StartsWith(broken.ToString(), StringComparison.Ordinal)), Arg.Any<CancellationToken>())
-            .Returns(_ => throw new InvalidOperationException("boom"));
+        var failure = new InvalidOperationException("Delivery unavailable");
+        var recovered = false;
+        if (notificationFails)
+            Notifications.SendAsync(Arg.Any<NotificationSourceDefinition>(), Arg.Any<NotificationClass>(), Arg.Any<NotificationPriority>(),
+                    Arg.Any<string>(), Arg.Is<IReadOnlyList<Guid>>(r => r.Contains(broken)), Arg.Any<string?>(), Arg.Any<string?>(),
+                    Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
+                .Returns(_ => recovered ? Task.CompletedTask : throw failure);
+        else
+            Email.SendAsync(Arg.Is<EmailMessage>(m => m.RecipientEmail.StartsWith(broken.ToString(), StringComparison.Ordinal)), Arg.Any<CancellationToken>())
+                .Returns(_ => recovered ? Task.CompletedTask : throw failure);
 
-        await NewService().SendDeadlineRemindersAsync(Ct);
+        var act = () => NewReminders().SendDeadlineRemindersAsync(Ct);
+
+        var error = await act.Should().ThrowAsync<AggregateException>();
+        error.Which.InnerExceptions.Should().ContainSingle().Which.Should().BeSameAs(failure);
 
         await using var db = OpenContext();
         var markers = await db.RemindersSent.ToListAsync(Ct);
-        markers.Should().Contain(m => m.GrantId == ok.Id);
+        markers.Should().ContainSingle().Which.GrantId.Should().Be(ok.Id);
+        await AuditLog.DidNotReceive().LogAsync(PreapprovalsAuditActions.PreapprovalReminderSent,
+            AuditEntityTypes.Grant, failed.Id, Arg.Any<string>(), PreapprovalDeadlineReminders.ReminderJobName,
+            program.Id, AuditEntityTypes.Program);
+
+        recovered = true;
+        await NewReminders().SendDeadlineRemindersAsync(Ct);
+        await using var afterRetry = OpenContext();
+        (await afterRetry.RemindersSent.Select(marker => marker.GrantId).ToListAsync(Ct))
+            .Should().BeEquivalentTo([failed.Id, ok.Id]);
+        await Email.Received(1).SendAsync(
+            Arg.Is<EmailMessage>(message => message.RecipientEmail.StartsWith(fine.ToString(), StringComparison.Ordinal)),
+            Arg.Any<CancellationToken>());
     }
 }

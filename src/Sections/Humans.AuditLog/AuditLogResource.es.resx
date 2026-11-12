@@ -81,6 +81,9 @@
   <data name="Enum_AuditAction_CampPrimaryLeadTransferred" xml:space="preserve"><value>Responsable principal del campamento transferido</value></data>
   <data name="Enum_AuditAction_CampImageUploaded" xml:space="preserve"><value>Imagen del campamento cargada</value></data>
   <data name="Enum_AuditAction_CampImageDeleted" xml:space="preserve"><value>Imagen del campamento eliminada</value></data>
+  <data name="Enum_AuditAction_CampImagesReordered" xml:space="preserve"><value>Imágenes del campamento reordenadas</value></data>
+  <data name="Enum_AuditAction_CampHistoricalNameAdded" xml:space="preserve"><value>Nombre histórico del campamento añadido</value></data>
+  <data name="Enum_AuditAction_CampHistoricalNameRemoved" xml:space="preserve"><value>Nombre histórico del campamento eliminado</value></data>
   <data name="Enum_AuditAction_ShiftSignupConfirmed" xml:space="preserve"><value>Inscripción al turno confirmada</value></data>
   <data name="Enum_AuditAction_ShiftSignupRefused" xml:space="preserve"><value>Inscripción al turno rechazada</value></data>
   <data name="Enum_AuditAction_ShiftSignupVoluntold" xml:space="preserve"><value>Inscripción al turno asignada por la coordinación</value></data>
@@ -165,7 +168,7 @@
   <data name="Enum_AuditAction_TicketTransferCancelled" xml:space="preserve"><value>Transferencia de entrada cancelada</value></data>
   <data name="Enum_AuditAction_TicketTransferAutoFailed" xml:space="preserve"><value>Transferencia automática de entrada fallida</value></data>
   <data name="Enum_AuditAction_OrphanUserEmailDeleted" xml:space="preserve"><value>Correo de usuario huérfano eliminado</value></data>
-  <data name="Enum_AuditAction_GhostExternalLoginsDeleted" xml:space="preserve"><value>Inicios de sesión externos sin usuario eliminado</value></data>
+  <data name="Enum_AuditAction_GhostExternalLoginsDeleted" xml:space="preserve"><value>Inicios de sesión externos sin usuario eliminados</value></data>
   <data name="Enum_AuditAction_LegacyIdentityEmailBackfilled" xml:space="preserve"><value>Correo de identidad heredada completado retroactivamente</value></data>
   <data name="Enum_AuditAction_CampEarlyEntryGranted" xml:space="preserve"><value>Acceso anticipado al campamento concedido</value></data>
   <data name="Enum_AuditAction_CampEarlyEntryRevoked" xml:space="preserve"><value>Acceso anticipado al campamento revocado</value></data>

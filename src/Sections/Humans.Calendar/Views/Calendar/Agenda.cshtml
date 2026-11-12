@@ -30,18 +30,17 @@
 <div class="container py-4">
     <partial name="_CalendarViewPills" />
 
-    <div class="d-flex justify-content-between align-items-center mb-3">
-        <h1 class="h3 mb-0">@Localizer["Calendar_Agenda"]</h1>
+    <page-header title="@(Localizer["Calendar_Agenda"].Value)">
         <div>
             <a class="btn btn-sm btn-primary" asp-action="Create">@Localizer["Calendar_NewEvent"]</a>
         </div>
-    </div>
+    </page-header>
 
     <partial name="_CalendarTimeZonePicker" model="Model.ViewerTimezoneLabel" />
 
     @if (!grouped.Any())
     {
-        <p class="text-muted">@Localizer["Calendar_NoEventsInRange"]</p>
+        <empty-state>@Localizer["Calendar_NoEventsInRange"]</empty-state>
     }
     else
     {
@@ -85,13 +84,13 @@
                             <a asp-action="Event" asp-route-id="@o.EventId">@o.Title</a>
                             <small class="text-muted">— @o.OwningTeamName</small>
                         }
-                        @if (!string.IsNullOrWhiteSpace(o.Location))
+                        @if (!string.IsNullOrWhiteSpace(o.Location) || !string.IsNullOrWhiteSpace(o.LocationUrl))
                         {
-                            <div class="small text-muted ms-5">@o.Location</div>
+                            <div class="small text-muted ms-5"><partial name="_CalendarLocation" model="(o.Location, o.LocationUrl)" /></div>
                         }
                         @if (!string.IsNullOrWhiteSpace(o.Description))
                         {
-                            <div class="small ms-5">@o.Description</div>
+                            <div class="small ms-5">@Html.SanitizedMarkdown(o.Description)</div>
                         }
                     </li>
                 }

@@ -227,7 +227,6 @@ public sealed class UserRepositoryProfileTests : IDisposable
         var rejected = await SeedUserAsync(UserState.Rejected);
         var active = await SeedUserAsync(UserState.Active);
         var rejectedProfile = NewProfile(rejected.Id, "Burner", "First", "Last");
-        rejectedProfile.RejectedAt = _clock.GetCurrentInstant();
         _dbContext.Profiles.Add(rejectedProfile);
         _dbContext.Profiles.Add(NewProfile(active.Id, "Burner", "First", "Last"));
         await _dbContext.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
@@ -325,6 +324,22 @@ public sealed class UserRepositoryProfileTests : IDisposable
         _dbContext.ChangeTracker.Clear();
         return await _dbContext.Users.AsNoTracking()
             .SingleAsync(u => u.Id == userId, Xunit.TestContext.Current.CancellationToken);
+    }
+
+    [HumansFact]
+    public async Task EraseProfileExtrasForUserAsync_ErasesMedicalConditions()
+    {
+        var user = await SeedUserAsync(UserState.Active);
+        var profile = NewProfile(user.Id, "Burner", "First", "Last");
+        profile.MedicalConditions = "Epilepsy";
+        _dbContext.Profiles.Add(profile);
+        await _dbContext.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+        _dbContext.ChangeTracker.Clear();
+
+        await _repo.EraseProfileExtrasForUserAsync(user.Id, Xunit.TestContext.Current.CancellationToken);
+
+        var erased = await _dbContext.Profiles.AsNoTracking().SingleAsync(p => p.Id == profile.Id, Xunit.TestContext.Current.CancellationToken);
+        erased.MedicalConditions.Should().BeNull();
     }
 
     private async Task<User> SeedUserAsync(UserState state = UserState.Bare)

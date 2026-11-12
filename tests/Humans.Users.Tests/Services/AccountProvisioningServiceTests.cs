@@ -24,29 +24,6 @@ file sealed class StubAuditLog : IAuditLogService
     public Task LogAsync(AuditActionDefinition action, string entityType, Guid entityId,
         string description, Guid actorUserId,
         Guid? relatedEntityId = null, string? relatedEntityType = null) => Task.CompletedTask;
-
-    public Task<IReadOnlyList<AuditLogEntrySnapshot>> GetRecentAsync(int count, CancellationToken ct = default) =>
-        Task.FromResult<IReadOnlyList<AuditLogEntrySnapshot>>([]);
-
-    public Task<(IReadOnlyList<AuditLogEntrySnapshot> Items, int TotalCount, int AnomalyCount)> GetFilteredAsync(
-        string? actionFilter, int page, int pageSize, CancellationToken ct = default) =>
-        Task.FromResult<(IReadOnlyList<AuditLogEntrySnapshot>, int, int)>(([], 0, 0));
-
-    public Task<IReadOnlyList<AuditLogEntrySnapshot>> GetByUserAsync(Guid userId, int count, CancellationToken ct = default) =>
-        Task.FromResult<IReadOnlyList<AuditLogEntrySnapshot>>([]);
-
-    public Task<IReadOnlyList<AuditLogEntrySnapshot>> GetFilteredEntriesAsync(
-        IReadOnlyList<AuditActionDefinition> actions,
-        string? entityType = null,
-        Guid? entityId = null,
-        Guid? userId = null,
-        int limit = 20,
-        CancellationToken ct = default) =>
-        Task.FromResult<IReadOnlyList<AuditLogEntrySnapshot>>([]);
-
-    public Task<IReadOnlySet<Guid>> GetEntityIdsForEntityTypeActionsAsync(
-        string entityType, IReadOnlyList<AuditActionDefinition> actions, CancellationToken ct = default) =>
-        Task.FromResult((IReadOnlySet<Guid>)new HashSet<Guid>());
 }
 
 /// <summary>
@@ -91,18 +68,13 @@ public class AccountProvisioningServiceTests
             throw new NotSupportedException();
         public Task<bool> SetLastLoginAsync(Guid userId, Instant at, CancellationToken ct = default) =>
             throw new NotSupportedException();
+        public Task<bool> SetMarkedFakeAsync(Guid userId, Instant at, CancellationToken ct = default) =>
+            throw new NotSupportedException();
         public Task<bool> SetDeletionPendingAsync(
             Guid userId, Instant requestedAt, Instant scheduledFor, Instant? eligibleAfter,
             CancellationToken ct = default) =>
             throw new NotSupportedException();
         public Task<bool> ClearDeletionAsync(Guid userId, CancellationToken ct = default) =>
-            throw new NotSupportedException();
-        public Task<IReadOnlyList<EventParticipation>> GetEventParticipationsByUserIdAsync(
-            Guid userId, CancellationToken ct = default) =>
-            throw new NotSupportedException();
-        public Task<IReadOnlyDictionary<Guid, IReadOnlyList<EventParticipation>>>
-            GetEventParticipationsByUserIdsAsync(
-                IReadOnlyCollection<Guid> userIds, CancellationToken ct = default) =>
             throw new NotSupportedException();
         public Task<bool> AnonymizeForMergeAsync(
             Guid sourceUserId, Guid targetUserId, Instant now, CancellationToken ct = default) =>
@@ -166,7 +138,7 @@ public class AccountProvisioningServiceTests
         public Task<IReadOnlySet<Guid>> SuspendManyAsync(
             IReadOnlyCollection<Guid> userIds, CancellationToken ct = default) =>
             throw new NotSupportedException();
-        public Task<(Guid ProfileId, string? ContentType, string? StorageKey)?> ReassignSubAggregatesToUserAsync(
+        public Task ReassignSubAggregatesToUserAsync(
             Guid sourceUserId, Guid targetUserId, Instant updatedAt, CancellationToken ct = default) =>
             throw new NotSupportedException();
         public Task<bool> SetSuspensionAsync(
@@ -208,9 +180,6 @@ public class AccountProvisioningServiceTests
             throw new NotSupportedException();
         public Task<IReadOnlyList<UserEmail>> GetUserEmailsByEmailsAsync(
             IReadOnlyCollection<string> emails, CancellationToken ct = default) =>
-            throw new NotSupportedException();
-        public Task<Dictionary<Guid, string>> GetAllNotificationTargetUserEmailsAsync(
-            CancellationToken ct = default) =>
             throw new NotSupportedException();
         public Task<IReadOnlyList<Guid>> GetUserIdsByUserEmailPrefixAndSuffixAsync(
             string prefix, string suffix, CancellationToken ct = default) =>
@@ -293,11 +262,7 @@ public class AccountProvisioningServiceTests
                 UserId = userId,
                 Email = email,
                 IsVerified = true,
-                // Simulates the EnsurePrimaryInvariantAsync + EnsureGoogleInvariantAsync
-                // orchestrator behaviour for newly-provisioned single-row
-                // users — the fresh row becomes both Primary and Google.
                 IsPrimary = true,
-                IsGoogle = true,
                 Visibility = null,
                 CreatedAt = now,
                 UpdatedAt = now,
@@ -331,7 +296,6 @@ public class AccountProvisioningServiceTests
                 Email = email,
                 IsVerified = true,
                 IsPrimary = true,
-                IsGoogle = true,
                 Visibility = null,
                 CreatedAt = now,
                 UpdatedAt = now,
@@ -424,8 +388,6 @@ public class AccountProvisioningServiceTests
     [Xunit.InlineData("Identity")]
     [Xunit.InlineData("Email")]
     [Xunit.InlineData("Profile")]
-    [Xunit.InlineData("Audit")]
-    [Xunit.InlineData("DeletionAudit")]
     public async Task ReplaceUnverified_ProvisioningFailureRollsBackEmailAndAccount(string stage)
     {
         var row = SeedPendingReplacement();
@@ -438,14 +400,6 @@ public class AccountProvisioningServiceTests
             case "Profile":
                 _userService.EnsureStubProfileAsync(Arg.Any<Guid>(), Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
                     .ThrowsAsync(new InvalidOperationException("Profile creation failed"));
-                break;
-            case "Audit":
-                _audit.LogAsync(UsersAuditActions.ContactCreated, nameof(User), Arg.Any<Guid>(), Arg.Any<string>(), nameof(AccountProvisioningService),
-                    Arg.Any<Guid?>(), Arg.Any<string?>()).ThrowsAsync(new InvalidOperationException("Audit failed"));
-                break;
-            case "DeletionAudit":
-                _audit.LogAsync(UsersAuditActions.UserEmailDeleted, nameof(UserEmail), row.Id, Arg.Any<string>(), nameof(AccountProvisioningService),
-                    row.UserId, nameof(User)).ThrowsAsync(new InvalidOperationException("Deletion audit failed"));
                 break;
         }
         _userInfoRefresher.RefreshAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>(), Arg.Any<string>(), Arg.Any<string>())
@@ -464,9 +418,27 @@ public class AccountProvisioningServiceTests
     public async Task ReplaceUnverified_SuccessCommitsFreshVerifiedOwnerAndRefreshesBothUsers()
     {
         var row = SeedPendingReplacement();
+        Transaction? transaction = null;
+        _userEmailService.When(service => service.AddProvisionedEmailAsync(
+            Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<CancellationToken>()))
+            .Do(_ => transaction = Transaction.Current?.Clone());
+        var audits = new List<(string Action, bool AfterCommit)>();
+        _audit.LogAsync(Arg.Any<AuditActionDefinition>(), Arg.Any<string>(), Arg.Any<Guid>(),
+            Arg.Any<string>(), nameof(AccountProvisioningService), Arg.Any<Guid?>(), Arg.Any<string?>()).Returns(call =>
+        {
+            audits.Add((call.ArgAt<AuditActionDefinition>(0).Name, Transaction.Current is null
+                && transaction?.TransactionInformation.Status == TransactionStatus.Committed));
+            return Task.CompletedTask;
+        });
         var result = await _service.ReplaceUnverifiedEmailAndProvisionAsync(
             row.UserId, row.Id, row.Email, "Victim", ContactSource.MailerLite, Xunit.TestContext.Current.CancellationToken);
 
+        using (transaction)
+        {
+            audits.Select(audit => audit.Action).Should().Equal(
+                UsersAuditActions.ContactCreated.Name, UsersAuditActions.UserEmailDeleted.Name);
+            audits.Should().OnlyContain(audit => audit.AfterCommit);
+        }
         result.Created.Should().BeTrue();
         result.UserId.Should().NotBe(row.UserId);
         await _audit.Received(1).LogAsync(UsersAuditActions.UserEmailDeleted, nameof(UserEmail), row.Id,
@@ -476,6 +448,31 @@ public class AccountProvisioningServiceTests
         _userEmailFake.All.Single().IsVerified.Should().BeTrue();
         await _userInfoRefresher.Received(1).RefreshAsync(row.UserId, CancellationToken.None, Arg.Any<string>(), Arg.Any<string>());
         await _userInfoRefresher.Received(1).RefreshAsync(result.UserId, CancellationToken.None, Arg.Any<string>(), Arg.Any<string>());
+    }
+
+    [HumansFact]
+    public async Task ReplaceUnverified_CommitRejectionRollsBackWithoutSuccessAudits()
+    {
+        var row = SeedPendingReplacement();
+        _userManager.When(manager => manager.CreateAsync(Arg.Any<User>())).Do(_ =>
+            Transaction.Current!.EnlistVolatile(new RejectCommit(), EnlistmentOptions.None));
+        var act = () => _service.ReplaceUnverifiedEmailAndProvisionAsync(
+            row.UserId, row.Id, row.Email, "Victim", ContactSource.MailerLite, Xunit.TestContext.Current.CancellationToken);
+
+        await act.Should().ThrowAsync<TransactionAbortedException>();
+
+        _audit.ReceivedCalls().Should().BeEmpty();
+        _userEmailFake.All.Should().ContainSingle().Which.Should().BeSameAs(row);
+        _userRepo.All.Should().ContainSingle().Which.Id.Should().Be(row.UserId);
+        await _userInfoRefresher.Received(1).RefreshAsync(row.UserId, CancellationToken.None, Arg.Any<string>(), Arg.Any<string>());
+    }
+
+    private sealed class RejectCommit : IEnlistmentNotification
+    {
+        public void Prepare(PreparingEnlistment enlistment) => enlistment.ForceRollback(new IOException("Commit rejected"));
+        public void Commit(Enlistment enlistment) => enlistment.Done();
+        public void Rollback(Enlistment enlistment) => enlistment.Done();
+        public void InDoubt(Enlistment enlistment) => enlistment.Done();
     }
 
     [HumansTheory]
@@ -534,7 +531,7 @@ public class AccountProvisioningServiceTests
             "alice@example.com", "Alice Smith", ContactSource.TicketTailor, Xunit.TestContext.Current.CancellationToken);
 
         result.Created.Should().BeTrue();
-        // User.Email is no longer the identity — the verified row is.
+        // User.Email is not the identity: the verified row is.
         StoredUser(result.UserId).Email.Should().BeNull();
         StoredUser(result.UserId).BurnerName.Should().Be("Alice Smith");
         StoredUser(result.UserId).ContactSource.Should().Be(ContactSource.TicketTailor);
@@ -720,19 +717,15 @@ public class AccountProvisioningServiceTests
         result2.Created.Should().BeFalse();
         result3.Created.Should().BeFalse();
 
-        // Only one user should exist. User.Email is no longer the identity —
-        // assert via the UserEmail row instead.
+        // Only one user should exist. User.Email is not the identity: assert via the UserEmail row.
         _userEmailFake.All
             .Count(ue => string.Equals(ue.Email, "henry@example.com", StringComparison.Ordinal))
             .Should().Be(1);
     }
 
     [HumansFact]
-    public async Task FindOrCreateUserByEmailAsync_NewUser_GetsExactlyOneIsGoogleRow()
+    public async Task FindOrCreateUserByEmailAsync_NewUser_GetsOneVerifiedPrimaryEmail()
     {
-        // AccountProvisioningService path enforces the IsGoogle invariant via
-        // the IUserEmailService orchestrator — a newly-provisioned user gets
-        // exactly one IsGoogle row (the one we just created).
         var result = await _service.FindOrCreateUserByEmailAsync(
             "ivy@example.com", "Ivy", ContactSource.TicketTailor, Xunit.TestContext.Current.CancellationToken);
 
@@ -743,7 +736,6 @@ public class AccountProvisioningServiceTests
             .ToList();
 
         rowsForUser.Should().HaveCount(1);
-        rowsForUser[0].IsGoogle.Should().BeTrue();
         rowsForUser[0].IsPrimary.Should().BeTrue();
         rowsForUser[0].IsVerified.Should().BeTrue();
     }

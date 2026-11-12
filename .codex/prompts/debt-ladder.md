@@ -19,7 +19,7 @@ is drained, and the done-check.
 contract changes are pre-approved and listed in the PR (D1), `internal` types
 are never public surface (D2), a new interface/service/endpoint still goes to
 Peter in D3 format, no category-bin skips (D4); one coherent fix or
-same-correction batch per commit (possibly across sections), six cultures,
+same-correction batch per commit (possibly across sections), every culture,
 migrations only via `dotnet ef migrations add`, never touch `NoDestructiveMigrationOps.baseline.txt` or a `[DontFix]` class.
 
 Every ledger row carries a permanent `id:` (`memory/process/debt-ledger-additions.md`). Identify
@@ -171,8 +171,8 @@ corrections require no build.
 
 **What:** A user-facing string hardcoded in English instead of a resx key,
 on a route that is **not** admin/operator-exempt
-(`memory/code/localization-admin-exempt.md`). All six cultures (en, es, de,
-it, fr, ca) in the same commit. Collect a small batch of verified gaps
+(`memory/code/localization-admin-exempt.md`). All supported cultures (en, es, de,
+it, fr, ca, nl) in the same commit. Collect a small batch of verified gaps
 across related views/actions before editing; do not test and commit each
 string or file separately. Follow `daily-debt.md`'s batching rules.
 
@@ -212,6 +212,9 @@ grep -v TicketRepository tests/Humans.Web.Tests/Architecture/Baselines/DisplaySo
 For each line: find the method's caller(s) — **read the consumer first**,
 don't just delete the sort. A prior PR (peterdrier/Humans#1002) had to revert two premature
 deletions where the view rendered in repo order with no re-sort.
+Collect the eligible moves in the section before editing, inspect every consumer,
+and validate them as one batch under `daily-debt.md`. Do not create one round per
+`OrderBy`; explain splits caused by different semantics or risk.
 
 **Seed check (2026-10-22):** The former `TeamRepository.GetAllRoleDefinitionsAsync`
 seed is resolved: the repository `OrderBy` was removed and `TeamController.Roster`
@@ -253,7 +256,7 @@ grep -B1 -A1 "review: light" docs/architecture/debt-ledger.yml src/Sections/*/Do
 `memory/code/resource-key-prefix-matches-section.md`. Existing keys are not
 renamed as a side effect of unrelated work. Keep reflection-resolved
 `Enum_{TypeName}_{Value}` keys and the approved `Issue_` prefix unchanged.
-Update every usage and all six cultures together; only take a candidate that
+Update every usage and all supported cultures together; only take a candidate that
 can finish as one coherent change inside the remaining window.
 
 **Seed check (2026-10-17):** The former Governance and Teams prefix seeds are
@@ -331,7 +334,7 @@ future run doesn't re-derive it:
 - **`NoDestructiveMigrationOps.baseline.txt`.** An approval ledger of
   immutable, already-shipped migrations with Peter's written sign-off above
   each — not a backlog. The rule guards new drops, never sweep existing ones.
-- **The `[DontFix]` classes** (`AuditLogService`, `RoleAssignmentService`).
+- **The `[DontFix]` classes** (`AuditLogService`).
   Peter-only, permanent. Never "fix" them, never add the attribute elsewhere.
 - **The `TicketRepository` rows in `DisplaySortInControllers.baseline.txt`.**
   Peter ruled these stay until the paged grid's sort is redesigned

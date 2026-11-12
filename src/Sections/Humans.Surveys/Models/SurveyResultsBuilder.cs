@@ -26,8 +26,11 @@ internal static class SurveyResultsBuilder
             Funnel = view.Funnel,
             Scope = scoped.Scope,
             SelectedResponseCount = scoped.SelectedResponseCount,
-            Questions = view.Questions.Select(BuildQuestion).ToList(),
-            Respondents = view.IdentifiedRespondents.Select(BuildRespondent).ToList(),
+            Questions = view.Questions.OrderBy(q => q.PageNumber).ThenBy(q => q.Order).Select(BuildQuestion).ToList(),
+            Respondents = view.IdentifiedRespondents
+                .OrderBy(respondent => respondent.SubmittedAt)
+                .ThenBy(respondent => respondent.ResponseId)
+                .Select(BuildRespondent).ToList(),
             IsEmbargoed = scoped.IsEmbargoed,
             RankedQuestions = scoped.RankedQuestions ?? new Dictionary<Guid, RankedQuestionResult>(),
             IsAsociadoVote = scoped.IsAsociadoVote,
@@ -42,7 +45,7 @@ internal static class SurveyResultsBuilder
         QuestionId = q.QuestionId,
         Prompt = q.Prompt,
         Type = q.Type,
-        OptionCounts = q.OptionCounts,
+        OptionCounts = q.OptionCounts.OrderBy(option => option.Order).ToList(),
         Grid = q.Grid,
         RatingDistribution = q.RatingDistribution,
         RatingAverage = q.RatingAverage is { } avg ? avg.ToString("0.0", CultureInfo.CurrentUICulture) : null,
@@ -52,7 +55,6 @@ internal static class SurveyResultsBuilder
     private static SurveyResultsRespondentViewModel BuildRespondent(RespondentDetail r) => new()
     {
         UserId = r.UserId,
-        Name = r.Name,
         SubmittedAt = FormatInstant(r.SubmittedAt),
         Answers = r.Answers,
     };
@@ -64,6 +66,9 @@ internal static class SurveyResultsBuilder
 internal sealed class SurveyResultsViewModel
 {
     public Guid SurveyId { get; init; }
+
+    /// <summary>The downloads: Surveys Admin and Admin, or the author once closed. Board reads the page only.</summary>
+    public bool CanExport { get; set; }
     public string Title { get; init; } = string.Empty;
     public SurveyStatus Status { get; init; }
     public int InvitedCount { get; init; }
@@ -101,7 +106,6 @@ internal sealed class SurveyResultsQuestionViewModel
 internal sealed class SurveyResultsRespondentViewModel
 {
     public Guid UserId { get; init; }
-    public string Name { get; init; } = string.Empty;
     public string SubmittedAt { get; init; } = "—";
     public IReadOnlyList<RespondentAnswer> Answers { get; init; } = [];
 }

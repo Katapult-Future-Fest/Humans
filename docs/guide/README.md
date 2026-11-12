@@ -30,9 +30,9 @@ AI in just one place — an optional [in-app helper](AiHelper.md) you can chat
 with for support; nothing else relies on it.
 
 The app is at [humans.nobodies.team](https://humans.nobodies.team/),
-available in English, Español, Deutsch, Français, Italiano, and Català.
-Questions: start with the in-app help button (AI helper, issue filing,
-feedback) or ask in [#🧘-humans-app](https://discord.gg/fq7gr29p) on Discord.
+available in English, Español, Deutsch, Français, Italiano, Català, and Nederlands.
+Questions: start with the in-app help button (AI helper, issue filing)
+or ask in [#🧘-humans-app](https://discord.gg/fq7gr29p) on Discord.
 [humans@nobodies.team](mailto:humans@nobodies.team) is third-level support —
 email it only when nothing else worked.
 
@@ -54,14 +54,13 @@ email it only when nothing else worked.
 10. [Email](Email.md)
 11. [Campaigns](Campaigns.md)
 12. [Issues](Issues.md)
-13. [Feedback](Feedback.md)
-14. [Governance](Governance.md)
-15. [Budget](Budget.md)
-16. [Expenses](Expenses.md)
-17. [Store](Store.md)
-18. [City Planning](CityPlanning.md)
-19. [Google Integration](GoogleIntegration.md)
-20. [Admin](Admin.md)
+13. [Governance](Governance.md)
+14. [Budget](Budget.md)
+15. [Expenses](Expenses.md)
+16. [Store](Store.md)
+17. [City Planning](CityPlanning.md)
+18. [Google Integration](GoogleIntegration.md)
+19. [Admin](Admin.md)
 
 ## Common questions
 

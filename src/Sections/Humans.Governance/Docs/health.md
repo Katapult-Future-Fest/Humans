@@ -22,7 +22,7 @@ them by email and in-app, and leaves an audit entry. Ninety days before a term r
 person is reminded to re-apply. Individual Board positions are destroyed the moment the
 decision is made; only the Board's collective note and the meeting date survive.
 
-**Binding votes of the association.** The Board writes a motion in the six languages, with
+**Binding votes of the association.** The Board writes a motion in every supported language, with
 either a yes/no/abstain answer or a ranked list of options, and a time it closes. An Admin
 opens it; at that instant the list of who may vote is frozen — the current Asociados and Board
 members vote for the record, and, if the motion says so, Colaboradores or every volunteer may
@@ -139,11 +139,11 @@ Each cites the line that enforces it.
   tallied separately and never merged (`Services/AssemblyVoteService.cs:558`).
 - A ballot is accepted only while the vote is Open and its deadline has not passed, and only
   from the roster row that entitles the submitter. Checked once before the write
-  (`Services/AssemblyVoteService.cs:233`, `:238`) and again under the vote row's lock
+  (`AssemblyVoteMemberWorkflow.CastBallotAsync`) and again under the vote row's lock
   (`Data/AssemblyVoteRepository.cs:357`), so a ballot accepted after the count began is
   impossible rather than unlikely.
 - A ballot's audit entry names the actor and the vote, never the choice, and never the ballot
-  row (`Services/AssemblyVoteService.cs:263`).
+  row (`AssemblyVoteMemberWorkflow.CastBallotAsync`).
 - The embargo: the only reads that return anything derived from ballot content are the stored
   result after close, the audited peek, and the audited post-close ballot list
   (`Services/AssemblyVoteService.cs:609`, `:1316`, `:1349`; the contract is stated at

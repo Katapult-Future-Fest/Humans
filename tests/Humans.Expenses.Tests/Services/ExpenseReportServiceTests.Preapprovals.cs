@@ -1,8 +1,14 @@
+using Humans.Users.Contracts;
 using AwesomeAssertions;
 using Humans.AuditLog.Contracts;
 using Xunit;
 using Humans.Expenses.Contracts;
 using Humans.Expenses.Data;
+using Humans.Expenses.Services;
+using Humans.Expenses.Tests.Infrastructure;
+using Humans.Expenses.Services.Dtos;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Humans.Expenses.Domain;
 using Humans.Preapprovals.Contracts;
 using NodaTime;
@@ -18,6 +24,73 @@ namespace Humans.Expenses.Tests.Services;
 /// </summary>
 public sealed partial class ExpenseReportServiceTests
 {
+    [HumansTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Submit_SharedGrant_IsHeldThroughTransactionCompletionAcrossScopes(bool rollbackFirst)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var owner = Guid.NewGuid();
+        var grant = MakeGrant();
+        var firstId = await CreateSubmittableGrantDraftAsync(owner, grant);
+        var nextId = await CreateSubmittableGrantDraftAsync(owner, grant);
+        Guid? committedHolder = null;
+        _preapprovals.GetGrantAsync(grant.Id, ct).Returns(_ => Task.FromResult<GrantOption?>(
+            grant with { Status = committedHolder is null ? GrantStatus.Open : GrantStatus.Claimed }));
+        _preapprovalWrites.ClaimAsync(grant.Id, Arg.Any<Guid>(), owner, ct,
+            Arg.Any<Action<Func<CancellationToken, Task>>?>()).Returns(call =>
+        {
+            var reportId = call.ArgAt<Guid>(1);
+            if (committedHolder is { } held && held != reportId)
+                return Task.FromResult(new PreapprovalWriteResult(Refusal: "Held by another report"));
+            System.Transactions.Transaction.Current.Should().NotBeNull();
+            call.ArgAt<Action<Func<CancellationToken, Task>>>(4)(token =>
+            {
+                System.Transactions.Transaction.Current.Should().BeNull();
+                token.Should().Be(CancellationToken.None);
+                committedHolder = reportId;
+                return Task.CompletedTask;
+            });
+            return Task.FromResult(new PreapprovalWriteResult(StampOf(grant)));
+        });
+        var saving = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var repository = Substitute.For<IExpenseRepository>();
+        repository.GetByIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>())
+            .Returns(call => _expenseRepo.GetByIdAsync(call.Arg<Guid>(), call.Arg<CancellationToken>()));
+        repository.SubmitAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<Instant>(),
+            Arg.Any<ExpenseBooking?>(), Arg.Any<decimal?>(), Arg.Any<CancellationToken>()).Returns(async call =>
+        {
+            var id = call.ArgAt<Guid>(0);
+            if (id == firstId)
+            {
+                saving.SetResult();
+                await release.Task.WaitAsync(ct);
+                if (rollbackFirst) throw new IOException("Report save failed");
+            }
+            return await _expenseRepo.SubmitAsync(id, call.ArgAt<string>(1), call.ArgAt<string>(2),
+                call.ArgAt<Instant>(3), call.ArgAt<ExpenseBooking?>(4), call.ArgAt<decimal?>(5), call.Arg<CancellationToken>());
+        });
+        ExpenseReportService ScopedService() => new(repository, _fileStorage, _budgetService, _teamService,
+            _userService, _emailService, TestExpensesEmails.Create(), AuditLog, Substitute.For<IAuditViewerService>(),
+            _holdedService, _finance, _financeWrite, _preapprovals, _preapprovalWrites, Clock,
+            NullLogger<ExpenseReportService>.Instance, Options.Create(new TravelReimbursementConfig()));
+        var first = ScopedService().SubmitWithResultAsync(firstId, owner, false, ct);
+        await saving.Task.WaitAsync(ct);
+        var next = ScopedService().SubmitWithResultAsync(nextId, owner, false, ct);
+        release.SetResult();
+
+        var results = await Task.WhenAll(first, next).WaitAsync(ct);
+
+        results[0].Succeeded.Should().Be(!rollbackFirst);
+        results[1].Succeeded.Should().Be(rollbackFirst);
+        committedHolder.Should().Be(rollbackFirst ? nextId : firstId);
+        var firstReport = (await _expenseRepo.GetByIdAsync(firstId, ct))!;
+        var nextReport = (await _expenseRepo.GetByIdAsync(nextId, ct))!;
+        firstReport.Status.Should().Be(rollbackFirst ? ExpenseReportStatus.Draft : ExpenseReportStatus.Submitted);
+        nextReport.Status.Should().Be(rollbackFirst ? ExpenseReportStatus.Submitted : ExpenseReportStatus.Draft);
+    }
+
     private const int GrantAccountNumber = 62900500;
     private const string GrantAccountId = "acc-grant";
     /// <summary>FakeNow is 2026-05-10 12:00 UTC: 14:00 in Madrid, so today is the 10th.</summary>
@@ -30,6 +103,28 @@ public sealed partial class ExpenseReportServiceTests
 
     private static GrantStamp StampOf(GrantOption g, decimal? maxAmount = null) =>
         new(maxAmount ?? g.MaxAmount, g.HoldedAccountNumber, g.HoldedAccountId, g.ClaimBy);
+
+    private List<bool> TrackPreapprovalCompletions()
+    {
+        var completed = new List<bool>();
+        void Collect(NSubstitute.Core.CallInfo call)
+        {
+            if (System.Transactions.Transaction.Current is not { } current) return;
+            var transaction = current.Clone();
+            call.ArgAt<Action<Func<CancellationToken, Task>>>(4)(token =>
+            {
+                using (transaction)
+                    completed.Add(System.Transactions.Transaction.Current is null
+                        && transaction.TransactionInformation.Status == System.Transactions.TransactionStatus.Committed
+                        && !token.CanBeCanceled);
+                return Task.CompletedTask;
+            });
+        }
+        _preapprovalWrites.WhenForAnyArgs(writer => writer.ClaimAsync(default, default, default, default, default)).Do(Collect);
+        _preapprovalWrites.WhenForAnyArgs(writer => writer.ReleaseAsync(default, default, default, default, default)).Do(Collect);
+        _preapprovalWrites.WhenForAnyArgs(writer => writer.ConsumeAsync(default, default, default, default, default)).Do(Collect);
+        return completed;
+    }
 
     /// <summary>The grant is the submitter's to file against today, and reads back by id.</summary>
     private void StubClaimable(Guid submitter, params GrantOption[] grants)
@@ -94,7 +189,7 @@ public sealed partial class ExpenseReportServiceTests
         loaded.BudgetCategoryId.Should().BeNull("a pre-approved report is first reviewed by its program's managers, not a budget coordinator");
         loaded.BudgetYearId.Should().BeNull();
         loaded.MaxAmount.Should().BeNull("the cap is stamped at submit, not at draft");
-        await _holdedFinance.DidNotReceive().ListExpenseAccountsAsync(Arg.Any<bool>(), Arg.Any<CancellationToken>());
+        await _finance.DidNotReceive().ListExpenseAccountsAsync(Arg.Any<bool>(), Arg.Any<CancellationToken>());
     }
 
     [HumansFact]
@@ -221,12 +316,13 @@ public sealed partial class ExpenseReportServiceTests
     [HumansFact]
     public async Task Submit_WithGrant_ClaimsIt_AndRestampsAccountAndCapFromTheGrant()
     {
+        var completed = TrackPreapprovalCompletions();
         SetupActiveYear();
         var submitter = Guid.NewGuid();
         var grant = MakeGrant(maxAmount: 150m);
         var id = await CreateSubmittableGrantDraftAsync(submitter, grant);
         // The program changed since the draft: what the grant says now is what the report carries.
-        _preapprovalWrites.ClaimAsync(grant.Id, id, submitter, Arg.Any<CancellationToken>())
+        _preapprovalWrites.ClaimAsync(grant.Id, id, submitter, Arg.Any<CancellationToken>(), Arg.Any<Action<Func<CancellationToken, Task>>?>())
             .Returns(new PreapprovalWriteResult(new GrantStamp(130m, 62900510, "acc-grant-2", grant.ClaimBy)));
 
         var result = await _sut.SubmitWithResultAsync(id, submitter, false, TestContext.Current.CancellationToken);
@@ -239,6 +335,7 @@ public sealed partial class ExpenseReportServiceTests
         loaded.MaxAmount.Should().Be(130m);
         loaded.Payable.Should().Be(120m, "receipts under the cap pay in full");
         loaded.BudgetCategoryId.Should().BeNull();
+        completed.Should().Equal(true);
     }
 
     [HumansFact]
@@ -249,6 +346,8 @@ public sealed partial class ExpenseReportServiceTests
         var reportId = Guid.NewGuid();
         await SeedGrantReportAsync(reportId, submitter, grant.Id, ExpenseReportStatus.Submitted, maxAmount: 150m);
         var otherManager = Guid.NewGuid();
+        _userService.GetUserInfoAsync(otherManager, Arg.Any<CancellationToken>())
+            .Returns(UserInfo.Create(new User { Id = otherManager }, [], [], null));
         _preapprovals.ListManagedGrantIdsAsync(otherManager, Arg.Any<CancellationToken>())
             .Returns(new HashSet<Guid> { Guid.NewGuid() });
 
@@ -271,6 +370,8 @@ public sealed partial class ExpenseReportServiceTests
         var reportId = Guid.NewGuid();
         await SeedGrantReportAsync(reportId, submitter, grant.Id, ExpenseReportStatus.Submitted, maxAmount: 150m);
         var manager = Guid.NewGuid();
+        _userService.GetUserInfoAsync(manager, Arg.Any<CancellationToken>())
+            .Returns(UserInfo.Create(new User { Id = manager }, [], [], null));
         _preapprovals.ListManagedGrantIdsAsync(manager, Arg.Any<CancellationToken>())
             .Returns(new HashSet<Guid> { grant.Id });
 
@@ -308,7 +409,7 @@ public sealed partial class ExpenseReportServiceTests
             .Succeeded.Should().BeTrue();
 
         (await _sut.GetAsync(reportId, TestContext.Current.CancellationToken))!.Status.Should().Be(ExpenseReportStatus.Draft);
-        await _preapprovalWrites.DidNotReceiveWithAnyArgs().ReleaseAsync(default, default, default, default);
+        await _preapprovalWrites.DidNotReceiveWithAnyArgs().ReleaseAsync(default, default, default, default, Arg.Any<Action<Func<CancellationToken, Task>>?>());
     }
 
     [HumansFact]
@@ -324,7 +425,7 @@ public sealed partial class ExpenseReportServiceTests
         result.Succeeded.Should().BeFalse();
         result.Error!.ResourceKey.Should().Be("Expenses_Validation_PreapprovalDeadlinePassed");
         result.Error.Arguments.Should().ContainSingle().Which.Should().Be("2026-05-09");
-        await _preapprovalWrites.DidNotReceive().ClaimAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>());
+        await _preapprovalWrites.DidNotReceive().ClaimAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>(), Arg.Any<Action<Func<CancellationToken, Task>>?>());
         (await _sut.GetAsync(id, TestContext.Current.CancellationToken))!.Status.Should().Be(ExpenseReportStatus.Draft);
     }
 
@@ -335,7 +436,7 @@ public sealed partial class ExpenseReportServiceTests
         var submitter = Guid.NewGuid();
         var grant = MakeGrant(claimBy: GrantToday);
         var id = await CreateSubmittableGrantDraftAsync(submitter, grant);
-        _preapprovalWrites.ClaimAsync(grant.Id, id, submitter, Arg.Any<CancellationToken>()).Returns(new PreapprovalWriteResult(StampOf(grant)));
+        _preapprovalWrites.ClaimAsync(grant.Id, id, submitter, Arg.Any<CancellationToken>(), Arg.Any<Action<Func<CancellationToken, Task>>?>()).Returns(new PreapprovalWriteResult(StampOf(grant)));
 
         var result = await _sut.SubmitWithResultAsync(id, submitter, false, TestContext.Current.CancellationToken);
 
@@ -352,12 +453,12 @@ public sealed partial class ExpenseReportServiceTests
         var grant = MakeGrant(claimBy: GrantToday.PlusDays(-5));
         var id = await CreateSubmittableGrantDraftAsync(submitter, grant);
         _preapprovals.GetGrantAsync(grant.Id, Arg.Any<CancellationToken>()).Returns(grant with { Status = GrantStatus.Claimed });
-        _preapprovalWrites.ClaimAsync(grant.Id, id, submitter, Arg.Any<CancellationToken>()).Returns(new PreapprovalWriteResult(StampOf(grant)));
+        _preapprovalWrites.ClaimAsync(grant.Id, id, submitter, Arg.Any<CancellationToken>(), Arg.Any<Action<Func<CancellationToken, Task>>?>()).Returns(new PreapprovalWriteResult(StampOf(grant)));
 
         var result = await _sut.SubmitWithResultAsync(id, submitter, false, TestContext.Current.CancellationToken);
 
         result.Succeeded.Should().BeTrue(result.Error?.ResourceKey);
-        await _preapprovalWrites.Received(1).ClaimAsync(grant.Id, id, submitter, Arg.Any<CancellationToken>());
+        await _preapprovalWrites.Received(1).ClaimAsync(grant.Id, id, submitter, Arg.Any<CancellationToken>(), Arg.Any<Action<Func<CancellationToken, Task>>?>());
     }
 
     [HumansTheory]
@@ -375,7 +476,7 @@ public sealed partial class ExpenseReportServiceTests
         var result = await _sut.SubmitWithResultAsync(id, submitter, false, TestContext.Current.CancellationToken);
 
         result.Error!.ResourceKey.Should().Be(expectedKey);
-        await _preapprovalWrites.DidNotReceive().ClaimAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>());
+        await _preapprovalWrites.DidNotReceive().ClaimAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>(), Arg.Any<Action<Func<CancellationToken, Task>>?>());
         (await _sut.GetAsync(id, TestContext.Current.CancellationToken))!.Status.Should().Be(ExpenseReportStatus.Draft);
     }
 
@@ -393,8 +494,8 @@ public sealed partial class ExpenseReportServiceTests
         _preapprovals.GetGrantAsync(grant.Id, Arg.Any<CancellationToken>())
             .Returns(grant with { Status = GrantStatus.Claimed });
         var failure = new InvalidOperationException("Private persistence failure");
-        _preapprovalWrites.ClaimAsync(grant.Id, id, actor, Arg.Any<CancellationToken>()).ThrowsAsync(failure);
-        _preapprovalWrites.ConsumeAsync(grant.Id, id, actor, Arg.Any<CancellationToken>()).ThrowsAsync(failure);
+        _preapprovalWrites.ClaimAsync(grant.Id, id, actor, Arg.Any<CancellationToken>(), Arg.Any<Action<Func<CancellationToken, Task>>?>()).ThrowsAsync(failure);
+        _preapprovalWrites.ConsumeAsync(grant.Id, id, actor, Arg.Any<CancellationToken>(), Arg.Any<Action<Func<CancellationToken, Task>>?>()).ThrowsAsync(failure);
 
         var result = approve
             ? await _sut.ApproveWithResultAsync(id, actor, null, null, TestContext.Current.CancellationToken)
@@ -416,7 +517,7 @@ public sealed partial class ExpenseReportServiceTests
         var grant = MakeGrant();
         var id = await CreateSubmittableGrantDraftAsync(submitter, grant);
         _preapprovals.GetGrantAsync(grant.Id, Arg.Any<CancellationToken>()).Returns(grant with { Status = GrantStatus.Claimed });
-        _preapprovalWrites.ClaimAsync(grant.Id, id, submitter, Arg.Any<CancellationToken>())
+        _preapprovalWrites.ClaimAsync(grant.Id, id, submitter, Arg.Any<CancellationToken>(), Arg.Any<Action<Func<CancellationToken, Task>>?>())
             .Returns(new PreapprovalWriteResult(Refusal: "Grant is already held by another expense report."));
 
         var result = await _sut.SubmitWithResultAsync(id, submitter, false, TestContext.Current.CancellationToken);
@@ -431,6 +532,7 @@ public sealed partial class ExpenseReportServiceTests
     [HumansFact]
     public async Task Approve_WithGrant_BlankCap_KeepsTheGrantsCurrentAmount_AndConsumesIt()
     {
+        var completed = TrackPreapprovalCompletions();
         SetupActiveYear();
         var actor = Guid.NewGuid();
         var grant = MakeGrant(maxAmount: 140m);
@@ -444,9 +546,10 @@ public sealed partial class ExpenseReportServiceTests
         var loaded = await _sut.GetAsync(id, TestContext.Current.CancellationToken);
         loaded!.Status.Should().Be(ExpenseReportStatus.Approved);
         loaded.MaxAmount.Should().Be(140m, "the grant's amount as it is now, not the stamp from submit");
-        await _preapprovalWrites.Received(1).ConsumeAsync(grant.Id, id, actor, Arg.Any<CancellationToken>());
+        await _preapprovalWrites.Received(1).ConsumeAsync(grant.Id, id, actor, Arg.Any<CancellationToken>(), Arg.Any<Action<Func<CancellationToken, Task>>?>());
         (await _expenseRepo.GetLatestOutboxForReportAsync(id, TestContext.Current.CancellationToken))
             .Should().NotBeNull("the Holded push is queued like any approval");
+        completed.Should().Equal(true);
     }
 
     [HumansFact]
@@ -477,7 +580,7 @@ public sealed partial class ExpenseReportServiceTests
 
         result.Succeeded.Should().BeFalse();
         result.Error!.OperatorMessage.Should().Contain("150.00");
-        await _preapprovalWrites.DidNotReceive().ConsumeAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>());
+        await _preapprovalWrites.DidNotReceive().ConsumeAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>(), Arg.Any<Action<Func<CancellationToken, Task>>?>());
         (await _sut.GetAsync(id, TestContext.Current.CancellationToken))!.Status.Should().Be(ExpenseReportStatus.Submitted);
     }
 
@@ -494,7 +597,7 @@ public sealed partial class ExpenseReportServiceTests
 
         result.Succeeded.Should().BeFalse();
         result.Error!.OperatorMessage.Should().Contain("locked");
-        await _preapprovalWrites.DidNotReceive().ConsumeAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>());
+        await _preapprovalWrites.DidNotReceive().ConsumeAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>(), Arg.Any<Action<Func<CancellationToken, Task>>?>());
         var loaded = await _sut.GetAsync(id, TestContext.Current.CancellationToken);
         loaded!.Status.Should().Be(ExpenseReportStatus.Submitted);
         loaded.HoldedAccountNumber.Should().Be(GrantAccountNumber);
@@ -522,7 +625,7 @@ public sealed partial class ExpenseReportServiceTests
         var id = Guid.NewGuid();
         await SeedGrantReportAsync(id, Guid.NewGuid(), grant.Id, ExpenseReportStatus.Submitted);
         _preapprovals.GetGrantAsync(grant.Id, Arg.Any<CancellationToken>()).Returns(grant with { Status = GrantStatus.Revoked });
-        _preapprovalWrites.ConsumeAsync(grant.Id, id, Arg.Any<Guid>(), Arg.Any<CancellationToken>())
+        _preapprovalWrites.ConsumeAsync(grant.Id, id, Arg.Any<Guid>(), Arg.Any<CancellationToken>(), Arg.Any<Action<Func<CancellationToken, Task>>?>())
             .Returns(new PreapprovalWriteResult(Refusal: "Grant was revoked."));
 
         var result = await _sut.ApproveWithResultAsync(id, Guid.NewGuid(), null, null, TestContext.Current.CancellationToken);
@@ -545,13 +648,14 @@ public sealed partial class ExpenseReportServiceTests
 
         result.Succeeded.Should().BeTrue();
         (await _sut.GetAsync(id, TestContext.Current.CancellationToken))!.Status.Should().Be(ExpenseReportStatus.Draft);
-        await _preapprovalWrites.DidNotReceive().ReleaseAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>());
-        await _preapprovalWrites.DidNotReceive().ConsumeAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>());
+        await _preapprovalWrites.DidNotReceive().ReleaseAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>(), Arg.Any<Action<Func<CancellationToken, Task>>?>());
+        await _preapprovalWrites.DidNotReceive().ConsumeAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>(), Arg.Any<Action<Func<CancellationToken, Task>>?>());
     }
 
     [HumansFact]
     public async Task Withdraw_BeforeApproval_ReleasesTheGrant()
     {
+        var completed = TrackPreapprovalCompletions();
         SetupActiveYear();
         var submitter = Guid.NewGuid();
         var grant = MakeGrant(status: GrantStatus.Claimed);
@@ -563,7 +667,8 @@ public sealed partial class ExpenseReportServiceTests
 
         result.Succeeded.Should().BeTrue(result.Error?.ResourceKey);
         (await _sut.GetAsync(id, TestContext.Current.CancellationToken))!.Status.Should().Be(ExpenseReportStatus.Withdrawn);
-        await _preapprovalWrites.Received(1).ReleaseAsync(grant.Id, id, submitter, Arg.Any<CancellationToken>());
+        await _preapprovalWrites.Received(1).ReleaseAsync(grant.Id, id, submitter, Arg.Any<CancellationToken>(), Arg.Any<Action<Func<CancellationToken, Task>>?>());
+        completed.Should().Equal(true);
     }
 
     [HumansFact]
@@ -580,7 +685,7 @@ public sealed partial class ExpenseReportServiceTests
         result.Succeeded.Should().BeFalse();
         result.Error!.ResourceKey.Should().Be("Expenses_Flash_WithdrawFailed");
         (await _sut.GetAsync(id, TestContext.Current.CancellationToken))!.Status.Should().Be(ExpenseReportStatus.Approved);
-        await _preapprovalWrites.DidNotReceive().ReleaseAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>());
+        await _preapprovalWrites.DidNotReceive().ReleaseAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>(), Arg.Any<Action<Func<CancellationToken, Task>>?>());
     }
 
     [HumansFact]
@@ -592,7 +697,7 @@ public sealed partial class ExpenseReportServiceTests
         var id = Guid.NewGuid();
         await SeedGrantReportAsync(id, submitter, grant.Id, ExpenseReportStatus.Submitted);
         _preapprovals.GetGrantAsync(grant.Id, Arg.Any<CancellationToken>()).Returns(grant);
-        _preapprovalWrites.ReleaseAsync(grant.Id, id, submitter, Arg.Any<CancellationToken>())
+        _preapprovalWrites.ReleaseAsync(grant.Id, id, submitter, Arg.Any<CancellationToken>(), Arg.Any<Action<Func<CancellationToken, Task>>?>())
             .Returns(new PreapprovalWriteResult(Refusal: "Grant is not held by this report."));
 
         var result = await _sut.WithdrawWithResultAsync(id, submitter, TestContext.Current.CancellationToken);
@@ -616,12 +721,13 @@ public sealed partial class ExpenseReportServiceTests
 
         result.Succeeded.Should().BeTrue(result.Error?.ResourceKey);
         (await _sut.GetAsync(id, TestContext.Current.CancellationToken))!.Status.Should().Be(ExpenseReportStatus.Withdrawn);
-        await _preapprovalWrites.DidNotReceive().ReleaseAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>());
+        await _preapprovalWrites.DidNotReceive().ReleaseAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>(), Arg.Any<Action<Func<CancellationToken, Task>>?>());
     }
 
     [HumansFact]
     public async Task UpdateDraft_RejectedDraft_DroppingTheClaimedGrant_ReleasesIt()
     {
+        var completed = TrackPreapprovalCompletions();
         SetupActiveYear();
         var submitter = Guid.NewGuid();
         var grant = MakeGrant(status: GrantStatus.Claimed);
@@ -634,7 +740,8 @@ public sealed partial class ExpenseReportServiceTests
 
         result.Succeeded.Should().BeTrue(result.Error?.ResourceKey);
         (await _sut.GetAsync(id, TestContext.Current.CancellationToken))!.PreapprovalGrantId.Should().BeNull();
-        await _preapprovalWrites.Received(1).ReleaseAsync(grant.Id, id, submitter, Arg.Any<CancellationToken>());
+        await _preapprovalWrites.Received(1).ReleaseAsync(grant.Id, id, submitter, Arg.Any<CancellationToken>(), Arg.Any<Action<Func<CancellationToken, Task>>?>());
+        completed.Should().Equal(true);
     }
 
     [HumansFact]
@@ -653,7 +760,7 @@ public sealed partial class ExpenseReportServiceTests
 
         result.Succeeded.Should().BeTrue(result.Error?.ResourceKey);
         (await _sut.GetAsync(id, TestContext.Current.CancellationToken))!.PreapprovalGrantId.Should().Be(other.Id);
-        await _preapprovalWrites.Received(1).ReleaseAsync(old.Id, id, submitter, Arg.Any<CancellationToken>());
+        await _preapprovalWrites.Received(1).ReleaseAsync(old.Id, id, submitter, Arg.Any<CancellationToken>(), Arg.Any<Action<Func<CancellationToken, Task>>?>());
     }
 
     [HumansFact]
@@ -670,7 +777,7 @@ public sealed partial class ExpenseReportServiceTests
         var result = await _sut.UpdateDraftWithResultAsync(id, submitter, false, 0, "Fixed the receipt", grant.Id, TestContext.Current.CancellationToken);
 
         result.Succeeded.Should().BeTrue(result.Error?.ResourceKey);
-        await _preapprovalWrites.DidNotReceive().ReleaseAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>());
+        await _preapprovalWrites.DidNotReceive().ReleaseAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>(), Arg.Any<Action<Func<CancellationToken, Task>>?>());
     }
 
     [HumansFact]
@@ -689,7 +796,7 @@ public sealed partial class ExpenseReportServiceTests
 
         result.Succeeded.Should().BeTrue(result.Error?.ResourceKey);
         (await _sut.GetAsync(id, TestContext.Current.CancellationToken))!.PreapprovalGrantId.Should().BeNull();
-        await _preapprovalWrites.DidNotReceive().ReleaseAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>());
+        await _preapprovalWrites.DidNotReceive().ReleaseAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>(), Arg.Any<Action<Func<CancellationToken, Task>>?>());
     }
 
     [HumansFact]
@@ -702,7 +809,7 @@ public sealed partial class ExpenseReportServiceTests
         await SeedGrantReportAsync(id, submitter, grant.Id, ExpenseReportStatus.Draft);
         _preapprovals.GetGrantAsync(grant.Id, Arg.Any<CancellationToken>()).Returns(grant);
         _preapprovals.ListClaimableForUserAsync(submitter, Arg.Any<CancellationToken>()).Returns([]);
-        _preapprovalWrites.ReleaseAsync(grant.Id, id, submitter, Arg.Any<CancellationToken>())
+        _preapprovalWrites.ReleaseAsync(grant.Id, id, submitter, Arg.Any<CancellationToken>(), Arg.Any<Action<Func<CancellationToken, Task>>?>())
             .Returns(new PreapprovalWriteResult(Refusal: "Grant is not held by this report."));
 
         var result = await _sut.UpdateDraftWithResultAsync(id, submitter, false, CategoryAccountNumber, null, null, TestContext.Current.CancellationToken);

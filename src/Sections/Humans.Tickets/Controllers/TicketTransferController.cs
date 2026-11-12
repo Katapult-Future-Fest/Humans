@@ -32,7 +32,7 @@ internal sealed class TicketTransferController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Confirm(Guid attendeeId, Guid receiverUserId, CancellationToken ct)
     {
-        var (errorResult, user) = await RequireCurrentUserAsync();
+        var (errorResult, user) = await RequireCurrentUserAsync(ct);
         if (errorResult is not null) return errorResult;
 
         var model = await BuildWizardAsync(user.Id, ct, (attendeeId, receiverUserId));
@@ -46,7 +46,7 @@ internal sealed class TicketTransferController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Submit(Guid attendeeId, Guid receiverUserId, string? reason, CancellationToken ct)
     {
-        var (errorResult, user) = await RequireCurrentUserAsync();
+        var (errorResult, user) = await RequireCurrentUserAsync(ct);
         if (errorResult is not null) return errorResult;
 
         var result = await service.CreateRequestAsync(
@@ -79,7 +79,7 @@ internal sealed class TicketTransferController(
         var earlyEntry = await earlyEntryService.GetForUserAsync(userId, ct);
         return new TicketTransferWizardViewModel
         {
-            MyTickets = mine,
+            MyTickets = mine.OrderBy(t => t.Ticket.AttendeeName, StringComparer.OrdinalIgnoreCase).ToList(),
             MyTransfers = transfers,
             HolderEarlyEntry = earlyEntry?.EarliestEntryDate,
             Confirm = confirm,
@@ -90,7 +90,7 @@ internal sealed class TicketTransferController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Cancel(Guid id, CancellationToken ct)
     {
-        var (errorResult, user) = await RequireCurrentUserAsync();
+        var (errorResult, user) = await RequireCurrentUserAsync(ct);
         if (errorResult is not null) return errorResult;
 
         var result = await service.CancelAsync(id, user.Id, ct);

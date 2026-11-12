@@ -41,7 +41,7 @@ public sealed class Section : ISection, ISectionAdminNav, ISectionConfiguration,
 
         services.AddSingleton<Services.IHoldedCallLog, Services.HoldedCallLog>();
 
-        services.AddHttpClient<IHoldedClient, Services.HoldedClient>((sp, client) =>
+        services.AddHttpClient<Services.IHoldedClient, Services.HoldedClient>((sp, client) =>
         {
             var opts = sp.GetRequiredService<IOptions<HoldedClientOptions>>().Value;
             client.BaseAddress = new Uri(opts.BaseUrl);
@@ -53,15 +53,21 @@ public sealed class Section : ISection, ISectionAdminNav, ISectionConfiguration,
         services.AddScoped<IHoldedService>(sp => sp.GetRequiredService<Services.Service>());
         services.AddScoped<Services.IHoldedAdminService>(sp => sp.GetRequiredService<Services.Service>());
 
+        services.AddScoped<IHoldedWrite, Services.HoldedWrite>();
+
         services.AddScoped<Services.IHoldedNightlySync, Services.HoldedNightlySync>();
 
         services.AddScoped<HoldedSyncJob>();
+        services.AddHostedService<HoldedMirrorCatchUp>();
     }
 
     IEnumerable<AdminNavGroup> ISectionAdminNav.Groups() =>
     [
         new("Holded", [
-            new("Holded", "Holded", "Index", null, null, "fa-solid fa-book", FinancePolicies.Read)
+            new("Summary", "Holded", "Index", null, null, "fa-solid fa-book", FinancePolicies.Read),
+            new("Accounts", "Holded", "Accounts", null, null, "fa-solid fa-list-ol", FinancePolicies.Read),
+            new("Purchases", "Holded", "Purchases", null, null, "fa-solid fa-file-invoice", FinancePolicies.Read),
+            new("API calls", "Holded", "Calls", null, null, "fa-solid fa-tower-broadcast", FinancePolicies.Read)
         ])
     ];
 

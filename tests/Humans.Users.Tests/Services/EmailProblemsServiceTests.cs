@@ -47,7 +47,6 @@ public sealed class EmailProblemsServiceTests : ServiceTestHarness
             BurnerName = "Test",
             FirstName = "Test",
             LastName = "User",
-            IsApproved = true,
             CreatedAt = Instant.FromUtc(2026, 1, 1, 0, 0),
             UpdatedAt = Instant.FromUtc(2026, 1, 1, 0, 0),
         };
@@ -74,7 +73,6 @@ public sealed class EmailProblemsServiceTests : ServiceTestHarness
                 BurnerName = "Test",
                 FirstName = "Test",
                 LastName = "User",
-                IsApproved = true,
                 CreatedAt = Instant.FromUtc(2026, 1, 1, 0, 0),
                 UpdatedAt = Instant.FromUtc(2026, 1, 1, 0, 0),
             }
@@ -82,13 +80,11 @@ public sealed class EmailProblemsServiceTests : ServiceTestHarness
         return UserInfoFactory.Create(
             user: user,
             userEmails: emails,
-            eventParticipations: [],
             externalLogins: [],
             profile: profile,
             contactFields: [],
             profileLanguages: [],
-            volunteerHistory: [],
-            communicationPreferences: []);
+            volunteerHistory: []);
     }
 
     private void AddInfo(UserInfo info)

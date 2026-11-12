@@ -18,7 +18,7 @@ Volunteers need to tell coordinators about their skills, work style preferences,
 This is the first of three related features:
 - **33 — Shift Preference Wizard** (this feature): Collect skills, work style, languages
 - **34 — Shift Recommendation Engine**: Fuzzy-match preferences against available shifts (not yet specced)
-- **[35 — Dietary Nudge](../../../Humans.Cantina/Docs/features/dietary-nudge.md)**: Collect dietary/allergy info (Cantina; medical is Users' own form) when a human signs up for a 6+ hour shift where the cantina provides meals (shipped — a full page, not a modal)
+- **[35 — Dietary Nudge](../../../Humans.Cantina/Docs/features/dietary-nudge.md)**: Ask for dietary/allergy info (Cantina; optional and never blocks a signup; medical is Users' own form) once a human has signed up for a 6+ hour shift where the cantina provides meals (shipped — a full page, not a modal)
 
 ## Authorization
 
@@ -104,7 +104,7 @@ The following fields are not editable on `/Shifts/ShiftInfo`; food answers live 
 
 Other skill/language text is optional and limited to 200 characters in the form and server validation. Invalid submissions redisplay the entered wizard with a visible validation summary and do not change the stored profile.
 
-Option labels and time-preference descriptions are localized in all six cultures. Language labels use the shared native-language names. Input values retain the existing English skill, quirk and language vocabulary; translations never change saved values.
+Option labels and time-preference descriptions are localized in all supported cultures. Language labels use the shared native-language names. Input values retain the existing English skill, quirk and language vocabulary; translations never change saved values.
 
 ## Step Content
 

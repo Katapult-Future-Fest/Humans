@@ -24,6 +24,7 @@ public sealed class Section : ISection, ISectionAdminNav, ISectionChrome, ISecti
         new("Debug", [
             new("Logs",          "Debug", "Logs",          null, null, "fa-solid fa-triangle-exclamation", PolicyNames.BoardOrAdmin, Weight: 0),
             new("HTTP errors",   "Debug", "HttpErrors",    null, null, "fa-solid fa-circle-exclamation",   PolicyNames.BoardOrAdmin, Weight: 10),
+            new("Database",      "Debug", "Database",      null, null, "fa-solid fa-server",               PolicyNames.BoardOrAdmin, Weight: 15),
             new("DB stats",      "Debug", "DbStats",       null, null, "fa-solid fa-database",             PolicyNames.BoardOrAdmin, Weight: 20),
             new("Cache stats",   "Debug", "CacheStats",    null, null, "fa-solid fa-bolt",                 PolicyNames.BoardOrAdmin, Weight: 30),
             new("Client stats",  "Debug", "ClientStats",   null, null, "fa-solid fa-display",              PolicyNames.BoardOrAdmin, Weight: 40),
@@ -55,7 +56,9 @@ public sealed class Section : ISection, ISectionAdminNav, ISectionChrome, ISecti
 
         var response = new DataMigrationsStatusResponse(
             AppVersion(),
-            [.. reports.Select(r => new DataMigrationProgress(r.Migration.Key, r.Status.Pending, r.Status.Done))]);
+            [.. reports.OrderBy(r => r.Migration.Section, StringComparer.Ordinal)
+                .ThenBy(r => r.Migration.Key, StringComparer.Ordinal)
+                .Select(r => new DataMigrationProgress(r.Migration.Key, r.Status.Pending, r.Status.Done))]);
 
         await http.Response.WriteAsJsonAsync(response, http.RequestAborted);
     }

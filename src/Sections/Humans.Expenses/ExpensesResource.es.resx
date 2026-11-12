@@ -149,7 +149,6 @@
   <data name="Expenses_Flash_InvalidApprovalInput" xml:space="preserve"><value>Datos de aprobación no válidos.</value></data>
   <!-- Submitter expense-edit page -->
   <data name="Expenses_EditReport" xml:space="preserve"><value>Editar informe de gastos</value></data>
-  <data name="Expenses_BreadcrumbNavigation" xml:space="preserve"><value>Migas de pan</value></data>
   <data name="Expenses_Edit" xml:space="preserve"><value>Editar</value></data>
   <data name="Expenses_ReportHeader" xml:space="preserve"><value>Cabecera del informe</value></data>
   <data name="Expenses_BudgetCategory" xml:space="preserve"><value>Categoría presupuestaria</value></data>
@@ -306,4 +305,6 @@
   <data name="Expenses_SubjectHelp" xml:space="preserve"><value>Obligatorio. Indica el nombre del proyecto al que corresponde este gasto, p. ej. el de tu proyecto artístico.</value></data>
   <data name="Expenses_Validation_SubjectRequired" xml:space="preserve"><value>Añade un asunto (el nombre del proyecto) antes de enviar.</value></data>
   <data name="Expenses_Validation_AmountPrecision" xml:space="preserve"><value>Introduce un importe con un máximo de dos decimales.</value></data>
+  <data name="Expenses_Flash_DraftSavedFollowupFailed" xml:space="preserve"><value>El borrador se guardó, pero no se pudo completar la solicitud. Revísalo antes de continuar.</value></data>
+  <data name="Expenses_Flash_DraftOutcomeUnknown" xml:space="preserve"><value>No se pudo confirmar si el borrador se guardó. Revisa los informes existentes antes de crear otro borrador.</value></data>
 </root>

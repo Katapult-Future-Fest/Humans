@@ -1,7 +1,13 @@
 using Humans.Base.Authorization;
+using Humans.Base.Constants;
 using Humans.Base.Hosting;
 using Humans.Base.Interfaces;
+using Humans.Base.Models.Tables;
 using Humans.Email.Contracts;
+using Humans.Teams.Contracts;
+using Humans.Governance.Contracts;
+using Humans.Tickets.Contracts;
+using Humans.Shifts.Contracts;
 using Humans.Gdpr.Contracts;
 using Humans.Surveys.Authorization;
 using Humans.Surveys.Contracts;
@@ -16,17 +22,37 @@ using Humans.AuditLog.Contracts;
 
 namespace Humans.Surveys;
 
-public sealed class Section : ISection, ISectionAdminNav, ISectionJobs
+public sealed class Section : ISection, ISectionRoles, ISectionAdminNav, ISectionPolicies, ISectionJobs
 {
+    IReadOnlyList<RoleDefinition> ISectionRoles.Roles { get; } =
+    [
+        new(SurveysRoles.SurveysAdmin, "Surveys Admin",
+            "Survey stewards. They approve or reject submitted surveys, edit any survey, open and close them, send the invitations, and read every survey's results.",
+            "fa-solid fa-square-poll-vertical"),
+    ];
+
     public void Register(IServiceCollection services, IConfiguration configuration)
     {
         services.AddSingleton<IAuditActionContributor, SurveysAuditActions>();
+
+        EnumBadgeMap.Register(new Dictionary<Enum, string>
+        {
+            [SurveyStatus.Draft] = "bg-warning text-dark",
+            [SurveyStatus.Open] = "bg-success",
+            [SurveyStatus.Closed] = "bg-secondary",
+            [SurveyStatus.PendingApproval] = "bg-info text-dark",
+        });
         services.AddSectionDbContext<SurveysDbContext>(sentinelTable: "surveys");
 
         services.AddSingleton<ISurveyRepository, SurveyRepository>();   // IDbContextFactory ⇒ Singleton-safe
         services.AddScoped<SurveyService>();
         services.AddScoped<ISurveyService>(sp => sp.GetRequiredService<SurveyService>());
-        services.AddScoped<ISurveyReminderSender, SurveyReminderSender>();
+        services.AddScoped(sp => new SurveyAudience(
+            sp.GetRequiredService<ITeamService>(), sp.GetRequiredService<IUserService>(),
+            sp.GetRequiredService<IGovernanceService>(), sp.GetRequiredService<ITicketService>(),
+            sp.GetRequiredService<IShiftView>(), sp.GetRequiredService<ILogger<SurveyService>>()));
+        services.AddScoped<SurveyInvitationDelivery>();
+        services.AddScoped<ISurveyReminderSender>(sp => sp.GetRequiredService<SurveyInvitationDelivery>());
         services.AddScoped<ISurveyAnalysisRead>(sp => sp.GetRequiredService<SurveyService>());
         services.AddScoped<IUserDataContributor>(sp => sp.GetRequiredService<SurveyService>());
         services.AddScoped<IUserMerge>(sp => sp.GetRequiredService<SurveyService>());
@@ -42,13 +68,21 @@ public sealed class Section : ISection, ISectionAdminNav, ISectionJobs
         services.AddSingleton<IAuthorizationHandler, SurveyAuthorizationHandler>();
     }
 
+    void ISectionPolicies.AddPolicies(AuthorizationOptions options)
+    {
+        options.AddPolicy(SurveysPolicies.Read, policy =>
+            policy.RequireRole(SurveysRoles.SurveysAdmin, RoleNames.Board, RoleNames.Admin));
+        options.AddPolicy(SurveysPolicies.Manage, policy =>
+            policy.RequireRole(SurveysRoles.SurveysAdmin, RoleNames.Admin));
+    }
+
     IEnumerable<AdminNavGroup> ISectionAdminNav.Groups() =>
     [
         new("Surveys", [
             // App access, not Board: authoring is self-service and the index is scoped to what the viewer authored,
             // so a Board gate would leave authors with a page they may use and no way to reach it.
             new("Surveys", "SurveyAdmin", "Index", null, null, "fa-solid fa-square-poll-vertical", PolicyNames.AppAccess),
-            new("Approvals", "SurveyAdmin", "Queue", null, null, "fa-solid fa-square-poll-vertical", PolicyNames.BoardOrAdmin,
+            new("Approvals", "SurveyAdmin", "Queue", null, null, "fa-solid fa-square-poll-vertical", SurveysPolicies.Read,
                 PillCount: PillCounts.PendingApprovalQueueAsync)
         ])
     ];

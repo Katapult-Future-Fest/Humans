@@ -25,19 +25,16 @@
     }
 }
 
-<nav aria-label="@Localizer["Governance_BreadcrumbNavigation"]">
-    <ol class="breadcrumb">
-        <li class="breadcrumb-item"><a asp-controller="Governance" asp-action="Index">@Localizer["Governance_Title"]</a></li>
-        <li class="breadcrumb-item"><a asp-action="Index">@Localizer["Governance_Votes_Title"]</a></li>
-        <li class="breadcrumb-item"><a asp-action="Details" asp-route-voteId="@vote.Id">@vote.Title</a></li>
-        <li class="breadcrumb-item active" aria-current="page">@Localizer["Governance_Votes_ResultsHeading"]</li>
-    </ol>
-</nav>
+@section Crumbs {
+    <a asp-controller="Governance" asp-action="Index">@Localizer["Governance_Title"]</a>
+    <a asp-action="Index">@Localizer["Governance_Votes_Title"]</a>
+    <a asp-action="Details" asp-route-voteId="@vote.Id">@vote.Title</a>
+    <span>@Localizer["Governance_Votes_ResultsHeading"]</span>
+}
 
-<div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
-    <h1 class="mb-0">@vote.Title</h1>
+<page-header title="@vote.Title">
     <span class="badge @EnumBadgeMap.For(vote.Status)">@Localizer["Governance_Votes_Status_" + vote.Status]</span>
-</div>
+</page-header>
 
 <p class="text-muted">@Localizer["Governance_Votes_Method_" + results.Result.Method]</p>
 
@@ -174,7 +171,7 @@
     <div class="card-body">
         @if (results.Peeks.Count == 0)
         {
-            <p class="text-muted mb-0">@Localizer["Governance_Votes_PeeksEmpty"]</p>
+            <empty-state class="mb-0">@Localizer["Governance_Votes_PeeksEmpty"]</empty-state>
         }
         else
         {
@@ -190,7 +187,7 @@
                         @foreach (var peek in results.Peeks)
                         {
                             <tr>
-                                <td>@peek.AdminName</td>
+                                <td><vc:human user-id="@peek.AdminUserId" link="None" /></td>
                                 <td>@peek.PeekedAt.ToDateTime(madridZone)</td>
                             </tr>
                         }
@@ -235,10 +232,19 @@
                         </tr>
                     </thead>
                     <tbody>
-                        @foreach (var row in disclosed)
+                        @foreach (var row in disclosed.OrderByDescending(r => r.IsOfficial).ThenBy(r => r.DisplayName, StringComparer.CurrentCulture))
                         {
                             <tr>
-                                <td>@row.DisplayName</td>
+                                <td>
+                                    @if (row.UserId is { } userId)
+                                    {
+                                        <vc:human user-id="@userId" link="None" />
+                                    }
+                                    else
+                                    {
+                                        <text>—</text>
+                                    }
+                                </td>
                                 <td>@(row.IsOfficial ? Localizer["Governance_Votes_AudienceOfficial"] : Localizer["Governance_Votes_AudienceIndicative"])</td>
                                 <td>
                                     @Localizer["Governance_Votes_Choice_" + row.Choice]

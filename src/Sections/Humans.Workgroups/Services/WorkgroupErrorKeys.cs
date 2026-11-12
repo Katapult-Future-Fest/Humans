@@ -15,6 +15,7 @@ internal static class WorkgroupErrorKeys
     public const string PurposeRequired = "Workgroups_Error_PurposeRequired";
     public const string DeliverableRequired = "Workgroups_Error_DeliverableRequired";
     public const string DiscordUrlInvalid = "Workgroups_Error_DiscordUrlInvalid";
+    public const string LocationUrlInvalid = "Workgroups_Error_LocationUrlInvalid";
     public const string ReasonsRequired = "Workgroups_Error_ReasonsRequired";
     public const string NameTaken = "Workgroups_Error_NameTaken";
     public const string CoordinatorCount = "Workgroups_Error_CoordinatorCount";
@@ -36,6 +37,7 @@ internal static class WorkgroupErrorKeys
 
     public const string SurveyNotYours = "Workgroups_Error_SurveyNotYours";
     public const string WindowInvalid = "Workgroups_Error_WindowInvalid";
+    public const string RecurrenceInvalid = "Workgroups_Error_RecurrenceInvalid";
     public const string CommentsClosed = "Workgroups_Error_CommentsClosed";
     public const string CommentsStillOpen = "Workgroups_Error_CommentsStillOpen";
     public const string UnknownCategory = "Workgroups_Error_UnknownCategory";

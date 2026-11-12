@@ -5,7 +5,6 @@ using Humans.Settings.Contracts;
 using Humans.Shifts.Contracts;
 using Humans.Teams.Contracts;
 using Humans.Users.Contracts;
-using Microsoft.AspNetCore.Identity;
 using Microsoft.Extensions.Logging.Abstractions;
 using NodaTime;
 using NodaTime.Testing;
@@ -15,8 +14,10 @@ namespace Humans.Development.Tests;
 
 public class DevelopmentDashboardSeederTests
 {
-    [HumansFact]
-    public async Task Seed_CreatesNamedProfilesBeforeSelfSignups()
+    [HumansTheory]
+    [Xunit.InlineData(false)]
+    [Xunit.InlineData(true)]
+    public async Task Seed_CreatesNamedProfilesBeforeSelfSignups_AndPropagatesCoordinatorFailures(bool membershipFails)
     {
         var now = Instant.FromUtc(2026, 9, 16, 12, 0);
         var shifts = Substitute.For<IShiftSeeding>();
@@ -33,21 +34,22 @@ public class DevelopmentDashboardSeederTests
                 true, false, SystemTeamType.None, true, false, false, false, now, [],
                 ParentTeamId: call.ArgAt<Guid?>(3)));
 
-        var userManager = Substitute.For<UserManager<User>>(
-            Substitute.For<IUserStore<User>>(), null, null, null, null, null, null, null, null);
-        var storedStates = new Dictionary<Guid, UserState>();
-        userManager.CreateAsync(Arg.Any<User>()).Returns(call =>
-        {
-            var user = call.Arg<User>();
-            storedStates.Add(user.Id, user.State);
-            return IdentityResult.Success;
-        });
-        userManager.UpdateAsync(Arg.Any<User>()).Returns(call =>
-        {
-            var user = call.Arg<User>();
-            storedStates[user.Id] = user.State;
-            return IdentityResult.Success;
-        });
+        var memberships = new HashSet<(Guid TeamId, Guid UserId)>();
+        var failure = new InvalidOperationException("Membership dependency failed");
+        teams.AddSeededMemberAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<TeamMemberRole>(),
+                Arg.Any<Instant>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                if (membershipFails) throw failure;
+                memberships.Add((call.ArgAt<Guid>(0), call.ArgAt<Guid>(1))).Should().BeTrue(
+                    "duplicate coordinator picks must be removed before writing membership");
+                return Task.CompletedTask;
+            });
+
+        var provisioning = Substitute.For<IAccountProvisioningService>();
+        var created = new List<Guid>();
+        provisioning.CreateAccountAsync(Arg.Do<Guid>(created.Add), Arg.Any<string>(), Arg.Any<Instant>(), Arg.Any<Instant?>())
+            .Returns(Array.Empty<string>());
 
         var profiles = new Dictionary<Guid, ProfileSaveRequest>();
         var profileEditor = Substitute.For<IProfileEditorService>();
@@ -55,7 +57,6 @@ public class DevelopmentDashboardSeederTests
             .Returns(call =>
             {
                 profiles.Add(call.Arg<Guid>(), call.Arg<ProfileSaveRequest>());
-                storedStates[call.Arg<Guid>()] = UserState.Active;
                 return new ProfileEditResult(true, Guid.NewGuid());
             });
 
@@ -66,7 +67,6 @@ public class DevelopmentDashboardSeederTests
             {
                 var userId = call.ArgAt<Guid>(0);
                 profiles.Should().ContainKey(userId, "the normal profile save must precede self-signup");
-                storedStates[userId].Should().Be(UserState.Active);
                 selfSignupUsers.Add(userId);
                 return SignupResult.Ok(Guid.NewGuid());
             });
@@ -84,15 +84,24 @@ public class DevelopmentDashboardSeederTests
         var sut = new DevelopmentDashboardSeeder(
             shifts, Substitute.For<ISettingsService>(), eventSettingsSeeding, signups,
             Substitute.For<ITeamService>(), Substitute.For<ITeamWrite>(), teams, userEmails,
-            Substitute.For<IUserWrite>(), profileEditor, userManager, new FakeClock(now),
+            Substitute.For<IUserWrite>(), profileEditor, provisioning, new FakeClock(now),
             NullLogger<DevelopmentDashboardSeeder>.Instance);
+
+        if (membershipFails)
+        {
+            var seed = () => sut.SeedAsync(Xunit.TestContext.Current.CancellationToken);
+            (await seed.Should().ThrowAsync<InvalidOperationException>()).Which.Should().BeSameAs(failure);
+            profiles.Should().BeEmpty();
+            selfSignupUsers.Should().BeEmpty();
+            return;
+        }
 
         var result = await sut.SeedAsync(Xunit.TestContext.Current.CancellationToken);
 
+        memberships.Should().NotBeEmpty();
         selfSignupUsers.Should().NotBeEmpty();
         profiles.Should().HaveCount(result.UsersCreated);
-        storedStates.Values.Should().OnlyContain(state => state == UserState.Active,
-            "later writes of the original Identity entity must not undo profile-derived state");
+        profiles.Keys.Should().BeEquivalentTo(created);
         profiles.Values.Should().AllSatisfy(profile =>
         {
             profile.BurnerName.Should().NotBeNullOrWhiteSpace();
@@ -101,7 +110,7 @@ public class DevelopmentDashboardSeederTests
         });
         await eventSettingsSeeding.Received().CreateActiveEventAsync(
             Arg.Is<EventSettingsInfo>(settings =>
-                settings.BuildStartOffset <= settings.FirstCrewStartOffset),
+                settings.BuildStartOffset == -25),
             Arg.Any<CancellationToken>());
     }
 
@@ -131,10 +140,9 @@ public class DevelopmentDashboardSeederTests
                 true, false, SystemTeamType.None, true, false, false, false, now, [],
                 ParentTeamId: call.ArgAt<Guid?>(3)));
 
-        var userManager = Substitute.For<UserManager<User>>(
-            Substitute.For<IUserStore<User>>(), null, null, null, null, null, null, null, null);
-        userManager.CreateAsync(Arg.Any<User>()).Returns(IdentityResult.Success);
-        userManager.UpdateAsync(Arg.Any<User>()).Returns(IdentityResult.Success);
+        var provisioning = Substitute.For<IAccountProvisioningService>();
+        provisioning.CreateAccountAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<Instant>(), Arg.Any<Instant?>())
+            .Returns(Array.Empty<string>());
 
         var profileEditor = Substitute.For<IProfileEditorService>();
         profileEditor.SaveProfileAsync(Arg.Any<Guid>(), Arg.Any<ProfileSaveRequest>(), Arg.Any<CancellationToken>())
@@ -156,7 +164,7 @@ public class DevelopmentDashboardSeederTests
         var sut = new DevelopmentDashboardSeeder(
             shifts, store, store, signups,
             Substitute.For<ITeamService>(), Substitute.For<ITeamWrite>(), teams, userEmails,
-            Substitute.For<IUserWrite>(), profileEditor, userManager, new FakeClock(now),
+            Substitute.For<IUserWrite>(), profileEditor, provisioning, new FakeClock(now),
             NullLogger<DevelopmentDashboardSeeder>.Instance);
 
         var firstSeed = await sut.SeedAsync(Xunit.TestContext.Current.CancellationToken);
@@ -179,6 +187,9 @@ public class DevelopmentDashboardSeederTests
 
         public Task SetValueAsync(string key, string value, CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
+
+        public Task<string> GetTimeZoneIdAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult("Europe/Madrid");
 
         public Task<EventSettingsInfo?> GetActiveEventSettingsAsync(CancellationToken cancellationToken = default) =>
             Task.FromResult(_events.Values.FirstOrDefault(e => e.Status == EventSettingsStatus.Active));

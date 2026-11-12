@@ -10,7 +10,7 @@ risks creating misleading invitation/funnel data and makes authoring unnecessari
 
 ### Preview a survey
 
-- A Board or Admin can open Preview from the survey list, builder, or Send page.
+- A Surveys Admin, Board or Admin can open Preview from the survey list, builder, or Send page.
 - Preview opens in a new browser tab from those entry points.
 - Draft, Open, and Closed surveys can all be previewed.
 - The preview reuses the respondent intro, question-page, grid, and thank-you views.
@@ -31,7 +31,7 @@ risks creating misleading invitation/funnel data and makes authoring unnecessari
 
 ### Send a preview email to myself
 
-- A Board or Admin can queue a preview email from the Send page or from the preview notice shown on
+- A Surveys Admin, Board or Admin can queue a preview email from the Send page or from the preview notice shown on
   the intro, question, and thank-you pages.
 - The recipient is the currently authenticated user's canonical notification email.
 - The message uses the same localized survey-invitation template, authored custom subject/message
@@ -44,7 +44,7 @@ risks creating misleading invitation/funnel data and makes authoring unnecessari
 
 ## Authorization and routes
 
-All preview rendering and send actions are under the existing `BoardOrAdmin`-protected
+All preview rendering and send actions are under `SurveyOperation.Preview` (the author, or Surveys Admin, Board and Admin) on
 `SurveyAdminController`:
 
 - `GET /Survey/Admin/Preview/{id}`
@@ -55,7 +55,7 @@ All preview rendering and send actions are under the existing `BoardOrAdmin`-pro
 
 The regular `/Survey/Answer?t=...` entry route recognizes a distinct, seven-day Data Protection
 preview token and redirects to the protected preview route. The redirect does not grant access:
-unauthenticated or unauthorized visitors must still pass the normal Board/Admin authorization policy.
+unauthenticated or unauthorized visitors must still pass the normal Preview authorization.
 
 ## Data model and side effects
 

@@ -44,12 +44,12 @@ internal sealed class EventsApiController(
 
         var excludedSlugs = await GetExcludedSlugsAsync(ct);
         var events = await guide.GetApprovedEventsAsync(barrioId, null, null, q, excludedSlugs, ct);
-        var campsById = await LoadCampsByIdAsync(camps, gateOpeningDate?.Year, ct);
+        var campsById = await LoadCampsByIdAsync(camps, eventSettings?.Id, ct);
         var submitterInfoById = await EventsLookupHelpers.LoadSubmittersAsync(
             UserService, events.Where(e => e.CampId == null).Select(e => e.SubmitterUserId).Distinct(), ct);
 
         var results = new List<GuideEventApiDto>();
-        foreach (var e in events)
+        foreach (var e in events.OrderBy(e => e.StartAt))
         {
             if (categorySlug != null && !string.Equals(e.CategorySlug, categorySlug, StringComparison.OrdinalIgnoreCase))
                 continue;
@@ -81,7 +81,7 @@ internal sealed class EventsApiController(
         if (e == null) return NotFound();
 
         var gateOpeningDate = eventSettings?.GateOpeningDate;
-        var campsById = await LoadCampsByIdAsync(camps, gateOpeningDate?.Year, ct);
+        var campsById = await LoadCampsByIdAsync(camps, eventSettings?.Id, ct);
         var campName = ResolveCampNameById(e.CampId, campsById);
         var submitterName = e.CampId == null
             ? (await UserService.GetUserInfoAsync(e.SubmitterUserId, ct))?.BurnerName
@@ -97,11 +97,12 @@ internal sealed class EventsApiController(
         var ct = HttpContext.RequestAborted;
         var guideSettings = await guide.GetGuideSettingsAsync(ct);
         var eventSettings = await LoadBurnSettingsAsync(guide, guideSettings, ct);
-        var campsById = await LoadCampsByIdAsync(camps, eventSettings?.GateOpeningDate.Year, ct);
+        var campsById = await LoadCampsByIdAsync(camps, eventSettings?.Id, ct);
 
         var events = await guide.GetApprovedEventsAsync(null, null, null, null, [], ct);
         var barrioGroups = events
             .Where(e => e.CampId.HasValue)
+            .OrderBy(e => e.StartAt)
             .GroupBy(e => e.CampId!.Value)
             .Select(g =>
             {
@@ -129,7 +130,7 @@ internal sealed class EventsApiController(
         var events = await guide.GetApprovedEventsAsync(id, null, null, null, [], ct);
         if (!events.Any()) return NotFound();
 
-        var campsById = await LoadCampsByIdAsync(camps, gateOpeningDate?.Year, ct);
+        var campsById = await LoadCampsByIdAsync(camps, eventSettings?.Id, ct);
         var camp = campsById.GetValueOrDefault(id);
         var campName = ResolveCampName(camp);
 
@@ -137,7 +138,7 @@ internal sealed class EventsApiController(
             id,
             campName,
             camp?.Slug,
-            events.Select(e =>
+            events.OrderBy(e => e.StartAt).Select(e =>
             {
                 var dayOffset = ComputeDayOffset(e.StartAt, gateOpeningDate, tz);
                 // Barrio detail returns this camp's events only — host is always the camp's own value.
@@ -151,7 +152,7 @@ internal sealed class EventsApiController(
     {
         var ct = HttpContext.RequestAborted;
         var categories = await guide.GetActiveCategoriesAsync(ct);
-        return Ok(categories.Select(c => new GuideCategoryApiDto(
+        return Ok(categories.OrderBy(c => c.DisplayOrder).Select(c => new GuideCategoryApiDto(
             c.Id,
             c.Name,
             c.Slug,
@@ -165,10 +166,10 @@ internal sealed class EventsApiController(
     public async Task<IActionResult> GetPreferences()
     {
         var ct = HttpContext.RequestAborted;
-        var userId = GetCurrentUserId();
-        if (userId == null) return Unauthorized();
+        var user = await GetCurrentUserInfoAsync(HttpContext.RequestAborted);
+        if (user is null) return Unauthorized();
 
-        var slugs = await guide.GetExcludedCategorySlugsAsync(userId.Value, ct);
+        var slugs = await guide.GetExcludedCategorySlugsAsync(user.Id, ct);
         return Ok(new { excludedCategorySlugs = slugs });
     }
 
@@ -177,10 +178,10 @@ internal sealed class EventsApiController(
     [HttpPut("preferences")]
     public async Task<IActionResult> UpdatePreferences([FromBody] UpdatePreferencesRequest request)
     {
-        var userId = GetCurrentUserId();
-        if (userId == null) return Unauthorized();
+        var user = await GetCurrentUserInfoAsync(HttpContext.RequestAborted);
+        if (user is null) return Unauthorized();
 
-        var activeCategories = await guide.GetActiveCategoriesAsync();
+        var activeCategories = await guide.GetActiveCategoriesAsync(HttpContext.RequestAborted);
         var activeSlugs = activeCategories.Select(c => c.Slug).ToList();
         var invalidSlugs = request.ExcludedCategorySlugs
             .Where(s => !activeSlugs.Contains(s, StringComparer.OrdinalIgnoreCase))
@@ -189,7 +190,7 @@ internal sealed class EventsApiController(
         if (invalidSlugs.Count > 0)
             return BadRequest(new { error = $"Invalid category slugs: {string.Join(", ", invalidSlugs)}" });
 
-        await guide.SavePreferenceAsync(userId.Value, request.ExcludedCategorySlugs);
+        await guide.SavePreferenceAsync(user.Id, request.ExcludedCategorySlugs);
         return Ok(new { excludedCategorySlugs = request.ExcludedCategorySlugs });
     }
 
@@ -204,16 +205,16 @@ internal sealed class EventsApiController(
     public async Task<IActionResult> GetFavourites()
     {
         var ct = HttpContext.RequestAborted;
-        var userId = GetCurrentUserId();
-        if (userId == null) return Unauthorized();
+        var user = await GetCurrentUserInfoAsync(HttpContext.RequestAborted);
+        if (user is null) return Unauthorized();
 
         var guideSettings = await guide.GetGuideSettingsAsync(ct);
         var eventSettings = await LoadBurnSettingsAsync(guide, guideSettings, ct);
         var tz = GetTimeZone(eventSettings);
         var gateOpeningDate = eventSettings?.GateOpeningDate;
 
-        var favourites = await guide.GetFavouritesWithEventsAsync(userId.Value, ct);
-        var campsById = await LoadCampsByIdAsync(camps, gateOpeningDate?.Year, ct);
+        var favourites = await guide.GetFavouritesWithEventsAsync(user.Id, ct);
+        var campsById = await LoadCampsByIdAsync(camps, eventSettings?.Id, ct);
         var submitterInfoById = await EventsLookupHelpers.LoadSubmittersAsync(
             UserService, favourites.Where(f => f.Event.CampId == null).Select(f => f.Event.SubmitterUserId).Distinct(), ct);
         var results = favourites.SelectMany(f =>
@@ -239,24 +240,24 @@ internal sealed class EventsApiController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> AddFavourite(Guid eventId, int? day)
     {
-        var userId = GetCurrentUserId();
-        if (userId == null) return Unauthorized();
+        var user = await GetCurrentUserInfoAsync(HttpContext.RequestAborted);
+        if (user is null) return Unauthorized();
 
-        try
+        var outcome = await guide.AddFavouriteAsync(user.Id, eventId, day);
+        switch (outcome)
         {
-            var added = await guide.AddFavouriteAsync(userId.Value, eventId, day);
-            if (!added) return Conflict(new { error = "Already favourited" });
-            return Ok(new { favourited = true });
-        }
-        catch (KeyNotFoundException ex)
-        {
-            logger.LogWarning("Rejected favourite for user {UserId} event {EventId}: {Reason}", userId, eventId, ex.Message);
-            return NotFound();
-        }
-        catch (ArgumentOutOfRangeException ex)
-        {
-            logger.LogWarning("Rejected favourite for user {UserId} event {EventId} day {Day}: {Reason}", userId, eventId, day, ex.Message);
-            return BadRequest();
+            case AddFavouriteOutcome.Added:
+                return Ok(new { favourited = true });
+            case AddFavouriteOutcome.AlreadyExists:
+                return Conflict(new { error = "Already favourited" });
+            case AddFavouriteOutcome.EventUnavailable:
+                logger.LogWarning("Rejected favourite for user {UserId}: event {EventId} is unavailable", user.Id, eventId);
+                return NotFound();
+            case AddFavouriteOutcome.InvalidDay:
+                logger.LogWarning("Rejected favourite for user {UserId} event {EventId}: day {Day} is not an occurrence", user.Id, eventId, day);
+                return BadRequest();
+            default:
+                throw new InvalidOperationException($"Unexpected favourite outcome {outcome}.");
         }
     }
 
@@ -266,19 +267,19 @@ internal sealed class EventsApiController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> RemoveFavourite(Guid eventId, int? day)
     {
-        var userId = GetCurrentUserId();
-        if (userId == null) return Unauthorized();
+        var user = await GetCurrentUserInfoAsync(HttpContext.RequestAborted);
+        if (user is null) return Unauthorized();
 
-        var removed = await guide.RemoveFavouriteAsync(userId.Value, eventId, day);
+        var removed = await guide.RemoveFavouriteAsync(user.Id, eventId, day);
         if (!removed) return NotFound();
         return Ok(new { unfavourited = true });
     }
 
     private async Task<List<string>> GetExcludedSlugsAsync(CancellationToken ct)
     {
-        var userId = GetCurrentUserId();
-        if (userId == null) return [];
-        return await guide.GetExcludedCategorySlugsAsync(userId.Value, ct);
+        var user = await GetCurrentUserInfoAsync(ct);
+        if (user is null) return [];
+        return await guide.GetExcludedCategorySlugsAsync(user.Id, ct);
     }
 
     private static string? ResolveCampNameById(Guid? campId, IReadOnlyDictionary<Guid, CampInfo> campsById)

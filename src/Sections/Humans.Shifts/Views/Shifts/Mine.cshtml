@@ -5,31 +5,6 @@
     var tz = Model.EventSettings != null ? DateTimeZoneProviders.Tzdb[Model.EventSettings.TimeZoneId] : null;
 }
 
-@functions {
-    string GetPhase(Shift shift, BurnSettingsInfo es)
-    {
-        var period = shift.GetShiftPeriod(es);
-        return period switch
-        {
-            ShiftPeriod.Build => SharedLocalizer["Shifts_SetUp"].Value,
-            ShiftPeriod.Event => SharedLocalizer["Shifts_Event"].Value,
-            ShiftPeriod.Strike => SharedLocalizer["Shifts_Strike"].Value,
-            _ => ""
-        };
-    }
-
-    string GetPhaseBadge(Shift shift, BurnSettingsInfo es)
-    {
-        var period = shift.GetShiftPeriod(es);
-        return period switch
-        {
-            ShiftPeriod.Build => "bg-info",
-            ShiftPeriod.Event => "bg-success",
-            _ => "bg-secondary"
-        };
-    }
-}
-
 <div class="container py-4">
     <div class="mb-3">
         <ul class="nav nav-tabs shifts-nav-tabs border-0" role="tablist">
@@ -41,7 +16,6 @@
             </li>
         </ul>
     </div>
-
 
     <vc:dietary-missing-banner user-id="@Model.UserId" />
 
@@ -96,7 +70,7 @@
                             var bailLocked = block.Any(b => b.BailLocked);
                             <div class="d-flex justify-content-between align-items-center border-bottom py-2">
                                 <div>
-                                    <span class="badge @GetPhaseBadge(shift, es) me-1">@GetPhase(shift, es)</span>
+                                    <status-badge value="@shift.GetShiftPeriod(es)" text="@ShiftDisplayItem.PeriodLabel(shift.GetShiftPeriod(es), SharedLocalizer)" class="me-1" />
                                     <strong>@shift.Rota.Name</strong> —
                                     @es.GateOpeningDate.PlusDays(first.Signup.Shift.DayOffset).ToWeekdayDayMonth() to @es.GateOpeningDate.PlusDays(last.Signup.Shift.DayOffset).ToWeekdayDayMonth()
                                     <small class="text-muted">(@block.Count() days)</small>
@@ -126,7 +100,7 @@
                     @if (individualItems.Count > 0)
                     {
                         Func<MySignupItem, IHtmlContent> upcomingPhaseCell = @<text>
-                            <span class="badge @GetPhaseBadge(item.Signup.Shift, es)">@GetPhase(item.Signup.Shift, es)</span>
+                            <status-badge value="@item.Signup.Shift.GetShiftPeriod(es)" text="@ShiftDisplayItem.PeriodLabel(item.Signup.Shift.GetShiftPeriod(es), SharedLocalizer)" />
                         </text>;
                         Func<MySignupItem, IHtmlContent> upcomingActionCell = @<text>
                             @if (item.BailLocked)
@@ -151,7 +125,7 @@
                             .Column(Localizer["Shifts_Department"].Value, r => r.DepartmentName)
                             .Column(Localizer["Shifts_Shift"].Value, r => r.Signup.Shift.Rota.Name)
                             .Template(Localizer["Shifts_Phase"].Value, upcomingPhaseCell)
-                            .Column(Localizer["Shifts_Date"].Value, r => es.GateOpeningDate.PlusDays(r.Signup.Shift.DayOffset).ToWeekdayDayMonth())
+                            .Column(Localizer["Shifts_Date"].Value, r => es.GateOpeningDate.PlusDays(r.Signup.Shift.DayOffset).ToWeekdayDayMonth(), c => c.Css("text-nowrap"))
                             .Column(Localizer["Shifts_Time"].Value, r => r.AbsoluteStart.ToTime(tz!))
                             .Column(Localizer["Shifts_Duration"].Value, r => r.Signup.Shift.Duration.TotalHours + "h")
                             .Template("", upcomingActionCell, c => c.NoSort())
@@ -175,7 +149,7 @@
                 <div class="card-body">
                     @{
                         Func<MySignupItem, IHtmlContent> pendingPhaseCell = @<text>
-                            <span class="badge @GetPhaseBadge(item.Signup.Shift, es)">@GetPhase(item.Signup.Shift, es)</span>
+                            <status-badge value="@item.Signup.Shift.GetShiftPeriod(es)" text="@ShiftDisplayItem.PeriodLabel(item.Signup.Shift.GetShiftPeriod(es), SharedLocalizer)" />
                         </text>;
                         Func<MySignupItem, IHtmlContent> pendingActionCell = @<text>
                             @if (item.BailLocked)
@@ -200,7 +174,7 @@
                             .Column(Localizer["Shifts_Department"].Value, r => r.DepartmentName)
                             .Column(Localizer["Shifts_Shift"].Value, r => r.Signup.Shift.Rota.Name)
                             .Template(Localizer["Shifts_Phase"].Value, pendingPhaseCell)
-                            .Column(Localizer["Shifts_Date"].Value, r => es.GateOpeningDate.PlusDays(r.Signup.Shift.DayOffset).ToWeekdayDayMonth())
+                            .Column(Localizer["Shifts_Date"].Value, r => es.GateOpeningDate.PlusDays(r.Signup.Shift.DayOffset).ToWeekdayDayMonth(), c => c.Css("text-nowrap"))
                             .Column(Localizer["Shifts_Time"].Value, r => r.AbsoluteStart.ToTime(tz!))
                             .Column(Localizer["Shifts_Duration"].Value, r => r.Signup.Shift.Duration.TotalHours + "h")
                             .Template("", pendingActionCell, c => c.NoSort())
@@ -224,7 +198,7 @@
                 <div class="card-body">
                     @{
                         Func<MySignupItem, IHtmlContent> pastPhaseCell = @<text>
-                            <span class="badge @GetPhaseBadge(item.Signup.Shift, es)">@GetPhase(item.Signup.Shift, es)</span>
+                            <status-badge value="@item.Signup.Shift.GetShiftPeriod(es)" text="@ShiftDisplayItem.PeriodLabel(item.Signup.Shift.GetShiftPeriod(es), SharedLocalizer)" />
                         </text>;
                         Func<MySignupItem, IHtmlContent> pastStatusCell = @<text>
                             <span class="badge bg-secondary">@Localizer.EnumDisplay(item.Signup.Status)</span>
@@ -233,7 +207,7 @@
                             .Column(Localizer["Shifts_Department"].Value, r => r.DepartmentName)
                             .Column(Localizer["Shifts_Shift"].Value, r => r.Signup.Shift.Rota.Name)
                             .Template(Localizer["Shifts_Phase"].Value, pastPhaseCell)
-                            .Column(Localizer["Shifts_Date"].Value, r => es.GateOpeningDate.PlusDays(r.Signup.Shift.DayOffset).ToWeekdayDayMonth())
+                            .Column(Localizer["Shifts_Date"].Value, r => es.GateOpeningDate.PlusDays(r.Signup.Shift.DayOffset).ToWeekdayDayMonth(), c => c.Css("text-nowrap"))
                             .Column(Localizer["Shifts_Time"].Value, r => r.AbsoluteStart.ToTime(tz!))
                             .Column(Localizer["Shifts_Duration"].Value, r => r.Signup.Shift.Duration.TotalHours + "h")
                             .Template(SharedLocalizer["Common_Status"].Value, pastStatusCell)
@@ -255,11 +229,11 @@
         var monFirstDays = new[] { shortDays[1], shortDays[2], shortDays[3], shortDays[4], shortDays[5], shortDays[6], shortDays[0] };
         int AvailLeadOffset(LocalDate d) => ((int)d.DayOfWeek + 6) % 7;
 
-        var phases = new List<(string Label, string BadgeClass, int StartOffset, int EndOffset)>
+        var phases = new List<(string Label, ShiftPeriod Period, int StartOffset, int EndOffset)>
         {
-            (SharedLocalizer["Shifts_SetUp"].Value, "bg-info", es.BuildStartOffset, -1),
-            (SharedLocalizer["Shifts_Event"].Value, "bg-success", 0, es.EventEndOffset),
-            (SharedLocalizer["Shifts_Strike"].Value, "bg-secondary", es.EventEndOffset + 1, es.StrikeEndOffset)
+            (SharedLocalizer["Shifts_SetUp"].Value, ShiftPeriod.Build, es.BuildStartOffset, -1),
+            (SharedLocalizer["Shifts_Event"].Value, ShiftPeriod.Event, 0, es.EventEndOffset),
+            (SharedLocalizer["Shifts_Strike"].Value, ShiftPeriod.Strike, es.EventEndOffset + 1, es.StrikeEndOffset)
         };
         <div class="card mb-4" id="availability-calendar">
             <div class="card-header"><h5 class="mb-0">@Localizer["Shifts_GeneralAvailability"]</h5></div>
@@ -274,7 +248,7 @@
                         var phaseEnd = es.GateOpeningDate.PlusDays(phase.EndOffset);
                         <div class="mb-3">
                             <div class="d-flex justify-content-between align-items-center mb-2">
-                                <span class="badge @phase.BadgeClass">@phase.Label</span>
+                                <status-badge value="@phase.Period" text="@phase.Label" />
                                 <small class="text-muted">@phaseStart.ToWeekdayDayMonth() – @phaseEnd.ToWeekdayDayMonth()</small>
                             </div>
                             <div class="avail-cal-grid">

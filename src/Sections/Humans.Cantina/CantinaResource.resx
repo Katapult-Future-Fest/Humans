@@ -85,10 +85,11 @@
   <data name="Cantina_Dietary_Intolerance_Lactose" xml:space="preserve"><value>Lactose</value></data>
   <data name="Cantina_Dietary_AllergyOther_Required" xml:space="preserve"><value>Please describe your "Other" allergy.</value></data>
   <data name="Cantina_Dietary_IntoleranceOther_Required" xml:space="preserve"><value>Please describe your "Other" intolerance.</value></data>
-  <data name="Cantina_Dietary_BreadcrumbNavigation" xml:space="preserve"><value>Breadcrumb</value></data>
   <data name="Cantina_Dietary_PageTitle" xml:space="preserve"><value>Dietary info</value></data>
   <data name="Cantina_Dietary_Saved" xml:space="preserve"><value>Your dietary info has been saved.</value></data>
   <data name="Cantina_Dietary_SaveFailed" xml:space="preserve"><value>Failed to save dietary info.</value></data>
+  <data name="Cantina_Dietary_PreferenceTooLong" xml:space="preserve"><value>Dietary preference must be 200 characters or fewer.</value></data>
+  <data name="Cantina_Dietary_OtherTextTooLong" xml:space="preserve"><value>Other allergy or intolerance details must be 500 characters or fewer.</value></data>
   <data name="Cantina_Dietary_LoadFailed" xml:space="preserve"><value>Failed to load dietary info.</value></data>
   <data name="Cantina_Dietary_OptionalHint" xml:space="preserve"><value>Optional. It helps the cantina plan meals for long shifts and never affects your shift signups.</value></data>
   <data name="Cantina_Dietary_DeclineButton" xml:space="preserve"><value>I don't want to answer</value></data>
@@ -97,7 +98,4 @@
   <data name="Cantina_Roster_RevealHealth" xml:space="preserve"><value>Show allergies and intolerances</value></data>
   <data name="Cantina_Roster_HealthHidden" xml:space="preserve"><value>Allergy and intolerance details are hidden. Showing them is recorded in the audit log.</value></data>
   <data name="Cantina_Roster_RevealHealthNote" xml:space="preserve"><value>Showing them is recorded in the audit log.</value></data>
-  <data name="Cantina_Dietary_RevealsTitle" xml:space="preserve"><value>Who has looked at this</value></data>
-  <data name="Cantina_Dietary_RevealsEmpty" xml:space="preserve"><value>Nobody has looked at your allergy and intolerance answers.</value></data>
-  <data name="Cantina_Dietary_RevealedBy" xml:space="preserve"><value>Looked at by</value></data>
 </root>

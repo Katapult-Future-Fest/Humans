@@ -10,6 +10,8 @@ using Microsoft.Extensions.DependencyInjection;
 using System.Globalization;
 using Microsoft.Extensions.Localization;
 using Microsoft.Extensions.Options;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using AwesomeAssertions;
 using Humans.Base.Csv;
 using Humans.Email.Contracts;
@@ -168,21 +170,24 @@ public sealed class EventServiceTests
     {
         var ct = TestContext.Current.CancellationToken;
         var actorId = Guid.NewGuid();
+        _userService.GetUserInfoAsync(actorId, Arg.Any<CancellationToken>())
+            .Returns(UserInfo.Create(new User { Id = actorId }, [], [], null));
         var submitterId = Guid.NewGuid();
         var burn = BurnFixtures.Burn();
         _repo.Settings = new EventGuideSettings { Id = Guid.NewGuid(), EventSettingsId = burn.Id, MaxPrintSlots = 20 };
         _burnSettings.GetEventSettingsByIdAsync(burn.Id, ct).Returns(burn);
-        _camps.GetCampsForYearAsync(2026, ct).Returns(Array.Empty<CampInfo>());
+        _camps.GetCampsForEventAsync(burn.Id, ct).Returns(Array.Empty<CampInfo>());
         _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), ct)
             .Returns(new Dictionary<Guid, UserInfo>
             {
-                [submitterId] = UserInfo.Create(new User { Id = submitterId, BurnerName = "Flame" }, [], [], [], null, [])
+                [submitterId] = UserInfo.Create(new User { Id = submitterId, BurnerName = "Flame" }, [], [], null)
             });
         if (expectedRows > 0)
             _repo.Events.Add(new Event
             {
                 Id = Guid.NewGuid(),
                 SubmitterUserId = submitterId,
+                EventSettingsId = burn.Id,
                 Category = new EventCategory { Name = "Workshop", Slug = "workshop" },
                 EventVenue = new EventVenue { Name = "Main Stage" },
                 Title = "Fire Circle",
@@ -225,6 +230,54 @@ public sealed class EventServiceTests
     }
 
     [HumansTheory]
+    [InlineData(2026)]
+    [InlineData(2027)]
+    public async Task GuideExports_UseCampSeasonForConfiguredEvent(int otherYear)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var burn = BurnFixtures.Burn();
+        _repo.Settings = new EventGuideSettings { Id = Guid.NewGuid(), EventSettingsId = burn.Id, MaxPrintSlots = 20 };
+        _burnSettings.GetEventSettingsByIdAsync(burn.Id, ct).Returns(burn);
+        var campId = Guid.NewGuid();
+        var season = new CampSeasonInfo(
+            Guid.NewGuid(), campId, "camp", 2026, null, "Guide Camp", "", "en", [],
+            default, default, default, default, 1, null, null, null, 0, null, null)
+        { EventSettingsId = burn.Id };
+        var otherSeason = season with
+        {
+            Id = Guid.NewGuid(),
+            Year = otherYear,
+            Name = "Other Event Camp",
+            EventSettingsId = Guid.NewGuid()
+        };
+        var camp = new CampInfo(campId, "camp", "camp@example.org", "", false, 0, [otherSeason, season]);
+        _camps.GetCampsForYearAsync(2026, ct).Returns([camp]);
+        _camps.GetCampsForEventAsync(burn.Id, ct).Returns([camp with { Seasons = [season] }]);
+        _repo.Events.Add(new Event
+        {
+            Id = Guid.NewGuid(),
+            CampId = campId,
+            EventSettingsId = burn.Id,
+            Category = new EventCategory { Name = "Workshop", Slug = "workshop" },
+            Title = "Camp workshop",
+            Description = "Description",
+            Status = EventStatus.Approved,
+            StartAt = Instant.FromUtc(2026, 7, 1, 8, 30),
+            DurationMinutes = 60
+        });
+
+        var csv = HumansCsv.Utf8WithBom.GetString(await _service.GetApprovedEventsForExportAsync(Guid.NewGuid(), ct));
+        csv.Should().Contain("Guide Camp").And.NotContain("Other Event Camp");
+        var controller = new EventsExportController(_service, _camps, _userService);
+        var print = (await controller.PrintGuide(ct)).Should().BeOfType<ViewResult>().Which;
+        var model = print.Model.Should().BeOfType<EventsExportController.PrintGuideViewModel>().Which;
+        model.DayGroups.SelectMany(d => d.Entries).Should().ContainSingle()
+            .Which.CampOrVenueName.Should().Be("Guide Camp");
+        await _camps.Received(2).GetCampsForEventAsync(burn.Id, ct);
+        await _camps.DidNotReceive().GetCampsForYearAsync(Arg.Any<int>(), Arg.Any<CancellationToken>());
+    }
+
+    [HumansTheory]
     [InlineData(11, false)]
     [InlineData(12, true)]
     [InlineData(13, true)]
@@ -263,10 +316,6 @@ public sealed class EventServiceTests
             BuildStartOffset: -14,
             EventEndOffset: 7,
             StrikeEndOffset: 10,
-            FirstCrewStartOffset: -25,
-            SetupWeekStartOffset: -16,
-            PreEventWeekStartOffset: -9,
-            FinishingWeekendStartOffset: -4,
             EarlyEntryCapacity: new Dictionary<int, int>(),
             BarriosEarlyEntryAllocation: null,
             EarlyEntryClose: null));
@@ -427,7 +476,7 @@ public sealed class EventServiceTests
 
         var added = await _service.AddFavouriteAsync(userId, eventId, dayOffset: 4, TestContext.Current.CancellationToken);
 
-        added.Should().BeTrue();
+        added.Should().Be(AddFavouriteOutcome.Added);
         _repo.Favourites.Should().ContainSingle(f =>
             f.UserId == userId
             && f.GuideEventId == eventId
@@ -446,7 +495,7 @@ public sealed class EventServiceTests
 
         var added = await _service.AddFavouriteAsync(userId, eventId, dayOffset: 4, TestContext.Current.CancellationToken);
 
-        added.Should().BeFalse();
+        added.Should().Be(AddFavouriteOutcome.AlreadyExists);
         _repo.Favourites.Should().ContainSingle();
         _repo.SaveChangesCount.Should().Be(1);
     }
@@ -460,9 +509,9 @@ public sealed class EventServiceTests
         var ev = new Event { Id = Guid.NewGuid(), Status = EventStatus.Approved, IsRecurring = true, RecurrenceDays = "0, 2,4" };
         _repo.Events.Add(ev);
 
-        var act = () => _service.AddFavouriteAsync(Guid.NewGuid(), ev.Id, day, TestContext.Current.CancellationToken);
+        var outcome = await _service.AddFavouriteAsync(Guid.NewGuid(), ev.Id, day, TestContext.Current.CancellationToken);
 
-        await act.Should().ThrowAsync<ArgumentOutOfRangeException>().Where(e => e.ParamName == "dayOffset");
+        outcome.Should().Be(AddFavouriteOutcome.InvalidDay);
         _repo.Favourites.Should().BeEmpty();
         _repo.SaveChangesCount.Should().Be(0);
     }
@@ -475,16 +524,16 @@ public sealed class EventServiceTests
 
         var added = await _service.AddFavouriteAsync(Guid.NewGuid(), ev.Id, 999, TestContext.Current.CancellationToken);
 
-        added.Should().BeTrue();
+        added.Should().Be(AddFavouriteOutcome.Added);
         _repo.Favourites.Should().ContainSingle().Which.DayOffset.Should().Be(999);
     }
 
     [HumansFact]
     public async Task AddFavouriteAsync_RejectsMissingEvents()
     {
-        var act = () => _service.AddFavouriteAsync(Guid.NewGuid(), Guid.NewGuid(), null, TestContext.Current.CancellationToken);
+        var outcome = await _service.AddFavouriteAsync(Guid.NewGuid(), Guid.NewGuid(), null, TestContext.Current.CancellationToken);
 
-        await act.Should().ThrowAsync<KeyNotFoundException>();
+        outcome.Should().Be(AddFavouriteOutcome.EventUnavailable);
         _repo.Favourites.Should().BeEmpty();
         _repo.SaveChangesCount.Should().Be(0);
     }
@@ -496,9 +545,9 @@ public sealed class EventServiceTests
     {
         var ev = new Event { Id = Guid.NewGuid(), Status = status };
         _repo.Events.Add(ev);
-        var act = () => _service.AddFavouriteAsync(Guid.NewGuid(), ev.Id, null, TestContext.Current.CancellationToken);
+        var outcome = await _service.AddFavouriteAsync(Guid.NewGuid(), ev.Id, null, TestContext.Current.CancellationToken);
 
-        await act.Should().ThrowAsync<KeyNotFoundException>();
+        outcome.Should().Be(AddFavouriteOutcome.EventUnavailable);
         _repo.Favourites.Should().BeEmpty();
         _repo.SaveChangesCount.Should().Be(0);
     }
@@ -533,6 +582,8 @@ public sealed class EventServiceTests
         }
         else
         {
+            _userService.GetUserInfoAsync(userId, Arg.Any<CancellationToken>())
+                .Returns(UserInfo.Create(new User { Id = userId }, [], [], null));
             var controller = new EventsApiController(cached, Substitute.For<ICampService>(), _userService,
                 NullLogger<EventsApiController>.Instance)
             {
@@ -611,13 +662,15 @@ public sealed class EventServiceTests
     }
 
     [HumansTheory]
-    [InlineData("es", "Hemos recibido el envío de tu evento")]
-    [InlineData("", "Your event submission has been received")]
-    [InlineData(" ", "Your event submission has been received")]
-    [InlineData("not a culture!", "Your event submission has been received")]
-    [InlineData("fr-FR", "Your event submission has been received")]
-    public async Task SubmitEventAsync_WithActionUrl_EmailsSubmitterConfirmation(string language, string subject)
+    [InlineData("es", "es")]
+    [InlineData("", "en")]
+    [InlineData(" ", "en")]
+    [InlineData("not a culture!", "en")]
+    [InlineData("fr-FR", "en")]
+    public async Task SubmitEventAsync_WithActionUrl_EmailsSubmitterConfirmation(string language, string expectedCulture)
     {
+        var subject = new System.Resources.ResourceManager(typeof(EventsResource))
+            .GetString("Events_Email_Pending_Subject", CultureInfo.GetCultureInfo(expectedCulture));
         OpenSubmissionWindow();
         using var actorCulture = new CultureScope("fr");
         var submitterId = StubSubmitterWithEmail("sub@example.com", "Burner", language);
@@ -681,6 +734,39 @@ public sealed class EventServiceTests
                 && m.RecipientEmail == "sub@example.com"
                 && m.HtmlBody.Contains("Too loud")
                 && m.HtmlBody.Contains("https://x/edit")));
+    }
+
+    [HumansTheory]
+    [InlineData(false, "")]
+    [InlineData(false, " \t ")]
+    [InlineData(true, "")]
+    [InlineData(true, " \t ")]
+    public async Task LifecycleEmail_BlankAddress_DoesNotEnqueueMailOrFailTheWrite(bool moderation, string address)
+    {
+        OpenSubmissionWindow();
+        var guideEvent = new Event
+        {
+            Id = Guid.NewGuid(),
+            SubmitterUserId = StubSubmitterWithEmail(address, "Burner"),
+            Status = moderation ? EventStatus.Pending : EventStatus.Draft
+        };
+        if (moderation)
+        {
+            _repo.Events.Add(guideEvent);
+            (await _service.ApplyModerationAsync(guideEvent.Id, Guid.NewGuid(), EventModerationActionType.Rejected,
+                "Too loud", "https://x/edit", TestContext.Current.CancellationToken)).Should().Be(ModerationOutcome.Applied);
+            guideEvent.Status.Should().Be(EventStatus.Rejected);
+        }
+        else
+        {
+            _repo.Categories.Add(new EventCategory { Id = guideEvent.CategoryId });
+            guideEvent.GuideSharedVenueId = Guid.NewGuid();
+            _repo.Venues.Add(new EventVenue { Id = guideEvent.GuideSharedVenueId.Value });
+            (await _service.SubmitEventAsync(guideEvent, "https://x/edit", TestContext.Current.CancellationToken)).ErrorKey.Should().BeNull();
+            _repo.Events.Should().Contain(guideEvent);
+            guideEvent.Status.Should().Be(EventStatus.Pending);
+        }
+        await _emailService.DidNotReceiveWithAnyArgs().SendAsync(default!);
     }
 
     [HumansTheory]
@@ -834,8 +920,7 @@ public sealed class EventServiceTests
         _userService.GetUserInfoAsync(userId, Arg.Any<CancellationToken>())
             .Returns(UserInfo.Create(
                 user,
-                [new UserEmail { Id = Guid.NewGuid(), UserId = userId, Email = email, IsVerified = true, IsPrimary = true }],
-                [], [], profile: null, []));
+                [new UserEmail { Id = Guid.NewGuid(), UserId = userId, Email = email, IsVerified = true, IsPrimary = true }], [], profile: null));
         return userId;
     }
 
@@ -1008,7 +1093,7 @@ public sealed class EventServiceTests
     }
 
     [HumansFact]
-    public async Task GetApprovedEventsAsync_ShowsOnlyTheGuidesEventAndUnassignedEntries()
+    public async Task GetApprovedEventsAsync_ShowsOnlyTheGuidesAssignedEntries()
     {
         var guideEventId = Guid.NewGuid();
         _repo.Settings = new EventGuideSettings { Id = Guid.NewGuid(), EventSettingsId = guideEventId };
@@ -1027,61 +1112,10 @@ public sealed class EventServiceTests
 
         var result = await _service.GetApprovedEventsAsync(null, null, null, null, [], TestContext.Current.CancellationToken);
 
-        result.Select(e => e.Id).Should().BeEquivalentTo([current.Id, unassigned.Id]);
+        result.Select(e => e.Id).Should().BeEquivalentTo([current.Id]);
+        (await _service.GetApprovedEventByIdAsync(unassigned.Id, TestContext.Current.CancellationToken)).Should().BeNull();
         (await _service.GetApprovedEventByIdAsync(lastYear.Id, TestContext.Current.CancellationToken)).Should().BeNull();
     }
-
-    [HumansFact]
-    public void PickEventFor_PrefersTheWindowHoldingTheStartDate_ElseTheNearestGateOpening()
-    {
-        var y2026 = Cycle("Nowhere 2026", new LocalDate(2026, 7, 7));
-        var y2027 = Cycle("Nowhere 2027", new LocalDate(2027, 7, 6));
-        IReadOnlyList<EventSettingsInfo> cycles = [y2026, y2027];
-
-        // 23:30 UTC on gate-minus-15 is already gate-minus-14 (build start) in Madrid.
-        EventService.PickEventFor(Instant.FromUtc(2026, 6, 22, 23, 30), cycles).Should().Be(y2026);
-        EventService.PickEventFor(Instant.FromUtc(2027, 7, 8, 10, 0), cycles).Should().Be(y2027);
-        EventService.PickEventFor(Instant.FromUtc(2026, 12, 1, 10, 0), cycles).Should().Be(y2026);
-        EventService.PickEventFor(Instant.FromUtc(2027, 3, 1, 10, 0), cycles).Should().Be(y2027);
-    }
-
-    [HumansFact]
-    public async Task AssignGuideEntryEventIdsAsync_AssignsEveryUnassignedEntry_AndLeavesAssignedOnes()
-    {
-        var y2026 = Cycle("Nowhere 2026", new LocalDate(2026, 7, 7));
-        var deleted = Cycle("Deleted", new LocalDate(2026, 7, 7)) with { Status = EventSettingsStatus.Deleted };
-        _burnSettings.GetAllEventSettingsAsync(Arg.Any<CancellationToken>()).Returns([deleted, y2026]);
-        var unassigned = new Event { Id = Guid.NewGuid(), Title = "Old", StartAt = Instant.FromUtc(2026, 7, 9, 18, 0) };
-        var otherEvent = Guid.NewGuid();
-        var assigned = new Event { Id = Guid.NewGuid(), EventSettingsId = otherEvent, StartAt = Instant.FromUtc(2026, 7, 9, 18, 0) };
-        _repo.Events.AddRange([unassigned, assigned]);
-
-        var pending = await _service.GetUnassignedGuideEntriesAsync(TestContext.Current.CancellationToken);
-        var written = await _service.AssignGuideEntryEventIdsAsync(TestContext.Current.CancellationToken);
-
-        pending.Should().ContainSingle().Which.EventName.Should().Be("Nowhere 2026");
-        written.Should().Be(1);
-        unassigned.EventSettingsId.Should().Be(y2026.Id);
-        assigned.EventSettingsId.Should().Be(otherEvent);
-        (await _service.GetUnassignedGuideEntriesAsync(TestContext.Current.CancellationToken)).Should().BeEmpty();
-    }
-
-    private static EventSettingsInfo Cycle(string name, LocalDate gateOpening) => new(
-        Id: Guid.NewGuid(),
-        EventName: name,
-        Year: gateOpening.Year,
-        TimeZoneId: "Europe/Madrid",
-        GateOpeningDate: gateOpening,
-        BuildStartOffset: -14,
-        EventEndOffset: 6,
-        StrikeEndOffset: 10,
-        FirstCrewStartOffset: -25,
-        SetupWeekStartOffset: -16,
-        PreEventWeekStartOffset: -9,
-        FinishingWeekendStartOffset: -4,
-        EarlyEntryCapacity: new Dictionary<int, int>(),
-        BarriosEarlyEntryAllocation: null,
-        EarlyEntryClose: null);
 
     [HumansFact]
     public async Task SubmitEventAsync_WindowClosed_ReturnsRefusalAndWritesNothing()
@@ -1322,7 +1356,7 @@ public sealed class EventServiceTests
         var strangerId = Guid.NewGuid();
         var requestedId = archivedId ? sourceId : survivorId;
         _userService.GetUserInfoAsync(requestedId, Arg.Any<CancellationToken>()).Returns(
-            UserInfo.Create(new User { Id = survivorId, BurnerName = "Survivor" }, [], [], [], null, [])
+            UserInfo.Create(new User { Id = survivorId, BurnerName = "Survivor" }, [], [], null)
                 with
             { MergedUserIds = [sourceId] });
         foreach (var id in new[] { survivorId, sourceId, strangerId })
@@ -1372,36 +1406,22 @@ public sealed class EventServiceTests
         slices[0].Data.Should().NotBeNull();
     }
 
-    [HumansTheory]
-    [InlineData("en", "Title is required.")]
-    [InlineData("es", "El campo Title es obligatorio.")]
-    [InlineData("de", "Title ist erforderlich.")]
-    [InlineData("it", "Il campo Title è obbligatorio.")]
-    [InlineData("fr", "Le champ Title est obligatoire.")]
-    [InlineData("ca", "El camp Title és obligatori.")]
-    public async Task BulkImportAsync_InvalidRow_ReturnsErrorsAndWritesNothing_UsesUploaderCulture(string culture, string expectedError)
+    [HumansFact]
+    public async Task BulkImportAsync_InvalidRow_ReturnsErrorsAndWritesNothing()
     {
         OpenSubmissionWindow();
-        var originalCulture = CultureInfo.CurrentUICulture;
-        try
-        {
-            CultureInfo.CurrentUICulture = CultureInfo.GetCultureInfo(culture);
-            var campId = Guid.NewGuid();
-            _repo.Categories.Add(new EventCategory { Id = Guid.NewGuid(), Name = "Workshop", Slug = "workshop", IsActive = true });
+        using var culture = new CultureScope("en");
+        var campId = Guid.NewGuid();
+        _repo.Categories.Add(new EventCategory { Id = Guid.NewGuid(), Name = "Workshop", Slug = "workshop", IsActive = true });
 
-            var result = await _service.BulkImportAsync(
-                campId, Guid.NewGuid(), [Row(title: "")],
-                new LocalDate(2026, 7, 8), 6, DateTimeZone.Utc, TestContext.Current.CancellationToken);
+        var result = await _service.BulkImportAsync(
+            campId, Guid.NewGuid(), [Row(title: "")],
+            new LocalDate(2026, 7, 8), 6, DateTimeZone.Utc, TestContext.Current.CancellationToken);
 
-            result.HasErrors.Should().BeTrue();
-            result.Errors.Should().ContainSingle(e => e.Errors.Contains(expectedError));
-            _repo.Events.Should().BeEmpty();
-            _repo.SaveChangesCount.Should().Be(0);
-        }
-        finally
-        {
-            CultureInfo.CurrentUICulture = originalCulture;
-        }
+        result.HasErrors.Should().BeTrue();
+        result.Errors.Should().ContainSingle(e => e.Errors.Contains("Title is required."));
+        _repo.Events.Should().BeEmpty();
+        _repo.SaveChangesCount.Should().Be(0);
     }
 
     [HumansTheory]
@@ -1493,6 +1513,77 @@ public sealed class EventServiceTests
             .And.OnlyContain(error => error.Errors.Contains($"Event {existing.Id} appears more than once in the upload."));
         existing.Title.Should().Be("My Event");
         _repo.SaveChangesCount.Should().Be(0);
+    }
+
+    [HumansTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task BulkImportAsync_CommitsCreatesAndEditsTogether(bool failSave)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var factory = new TestDbContextFactory<EventGuideDbContext>(new DbContextOptionsBuilder<EventGuideDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString()).AddInterceptors(new RejectFinalImportRow(failSave)).Options);
+        var category = new EventCategory { Id = Guid.NewGuid(), Name = "Workshop", Slug = "workshop", IsActive = true };
+        var campId = Guid.NewGuid();
+        var eventId = Guid.NewGuid();
+        var submitter = Guid.NewGuid();
+        var existing = new[]
+        {
+            ExistingEvent(campId, category.Id, EventStatus.Approved),
+            ExistingEvent(campId, category.Id, EventStatus.Approved),
+        };
+        foreach (var row in existing)
+            row.EventSettingsId = eventId;
+        await using (var seed = await factory.CreateDbContextAsync(ct))
+        {
+            seed.EventCategories.Add(category);
+            seed.Events.AddRange(existing);
+            await seed.SaveChangesAsync(ct);
+        }
+        var importer = new EventBulkImporter(new EventRepository(factory), _clock, _localizer);
+        var import = () => importer.ImportAsync(campId, submitter, eventId,
+            [Row(id: existing[0].Id, title: "First revised event"),
+             Row(id: existing[1].Id, title: "Second revised event", rowNumber: 3),
+             Row(title: "Failing import row", rowNumber: 4)],
+            new LocalDate(2026, 7, 8), 6, DateTimeZone.Utc, ct);
+
+        if (failSave)
+        {
+            await import.Should().ThrowAsync<InvalidOperationException>().WithMessage("Bulk event save failed");
+            await using var verify = await factory.CreateDbContextAsync(ct);
+            var saved = await verify.Events.ToListAsync(ct);
+            saved.Select(e => e.Id).Should().BeEquivalentTo(existing.Select(e => e.Id));
+            saved.Should().OnlyContain(e => string.Equals(e.Title, "My Event", StringComparison.Ordinal) && e.Status == EventStatus.Approved);
+        }
+        else
+        {
+            var result = await import();
+            result.HasErrors.Should().BeFalse();
+            result.CreatedCount.Should().Be(1);
+            result.UpdatedCount.Should().Be(2);
+            await using var verify = await factory.CreateDbContextAsync(ct);
+            var saved = await verify.Events.ToListAsync(ct);
+            saved.Should().HaveCount(3).And.OnlyContain(e => e.Status == EventStatus.Pending && e.CategoryId == category.Id);
+            foreach (var original in existing)
+                saved.Single(e => e.Id == original.Id).SubmitterUserId.Should().Be(original.SubmitterUserId);
+            var created = saved.Single(e => string.Equals(e.Title, "Failing import row", StringComparison.Ordinal));
+            created.SubmitterUserId.Should().Be(submitter);
+            created.EventSettingsId.Should().Be(eventId);
+            saved.Select(e => e.Title).Should().BeEquivalentTo(["First revised event", "Second revised event", "Failing import row"]);
+        }
+    }
+
+    private sealed class RejectFinalImportRow(bool reject) : SaveChangesInterceptor
+    {
+        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            if (reject && eventData.Context?.ChangeTracker.Entries<Event>()
+                .Any(entry => entry.State == EntityState.Added
+                    && string.Equals(entry.Entity.Title, "Failing import row", StringComparison.Ordinal)) == true)
+                throw new InvalidOperationException("Bulk event save failed");
+            return ValueTask.FromResult(result);
+        }
     }
 
     [HumansTheory]
@@ -1785,6 +1876,7 @@ public sealed class EventServiceTests
         {
             Id = Guid.NewGuid(),
             CampId = campId,
+            EventSettingsId = _repo.Settings?.EventSettingsId ?? Guid.Empty,
             SubmitterUserId = Guid.NewGuid(),
             CategoryId = categoryId,
             Title = "My Event",
@@ -1982,13 +2074,15 @@ public sealed class EventServiceTests
             return Task.CompletedTask;
         }
 
-        public Task<int> AssignEventSettingsIdsAsync(IReadOnlyDictionary<Guid, Guid> eventSettingsIdByEventId, CancellationToken ct = default)
+        public Task SaveImportedEventsAsync(
+            IReadOnlyList<Event> created, IReadOnlyList<Event> updated, CancellationToken ct = default)
         {
-            var rows = Events.Where(e => e.EventSettingsId is null && eventSettingsIdByEventId.ContainsKey(e.Id)).ToList();
-            foreach (var row in rows)
-                row.EventSettingsId = eventSettingsIdByEventId[row.Id];
-            SaveChangesCount++;
-            return Task.FromResult(rows.Count);
+            if (created.Count > 0 || updated.Count > 0)
+            {
+                Events.AddRange(created);
+                SaveChangesCount++;
+            }
+            return Task.CompletedTask;
         }
 
         public Task<IReadOnlyList<Event>> GetApprovedEventsAsync(Guid? campId, Guid? venueId, Guid? categoryId, string? q, IReadOnlyList<string> excludedSlugs, CancellationToken ct = default)

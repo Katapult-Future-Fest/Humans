@@ -5,13 +5,16 @@
   src/Sections/Humans.Teams/**
   src/Sections/Humans.Governance/Services/**
   src/Humans.Web/Controllers/HomeController.cs
+  src/Humans.Web/Authorization/NameRequiredFilter.cs
+  src/Humans.Web/Authorization/MembershipRequiredFilter.cs
+  src/Sections/Humans.Users/Views/Profile/Edit.cshtml
   src/Sections/Humans.Users/Controllers/ProfileController.cs
   src/Sections/Humans.Consent/Controllers/ConsentController.cs
-  src/Sections/Humans.Onboarding/Controllers/OnboardingReviewController.cs
+  src/Sections/Humans.Consent/Controllers/ConsentReviewQueueController.cs
   src/Sections/Humans.Onboarding/Controllers/OnboardingWidgetController.cs
   src/Sections/Humans.Governance/Controllers/GovernanceApplicationsController.cs
   src/Humans.Web/Views/Home/**
-  src/Sections/Humans.Onboarding/Views/OnboardingReview/**
+  src/Sections/Humans.Consent/Views/ConsentReviewQueue/**
   src/Sections/Humans.Onboarding/Views/OnboardingWidget/**
   src/Sections/Humans.Onboarding/Views/Shared/Components/OnboardingProgressBanner/**
   src/Sections/Humans.Onboarding/ViewComponents/OnboardingProgressBannerViewComponent.cs
@@ -30,13 +33,11 @@ The onboarding pipeline defines the end-to-end journey from signup to active mem
 
 During initial signup only, the profile setup page shows a tier card that explains Colaborador and Asociado and links to Governance's application form (`/Governance/Applications/Create`, new tab); the profile form itself carries no tier fields. The tier application proceeds through Board voting in parallel — it never blocks Volunteer access.
 
-The consent check is purely a **Volunteer-level gate**. It has nothing to do with tier applications.
+The consent check is a Consent Coordinator **audit annotation** on the Volunteer. It gates nothing and has nothing to do with tier applications.
 
-### Key Change from Previous Model
+Board members vote only on Colaborador/Asociado tier applications. Volunteers admission is name + consents, not the coordinator review.
 
-Previously, Board members manually set `IsApproved = true` on each profile. The new model replaced that with a Consent Coordinator audit gate; Volunteers admission is name + consents, not this gate. Board members now only vote on Colaborador/Asociado tier applications.
-
-The review fields named below (`ConsentCheckStatus`, `IsApproved`, `RejectedAt`, …) live in Consent's `consent_reviews` (`ConsentReviewInfo`) since Users decomposition commit 12; the rejection state itself is `UserState.Rejected` in Users.
+The review fields named below (`ConsentCheckStatus`, `IsApproved`, `RejectedAt`, …) live in Consent's `consent_reviews` (`ConsentReviewInfo`); the rejection state itself is `UserState.Rejected` in Users.
 
 ## Pipeline Overview
 
@@ -114,13 +115,8 @@ Two parallel tracks (either order):
 **So that** I know my progress
 
 **Acceptance Criteria:**
-- Dashboard shows "Getting Started" checklist:
-  1. ✓/○ Complete your profile
-  2. ✓/○ Sign required documents
-  3. ✓/○ Safety check (Pending / Cleared)
-- For Colaborador/Asociado applicants, additional indicator:
-  - Tier application status (Submitted / Under Review / Approved / Rejected)
-- Quick links to relevant pages
+- The onboarding widget (`/OnboardingWidget`) dispatches to the next incomplete step
+- While setup is unfinished, the layout banner links back to the widget
 
 ## Pipeline Stages
 
@@ -129,8 +125,8 @@ Two parallel tracks (either order):
 **Trigger:** First Google OAuth login
 **Actions:**
 - User record created
-- Profile record created (empty, MembershipTier = Volunteer)
-- Redirected to Profile Setup (onboarding mode)
+- Profile record created (empty); a member with no Governance tier row is a Volunteer
+- Redirected to the onboarding widget (`/OnboardingWidget`), which starts at the Names step
 
 ### Stage 2: Profile Setup (One-Shot Onboarding)
 
@@ -154,7 +150,7 @@ The default Volunteer flow uses the **onboarding widget** (Names → Shifts → 
 - When ALL required consents signed:
   - ConsentCheckStatus auto-set to Pending (if currently null)
 
-### Stage 4: Profile Review (Volunteer Gate — parallel with Stage 3)
+### Stage 4: Profile Review (audit track, parallel with Stage 3)
 
 **Trigger:** Profile exists, not yet rejected (coordinators can review at any time)
 **Actor:** Consent Coordinator
@@ -162,12 +158,12 @@ The default Volunteer flow uses the **onboarding widget** (Names → Shifts → 
 - Coordinator reviews profile (can proceed regardless of legal document status)
 - Review queue shows legal document progress (X/Y signed) for context
 - **Clear**: ConsentCheckStatus = Cleared, IsApproved = true — annotation only; no team sync, no access change. Volunteers-team admission (name + consents) is reconciled separately by `SystemTeamSyncJob`.
-- **Bulk Clear**: Coordinators can multi-select rows and clear them in one action. The server re-checks each selection against the live queue — eligibility is *membership of that queue* (`Pending` **or** `Flagged`), so a flagged row is bulk-clearable exactly as it is clearable one at a time; anything no longer in the queue (already cleared, profile rejected) is dropped. Each survivor then goes through the single-row `ClearConsentCheckAsync`, whose own refusals are logged and counted as skips. There is **no server-side legal-name check** in this path: the view withholds the checkbox from a nameless row, so the constraint is presentational only. The flash reads "Approved {0} of {1} selected — the others are no longer eligible."
+- **Bulk Clear**: Coordinators can multi-select rows and clear them in one action. The server re-checks each selection against the live queue — eligibility is *membership of that queue* (`Pending` **or** `Flagged`), so a flagged row is bulk-clearable exactly as it is clearable one at a time; anything no longer in the queue (already cleared, profile rejected) is dropped. Each survivor then goes through the single-row clear (`ConsentReviewQueueService.ClearAsync`), whose own refusals are logged and counted as skips. There is **no server-side legal-name check** in this path: the view withholds the checkbox from a nameless row, so the constraint is presentational only. The flash reads "Approved {0} of {1} selected — the others are no longer eligible."
 - **Flag**: ConsentCheckStatus = Flagged with notes — an audit annotation only; it does NOT block app access or Volunteers admission (Reject, which sets `RejectedAt`, is the kick-out lever). Can be resolved later.
 
 `IsApproved = true` is set on clearance even if legal docs are incomplete — it is a CC audit annotation, not an activation signal. App access came earlier at name entry (`UserState == Active`), and Volunteers-team admission is reconciled by `SystemTeamSyncJob` on **name + consents** (`HasRequiredNameFields && !IsSuspended && !review.IsRejected && HasAllRequiredConsents`); `IsApproved` / `ConsentCheckStatus` are not consulted.
 
-This gate is about Volunteer access only. It does not evaluate tier applications.
+This review is an audit annotation on the Volunteer only. It does not evaluate tier applications.
 
 ### Stage 5: Board Voting (Colaborador/Asociado Only)
 
@@ -197,11 +193,11 @@ Step selection first resolves the surviving user and checks saved required names
 
 `OnboardingWidgetController.Index` is the canonical entry point. It calls `IOnboardingWidgetState.GetCurrentStepAsync` and redirects to the action for the user's next incomplete step (or `Home/Index` once everything is done). Layouts, the post-signup redirect, and the onboarding banner all link to `Index` rather than to a specific step, so a refresh / direct nav lands on whichever step is current.
 
-The **name gate** backstops the dispatcher app-wide: `NameRequiredFilter` (a global action filter, `src/Humans.Web/Authorization/NameRequiredFilter.cs`) redirects any authenticated user without a real `BurnerName` (a Stub profile, or an Active profile with blank required names) straight to `OnboardingWidget/Names`, so a nameless user can't reach any non-exempt route before naming themselves. It runs after authentication and only redirects — it never blocks sign-in — and keys on the cache-backed `UserInfo.HasRequiredNameFields`, opening on the next request once names are saved. It covers OAuth first sign-in, the magic-link `ExistingUser` branch, and legacy blank-name accounts (nobodies-collective/Humans#812). Exempt: the `Account` and `Language` controllers wholesale, plus `OnboardingWidget/Names`, `Home/Error`, and `Home/Privacy`.
+The **name gate** backstops the dispatcher app-wide: `NameRequiredFilter` (a global action filter, `src/Humans.Web/Authorization/NameRequiredFilter.cs`) redirects any authenticated user without a real `BurnerName` (a Stub profile, or an Active profile with blank required names) straight to `OnboardingWidget/Names`, so a nameless user can't reach any non-exempt route before naming themselves. It runs after authentication and only redirects — it never blocks sign-in — and keys on the cache-backed `UserInfo.HasRequiredNameFields`, opening on the next request once names are saved. It covers OAuth first sign-in, the magic-link `ExistingUser` branch, and legacy blank-name accounts (nobodies-collective/Humans#812). Exempt: the `Account` and `Language` controllers wholesale, plus `OnboardingWidget/Names`, `Home/Error`, and `Home/Privacy`, and any other `[AllowAnonymous]` endpoint (all but `Home/Index`).
 
 ### Persistent banner
 
-`OnboardingProgressBannerViewComponent` is rendered from the layout. It calls `GetCurrentStepAsync` on every page with the request-abort token (suppressed on widget pages themselves to avoid the "you're already here" footgun). Operational errors are swallowed so a transient query failure never breaks a layout render; a matching request cancellation propagates normally.
+`OnboardingProgressBannerViewComponent` is contributed to the layout's `AboveContent` chrome slot by the section's `Section.cs`. It calls `GetCurrentStepAsync` on every page with the request-abort token (suppressed on widget pages themselves to avoid the "you're already here" footgun). Operational errors are swallowed so a transient query failure never breaks a layout render; a matching request cancellation propagates normally.
 
 ### Signup auto-confirm
 
@@ -215,58 +211,18 @@ The Names POST is reachable directly. `IProfileEditorService.SaveProfileAsync` d
 
 ### Authorization
 
-The controller inherits `HumansControllerBase` for `SetError` / TempData conventions. User identity is resolved from the `NameIdentifier` claim (the controller is `[Authorize]`-gated; full `User` resolution via `UserManager` isn't needed because the actions only consume `userId`).
-
-## Migration: Existing Users
-
-### Grandfather Clause
-
-Existing approved users are **not** retroactively required to go through consent check. The new consent check gate only applies to humans who sign up **after** this functionality is deployed.
-
-**Migration logic:**
-- Existing `Profile.IsApproved = true` → set `ConsentCheckStatus = Cleared`, `MembershipTier = Volunteer`
-- Existing approved Asociado Applications → set `Application.MembershipTier = Asociado`, compute `TermExpiresAt`
-- No disruption to existing active volunteers — they keep their access
-
-### New Signups Only
-
-After deployment, new humans go through the consent check pipeline. Existing humans who were already approved bypass it entirely.
-
-## Dashboard Views
-
-### Pre-Approval (New Human)
-```
-Getting Started
-├── [✓] Complete your profile          → /Profile/Me/Edit
-├── [○] Sign required documents         → /Consent
-├── [○] Safety check (pending)
-│
-│   If a Colaborador/Asociado application exists:
-└── [○] Tier application: Submitted
-```
-
-### Post-Approval (Active)
-```
-Welcome back, [Name]!
-Status: Active
-
-[Colaborador badge]  ← only if Colaborador/Asociado
-Term expires: Dec 31, 2027
-
-[Teams]  [Governance]  [Profile]
-```
+The controller inherits `HumansControllerBase` for `SetError` / TempData conventions. User identity is resolved from the `NameIdentifier` claim (the controller is `[Authorize]`-gated; no user entity is resolved, since the actions only consume `userId`).
 
 ## Business Rules
 
-1. **Consent check = Volunteer gate** — independent of tier applications
+1. **Consent check = audit annotation** — independent of tier applications
 2. **Tier card is one-shot**: only during initial signup; the application itself is Governance's form
 3. **After onboarding, profile edit is just profile** — no tier/application sections
 4. **Volunteer access is never blocked by tier applications** — parallel tracks
-5. **Grandfather existing users** — consent check only for new signups after deployment
-6. **Auto-Pending** — system sets ConsentCheckStatus to Pending when all consents are signed
-7. **Batch sync** — neither consent-check clearance nor consent submission triggers a per-user team sync; `SystemTeamSyncJob` reconciles Volunteers membership on **name + consents** (eventually consistent)
-8. **IsApproved is an audit annotation** — it does not gate access or Volunteers admission; app access is `UserState == Active` (name entered) and admission is name + consents
-9. **No Volunteer badge** — only Colaborador/Asociado badges on dashboard
+5. **Auto-Pending** — system sets ConsentCheckStatus to Pending when all consents are signed
+6. **Batch sync** — neither consent-check clearance nor consent submission triggers a per-user team sync; `SystemTeamSyncJob` reconciles Volunteers membership on **name + consents** (eventually consistent)
+7. **IsApproved is an audit annotation** — it does not gate access or Volunteers admission; app access is `UserState == Active` (name entered) and admission is name + consents
+8. **No Volunteer badge** — only Colaborador/Asociado badges on dashboard
 
 ## Related Features
 

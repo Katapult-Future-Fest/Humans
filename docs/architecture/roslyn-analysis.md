@@ -13,7 +13,7 @@
 
 # Roslyn Analyzer Candidates
 
-Forward-looking inventory of *additional* in-repo analyzer rules beyond the currently-shipped set — 27 live rules: `HUM0001`–`HUM0003`, `HUM0005`–`HUM0011`, `HUM0014`–`HUM0016`, `HUM0019`–`HUM0020`, `HUM0025`–`HUM0028`, `HUM0030`–`HUM0031`, `HUM0033`–`HUM0038`, catalogued in [`code-analysis.md`](code-analysis.md). **Retired ids are never reassigned:** `HUM0004` (Profile.IsSuspended write guard, dropped with the column in nobodies-collective/Humans#1217), `HUM0017`/`HUM0018` (cross-section repository injection and "cannot determine the section", retired in nobodies-collective/Humans#1064 — the assembly boundary makes the first a compile error and `[Section]` no longer exists to be missing), `HUM0022`/`HUM0023` (the per-section Notification and Event DbSet-write analyzers, subsumed by the universal `HUM0025`), `HUM0021`/`HUM0024` (retired in nobodies-collective/Humans#1278), `HUM0012`/`HUM0013`/`HUM0029` (all keyed on a `Humans.Application.*` namespace layout the section assemblies replaced), and `HUM0032` (cross-section injection of a write-capable `I*Service`, retired with the `I<Section>ServiceRead` rule). **IDs are assigned at ship time from the next free slot in `AnalyzerReleases.Unshipped.md` — currently `HUM0039`.** The candidate headings below are deliberately *un-numbered*: several once carried provisional `HUM00xx` numbers that later shipped for unrelated rules, so do not pre-claim an id here. This file is the queue we draw from when adding the next analyzer; do not start writing one without checking here first.
+Forward-looking inventory of *additional* in-repo analyzer rules beyond the currently-shipped set — 28 live rules: `HUM0001`–`HUM0003`, `HUM0005`–`HUM0011`, `HUM0014`–`HUM0016`, `HUM0019`–`HUM0020`, `HUM0025`–`HUM0028`, `HUM0030`–`HUM0031`, `HUM0033`–`HUM0039`, catalogued in [`code-analysis.md`](code-analysis.md). **Retired ids are never reassigned:** `HUM0004` (Profile.IsSuspended write guard, dropped with the column in nobodies-collective/Humans#1217), `HUM0017`/`HUM0018` (cross-section repository injection and "cannot determine the section", retired in nobodies-collective/Humans#1064 — the assembly boundary makes the first a compile error and `[Section]` no longer exists to be missing), `HUM0022`/`HUM0023` (the per-section Notification and Event DbSet-write analyzers, subsumed by the universal `HUM0025`), `HUM0021`/`HUM0024` (retired in nobodies-collective/Humans#1278), `HUM0012`/`HUM0013`/`HUM0029` (all keyed on a `Humans.Application.*` namespace layout the section assemblies replaced), `HUM0040` (HUM0039's stale-baseline check, retired when that baseline emptied), and `HUM0032` (cross-section injection of a write-capable `I*Service`, retired with the `I<Section>ServiceRead` rule). **IDs are assigned at ship time from the next free slot in `AnalyzerReleases.Unshipped.md` — currently `HUM0041`.** The candidate headings below are deliberately *un-numbered*: several once carried provisional `HUM00xx` numbers that later shipped for unrelated rules, so do not pre-claim an id here. This file is the queue we draw from when adding the next analyzer; do not start writing one without checking here first.
 
 ## Framing
 
@@ -263,8 +263,7 @@ have the supporting machinery. Each notes the missing piece.
   fragile across Razor compiler versions. **Needs:** a Razor-aware analyzer
   shape, or an MSBuild task that walks `.cshtml` AST directly. Defer.
 
-- **`Cross-domain .Include()` calls in Application services** (design-rules §6
-  + the §15i landmark commentary). Call-site shape is clean
+- **`Cross-domain .Include()` calls in Application services** (design-rules.md, *No cross-domain joins*). Call-site shape is clean
   (`IInvocationOperation` on `EntityFrameworkQueryableExtensions.Include`),
   but the rule is "no `.Include()` whose target navigation crosses a section
   boundary" — requires a section-ownership map for entity types. Only part of the
@@ -272,7 +271,7 @@ have the supporting machinery. Each notes the missing piece.
   every application context, and `Internal/AssemblyScope.IsSection` tells a section
   assembly apart. There is no type→section resolver (the old `Internal/Sections.cs`
   is gone), and the entity→section direction is missing too — an entity declared
-  in a `.Contracts` leaf (`Humans.Users.Contracts.User`) belongs to its own
+  in a `.Contracts` leaf or in `Humans.Base` (`User`) belongs to its own
   section, not to the section doing the querying. HUM0024 used to derive entity
   ownership from EF-config namespace layout, but it is retired
   (nobodies-collective/Humans#1278), so that derivation is no longer available to
@@ -298,7 +297,7 @@ have the supporting machinery. Each notes the missing piece.
   `src/Humans.Web/Migrations/System/`.
 
 - **`No `.Include()` for navigations across sections by name`** (a softer
-  Phase-1 of the §6 rule). Could fire on hardcoded nav-property names that
+  Phase-1 of the no-cross-domain-joins rule). Could fire on hardcoded nav-property names that
   match cross-section conventions (`Profile`, `Team`, `User` accessed from
   outside the owning section's namespace). **Needs:** the same
   section-ownership map as the strict version above. Same defer.
@@ -306,8 +305,10 @@ have the supporting machinery. Each notes the missing piece.
 - **`No new `[Authorize]`-less POST/PUT/DELETE actions in controllers`**
   (`code-review-rules.md` "Authorization Gaps, 8+ historical fixes"). Each
   method is a `MethodDeclarationSyntax` decorated with
-  `[HttpPost]`/`[HttpPut]`/`[HttpDelete]`; the rule is "must also carry
-  `[Authorize]` or have it inherited from the class". **Needs:** baseline
+  `[HttpPost]`/`[HttpPut]`/`[HttpDelete]`. Every endpoint is now authenticated
+  by default (fallback policy; `[Authorize]` on `HumansControllerBase` and
+  `ApiControllerBase`), so "carries `[Authorize]`" always holds; the live form
+  is "carries a policy or makes a resource-based check". **Needs:** baseline
   framework — there are existing controller actions that legitimately use
   alternate auth attributes (`[AllowAnonymous]`, custom policies, the
   attribute on a base class). Without a baseline-aware analyzer the

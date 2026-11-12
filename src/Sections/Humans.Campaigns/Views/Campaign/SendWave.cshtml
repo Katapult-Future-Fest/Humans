@@ -1,4 +1,4 @@
-@model CampaignSendWaveViewModel
+@model CampaignSendWavePageDto
 @{
     ViewData["Title"] = "Send Wave";
     var preview = Model.Preview;
@@ -15,7 +15,7 @@
         <form method="get" class="d-flex align-items-center gap-3">
             <select name="teamId" class="form-select" style="max-width: 400px;">
                 <option value="">-- Select a team --</option>
-                @foreach (var team in Model.Teams)
+                @foreach (var team in Model.Teams.OrderBy(t => t.Name, StringComparer.Ordinal))
                 {
                     <option value="@team.Id" selected="@(Model.SelectedTeamId == team.Id ? "selected" : null)">@team.Name</option>
                 }
@@ -65,7 +65,7 @@
             }
             else if (preview.EligibleCount == 0)
             {
-                <div class="alert alert-info mb-0">No eligible humans to send to in this team.</div>
+                <empty-state class="mb-0">No eligible humans to send to in this team.</empty-state>
             }
             else
             {

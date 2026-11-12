@@ -15,18 +15,15 @@ using Humans.Users.Contracts;
 
 namespace Humans.Budget.Controllers;
 
-/// <summary>
-/// Shares the <c>/Finance</c> route prefix with Finance's <c>FinanceController</c>; the action templates are disjoint.
-/// </summary>
 [Authorize(Policy = FinancePolicies.Read)]
-[Route("Finance")]
+[Route("Budget/Admin")]
 internal sealed class BudgetAdminController(
     IBudgetManagement budgetService,
     ITeamService teamService,
     TicketingBudgetService ticketingBudgetService,
     IClock clock,
     IUserService userService,
-    IHoldedFinanceService holdedFinance,
+    IFinanceService finance,
     ILogger<BudgetAdminController> logger) : HumansControllerBase(userService)
 {
     [HttpGet("")]
@@ -124,7 +121,7 @@ internal sealed class BudgetAdminController(
         }
     }
 
-    [HttpGet("Admin")]
+    [HttpGet("Years")]
     public async Task<IActionResult> Admin()
     {
         var ct = HttpContext.RequestAborted;
@@ -146,7 +143,7 @@ internal sealed class BudgetAdminController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> SyncDepartments(Guid id)
     {
-        var (errorResult, user) = await RequireCurrentUserAsync();
+        var (errorResult, user) = await RequireCurrentUserAsync(HttpContext.RequestAborted);
         if (errorResult is not null) return errorResult;
 
         try
@@ -171,7 +168,7 @@ internal sealed class BudgetAdminController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> CreateYear(string year, string name)
     {
-        var (errorResult, user) = await RequireCurrentUserAsync();
+        var (errorResult, user) = await RequireCurrentUserAsync(HttpContext.RequestAborted);
         if (errorResult is not null) return errorResult;
 
         if (string.IsNullOrWhiteSpace(year) || string.IsNullOrWhiteSpace(name))
@@ -199,7 +196,7 @@ internal sealed class BudgetAdminController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> UpdateYearStatus(Guid id, [BindRequired] BudgetYearStatus status)
     {
-        var (errorResult, user) = await RequireCurrentUserAsync();
+        var (errorResult, user) = await RequireCurrentUserAsync(HttpContext.RequestAborted);
         if (errorResult is not null) return errorResult;
 
         if (!ModelState.IsValid)
@@ -224,7 +221,7 @@ internal sealed class BudgetAdminController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> UpdateYear(Guid id, string year, string name, string? vendorEventId)
     {
-        var (errorResult, user) = await RequireCurrentUserAsync();
+        var (errorResult, user) = await RequireCurrentUserAsync(HttpContext.RequestAborted);
         if (errorResult is not null) return errorResult;
 
         var result = await budgetService.UpdateYearAsync(id, year, name, vendorEventId, user.Id);
@@ -243,7 +240,7 @@ internal sealed class BudgetAdminController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> DeleteYear(Guid id)
     {
-        var (errorResult, user) = await RequireCurrentUserAsync();
+        var (errorResult, user) = await RequireCurrentUserAsync(HttpContext.RequestAborted);
         if (errorResult is not null) return errorResult;
 
         var result = await budgetService.DeleteYearAsync(id, user.Id);
@@ -262,7 +259,7 @@ internal sealed class BudgetAdminController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> CreateGroup(Guid budgetYearId, string name, [BindRequired] bool isRestricted)
     {
-        var (errorResult, user) = await RequireCurrentUserAsync();
+        var (errorResult, user) = await RequireCurrentUserAsync(HttpContext.RequestAborted);
         if (errorResult is not null) return errorResult;
 
         if (!ModelState.IsValid)
@@ -290,7 +287,7 @@ internal sealed class BudgetAdminController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> UpdateGroup(Guid id, string name, int sortOrder, [BindRequired] bool isRestricted)
     {
-        var (errorResult, user) = await RequireCurrentUserAsync();
+        var (errorResult, user) = await RequireCurrentUserAsync(HttpContext.RequestAborted);
         if (errorResult is not null) return errorResult;
 
         if (!ModelState.IsValid)
@@ -301,7 +298,13 @@ internal sealed class BudgetAdminController(
 
         try
         {
-            await budgetService.UpdateGroupAsync(id, name, sortOrder, isRestricted, user.Id);
+            var result = await budgetService.UpdateGroupAsync(id, name, sortOrder, isRestricted, user.Id);
+            if (result.Refusal is { } refusal)
+            {
+                logger.LogWarning("Budget UpdateGroup refused for {EntityId}, actor {ActorId}: {Reason}", id, user.Id, refusal);
+                SetError(refusal);
+                return RedirectToAction(nameof(Admin));
+            }
             SetSuccess($"Group '{name}' updated.");
             return RedirectToAction(nameof(Admin));
         }
@@ -318,12 +321,18 @@ internal sealed class BudgetAdminController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> DeleteGroup(Guid id)
     {
-        var (errorResult, user) = await RequireCurrentUserAsync();
+        var (errorResult, user) = await RequireCurrentUserAsync(HttpContext.RequestAborted);
         if (errorResult is not null) return errorResult;
 
         try
         {
-            await budgetService.DeleteGroupAsync(id, user.Id);
+            var result = await budgetService.DeleteGroupAsync(id, user.Id);
+            if (result.Refusal is { } refusal)
+            {
+                logger.LogWarning("Budget DeleteGroup refused for {EntityId}, actor {ActorId}: {Reason}", id, user.Id, refusal);
+                SetError(refusal);
+                return RedirectToAction(nameof(Admin));
+            }
             SetSuccess("Group deleted.");
             return RedirectToAction(nameof(Admin));
         }
@@ -341,7 +350,7 @@ internal sealed class BudgetAdminController(
     public async Task<IActionResult> CreateCategory(Guid budgetGroupId, string name, [BindRequired] decimal allocatedAmount,
         [BindRequired] ExpenditureType expenditureType, Guid? teamId, Guid budgetYearId)
     {
-        var (errorResult, user) = await RequireCurrentUserAsync();
+        var (errorResult, user) = await RequireCurrentUserAsync(HttpContext.RequestAborted);
         if (errorResult is not null) return errorResult;
 
         if (!ModelState.IsValid)
@@ -355,7 +364,7 @@ internal sealed class BudgetAdminController(
             var result = await budgetService.CreateCategoryAsync(budgetGroupId, name, allocatedAmount, expenditureType, teamId, user.Id);
             if (result.Refusal is not null)
             {
-                logger.LogWarning("Rejected budget category amount for actor {ActorId}", user.Id);
+                logger.LogWarning("Rejected budget category input for actor {ActorId}", user.Id);
                 SetError(result.Refusal);
                 return RedirectToAction(nameof(YearDetail), new { id = budgetYearId });
             }
@@ -376,7 +385,7 @@ internal sealed class BudgetAdminController(
     public async Task<IActionResult> UpdateCategory(Guid id, string name, [BindRequired] decimal allocatedAmount,
         [BindRequired] ExpenditureType expenditureType)
     {
-        var (errorResult, user) = await RequireCurrentUserAsync();
+        var (errorResult, user) = await RequireCurrentUserAsync(HttpContext.RequestAborted);
         if (errorResult is not null) return errorResult;
 
         if (!ModelState.IsValid)
@@ -390,7 +399,7 @@ internal sealed class BudgetAdminController(
             var result = await budgetService.UpdateCategoryAsync(id, name, allocatedAmount, expenditureType, user.Id);
             if (result.Refusal is not null)
             {
-                logger.LogWarning("Rejected budget category amount for actor {ActorId}", user.Id);
+                logger.LogWarning("Rejected budget category input for actor {ActorId}", user.Id);
                 SetError(result.Refusal);
                 return RedirectToAction(nameof(CategoryDetail), new { id });
             }
@@ -410,12 +419,18 @@ internal sealed class BudgetAdminController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> DeleteCategory(Guid id, Guid budgetYearId)
     {
-        var (errorResult, user) = await RequireCurrentUserAsync();
+        var (errorResult, user) = await RequireCurrentUserAsync(HttpContext.RequestAborted);
         if (errorResult is not null) return errorResult;
 
         try
         {
-            await budgetService.DeleteCategoryAsync(id, user.Id);
+            var result = await budgetService.DeleteCategoryAsync(id, user.Id);
+            if (result.Refusal is { } refusal)
+            {
+                logger.LogWarning("Budget DeleteCategory refused for {EntityId}, actor {ActorId}: {Reason}", id, user.Id, refusal);
+                SetError(refusal);
+                return RedirectToAction(nameof(YearDetail), new { id = budgetYearId });
+            }
             SetSuccess("Category deleted.");
             return RedirectToAction(nameof(YearDetail), new { id = budgetYearId });
         }
@@ -433,7 +448,7 @@ internal sealed class BudgetAdminController(
     public async Task<IActionResult> CreateLineItem(Guid budgetCategoryId, string description, [BindRequired] decimal amount,
         Guid? responsibleTeamId, string? notes, DateTime? expectedDate, [BindRequired] int vatRate)
     {
-        var (errorResult, user) = await RequireCurrentUserAsync();
+        var (errorResult, user) = await RequireCurrentUserAsync(HttpContext.RequestAborted);
         if (errorResult is not null) return errorResult;
 
         if (!ModelState.IsValid)
@@ -449,7 +464,7 @@ internal sealed class BudgetAdminController(
             var result = await budgetService.CreateLineItemAsync(budgetCategoryId, description, amount, responsibleTeamId, notes, nodaDate, vatRate, user.Id);
             if (result.Refusal is not null)
             {
-                logger.LogWarning("Rejected budget line item amount for actor {ActorId}", user.Id);
+                logger.LogWarning("Rejected budget line item input for actor {ActorId}", user.Id);
                 SetError(result.Refusal);
                 return RedirectToAction(nameof(CategoryDetail), new { id = budgetCategoryId });
             }
@@ -470,7 +485,7 @@ internal sealed class BudgetAdminController(
     public async Task<IActionResult> UpdateLineItem(Guid id, string description, [BindRequired] decimal amount,
         Guid? responsibleTeamId, string? notes, DateTime? expectedDate, [BindRequired] int vatRate, Guid budgetCategoryId)
     {
-        var (errorResult, user) = await RequireCurrentUserAsync();
+        var (errorResult, user) = await RequireCurrentUserAsync(HttpContext.RequestAborted);
         if (errorResult is not null) return errorResult;
 
         if (!ModelState.IsValid)
@@ -486,7 +501,7 @@ internal sealed class BudgetAdminController(
             var result = await budgetService.UpdateLineItemAsync(id, description, amount, responsibleTeamId, notes, nodaDate, vatRate, user.Id);
             if (result.Refusal is not null)
             {
-                logger.LogWarning("Rejected budget line item amount for actor {ActorId}", user.Id);
+                logger.LogWarning("Rejected budget line item input for actor {ActorId}", user.Id);
                 SetError(result.Refusal);
                 return RedirectToAction(nameof(CategoryDetail), new { id = budgetCategoryId });
             }
@@ -506,12 +521,18 @@ internal sealed class BudgetAdminController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> DeleteLineItem(Guid id, Guid budgetCategoryId)
     {
-        var (errorResult, user) = await RequireCurrentUserAsync();
+        var (errorResult, user) = await RequireCurrentUserAsync(HttpContext.RequestAborted);
         if (errorResult is not null) return errorResult;
 
         try
         {
-            await budgetService.DeleteLineItemAsync(id, user.Id);
+            var result = await budgetService.DeleteLineItemAsync(id, user.Id);
+            if (result.Refusal is { } refusal)
+            {
+                logger.LogWarning("Budget DeleteLineItem refused for {EntityId}, actor {ActorId}: {Reason}", id, user.Id, refusal);
+                SetError(refusal);
+                return RedirectToAction(nameof(CategoryDetail), new { id = budgetCategoryId });
+            }
             SetSuccess("Line item deleted.");
             return RedirectToAction(nameof(CategoryDetail), new { id = budgetCategoryId });
         }
@@ -528,7 +549,7 @@ internal sealed class BudgetAdminController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> EnsureTicketingGroup(Guid id)
     {
-        var (errorResult, user) = await RequireCurrentUserAsync();
+        var (errorResult, user) = await RequireCurrentUserAsync(HttpContext.RequestAborted);
         if (errorResult is not null) return errorResult;
 
         try
@@ -553,7 +574,7 @@ internal sealed class BudgetAdminController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> UpdateTicketingProjection(Guid groupId, TicketingProjectionUpdateForm form)
     {
-        var (errorResult, user) = await RequireCurrentUserAsync();
+        var (errorResult, user) = await RequireCurrentUserAsync(HttpContext.RequestAborted);
         if (errorResult is not null) return errorResult;
         if (!ModelState.IsValid)
         {
@@ -563,7 +584,7 @@ internal sealed class BudgetAdminController(
 
         try
         {
-            var count = await ticketingBudgetService.UpdateProjectionAndRefreshAsync(
+            var result = await ticketingBudgetService.UpdateProjectionAndRefreshAsync(
                 new TicketingProjectionUpdateCommand(
                     groupId,
                     form.BudgetYearId,
@@ -577,8 +598,14 @@ internal sealed class BudgetAdminController(
                     form.StripeFeeFixed,
                     form.TicketTailorFeePercent),
                 user.Id);
-            if (count is null) return NotFound();
-            SetSuccess($"Ticketing projection saved - {count} projected line item(s) generated.");
+            if (result is null) return NotFound();
+            if (result.Value.Refusal is { } refusal)
+            {
+                logger.LogWarning("Rejected ticketing projection for group {GroupId}, actor {ActorId}: {Reason}", groupId, user.Id, refusal);
+                SetError(refusal);
+            }
+            else
+                SetSuccess($"Ticketing projection saved - {result.Value.Count} projected line item(s) generated.");
         }
         catch (Exception ex)
         {
@@ -593,7 +620,7 @@ internal sealed class BudgetAdminController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> SyncTicketingBudget(Guid yearId)
     {
-        var (errorResult, user) = await RequireCurrentUserAsync();
+        var (errorResult, user) = await RequireCurrentUserAsync(HttpContext.RequestAborted);
         if (errorResult is not null) return errorResult;
 
         try
@@ -637,11 +664,11 @@ internal sealed class BudgetAdminController(
             }
         }
 
-        IReadOnlyDictionary<Guid, HoldedActualRow> holdedActuals = new Dictionary<Guid, HoldedActualRow>();
+        IReadOnlyDictionary<Guid, CategoryActualRow> holdedActuals = new Dictionary<Guid, CategoryActualRow>();
         if (int.TryParse(year.Year, System.Globalization.NumberStyles.None,
                 System.Globalization.CultureInfo.InvariantCulture, out var calendarYear))
         {
-            var actuals = await holdedFinance.GetActualsForYearAsync(calendarYear, ct);
+            var actuals = await finance.GetActualsForYearAsync(calendarYear, ct);
             holdedActuals = actuals.ToDictionary(r => r.BudgetCategoryId);
         }
 

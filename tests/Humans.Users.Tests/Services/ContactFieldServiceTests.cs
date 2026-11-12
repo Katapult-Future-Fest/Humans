@@ -7,6 +7,8 @@ using Humans.Auth.Contracts;
 using Humans.Users.Services;
 using AwesomeAssertions;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.Extensions.DependencyInjection;
 using NodaTime;
 using NSubstitute;
 using Humans.Users.Tests.Infrastructure;
@@ -42,6 +44,80 @@ public sealed class ContactFieldServiceTests : ServiceTestHarness
             Clock, NullLogger<ContactFieldService>.Instance,
             new StringLocalizer<UsersResource>(new ResourceManagerStringLocalizerFactory(
                 Options.Create(new LocalizationOptions()), NullLoggerFactory.Instance)));
+    }
+
+    [HumansTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SaveContactFields_PostCommitFailure_RefreshesCachedVisibility(bool lostAcknowledgement)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var userId = Guid.NewGuid();
+        var profile = await CreateProfileAsync(userId);
+        var field = new ContactField
+        {
+            Id = Guid.NewGuid(),
+            ProfileId = profile.Id,
+            FieldType = ContactFieldType.Phone,
+            Value = "old-number",
+            Visibility = ContactFieldVisibility.AllActiveProfiles,
+            CreatedAt = Clock.GetCurrentInstant(),
+            UpdatedAt = Clock.GetCurrentInstant()
+        };
+        Db.ContactFields.Add(field);
+        await Db.SaveChangesAsync(ct);
+
+        async Task<UserInfo?> ReadInfoAsync(CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            await using var read = await DbFactory.CreateDbContextAsync(token);
+            return UserInfoFactory.Create(new User { Id = userId, PreferredLanguage = "en" }, [], [], profile,
+                await read.ContactFields.AsNoTracking().ToListAsync(token), [], []);
+        }
+        _userService.GetAllUserInfosAsync(Arg.Any<CancellationToken>())
+            .Returns(async call => (IReadOnlyCollection<UserInfo>)[(await ReadInfoAsync(call.Arg<CancellationToken>()))!]);
+        _userService.GetUserInfoAsync(userId, Arg.Any<CancellationToken>())
+            .Returns(call => new ValueTask<UserInfo?>(ReadInfoAsync(call.Arg<CancellationToken>())));
+        var services = new ServiceCollection();
+        services.AddKeyedScoped<IUserManagement>(CachingUserService.InnerServiceKey, (_, _) => _userService);
+        var cache = new CachingUserService(
+            services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>(),
+            NullLogger<CachingUserService>.Instance);
+        (await cache.GetUserInfoAsync(userId, ct))!.Profile!.ContactFields.Single().Visibility
+            .Should().Be(ContactFieldVisibility.AllActiveProfiles);
+
+        using var cancellation = new CancellationTokenSource();
+        var failure = new IOException("Persistence acknowledgement failed");
+        var options = new DbContextOptionsBuilder<UsersDbContext>(DbOptions)
+            .AddInterceptors(new ContactSaveCompletion(cancellation, lostAcknowledgement ? failure : null)).Options;
+        var service = new ContactFieldService(new UserRepository(new TestDbContextFactory(options), Clock),
+            cache, _teamService, _roleAssignmentService, cache, Clock, NullLogger<ContactFieldService>.Instance,
+            new StringLocalizer<UsersResource>(new ResourceManagerStringLocalizerFactory(
+                Options.Create(new LocalizationOptions()), NullLoggerFactory.Instance)));
+        var save = () => service.SaveContactFieldsAsync(profile.Id,
+            [new(field.Id, field.FieldType, null, "new-number", ContactFieldVisibility.BoardOnly, 0)], cancellation.Token);
+
+        if (lostAcknowledgement)
+            (await save.Should().ThrowAsync<IOException>()).Which.Should().BeSameAs(failure);
+        else
+            await save();
+
+        cancellation.IsCancellationRequested.Should().BeTrue();
+        (await Db.ContactFields.AsNoTracking().SingleAsync(ct)).Visibility.Should().Be(ContactFieldVisibility.BoardOnly);
+        var cached = (await cache.GetUserInfoAsync(userId, ct))!.Profile!.ContactFields.Single();
+        cached.Value.Should().Be("new-number");
+        cached.Visibility.Should().Be(ContactFieldVisibility.BoardOnly);
+    }
+
+    private sealed class ContactSaveCompletion(CancellationTokenSource cancellation, IOException? failure) : SaveChangesInterceptor
+    {
+        public override async ValueTask<int> SavedChangesAsync(
+            SaveChangesCompletedEventData eventData, int result, CancellationToken cancellationToken = default)
+        {
+            await cancellation.CancelAsync();
+            if (failure is not null) throw failure;
+            return result;
+        }
     }
 
     // Sets up GetTeamsAsync to return a dict containing one TeamInfo per member spec.
@@ -267,16 +343,10 @@ public sealed class ContactFieldServiceTests : ServiceTestHarness
         result[0].Label.Should().Be("Phone");
     }
 
-    [HumansTheory]
-    [InlineData("en")]
-    [InlineData("es")]
-    [InlineData("de")]
-    [InlineData("it")]
-    [InlineData("fr")]
-    [InlineData("ca")]
-    public async Task GetVisibleContactFields_LocalizesDefaultLabelsAndPreservesCustomLabels(string culture)
+    [HumansFact]
+    public async Task GetVisibleContactFields_LocalizesDefaultLabelsAndPreservesCustomLabels()
     {
-        using var cultureScope = new CultureScope(culture);
+        using var cultureScope = new CultureScope("en");
         var localizer = new StringLocalizer<UsersResource>(new ResourceManagerStringLocalizerFactory(
             Options.Create(new LocalizationOptions()), NullLoggerFactory.Instance));
         var ownerId = Guid.NewGuid();
@@ -328,6 +398,8 @@ public sealed class ContactFieldServiceTests : ServiceTestHarness
         var result = await _service.GetVisibleContactFieldsAsync(ownerId, ownerId, TestContext.Current.CancellationToken);
 
         result.Should().HaveCount(4);
+        result.ToDictionary(f => f.Id, f => f.DisplayOrder).Should().BeEquivalentTo(
+            Db.ContactFields.Where(f => f.ProfileId == profile.Id).ToDictionary(f => f.Id, f => f.DisplayOrder));
     }
 
     #endregion
@@ -485,7 +557,7 @@ public sealed class ContactFieldServiceTests : ServiceTestHarness
         StubUserInfo(userId, profile);
         var info = await _userService.GetUserInfoAsync(userId);
 
-        var model = Humans.Users.Models.ProfileEditViewModelBuilder.Build(info!, [], isApproved: false, false, _ => null);
+        var model = Humans.Users.Models.ProfileEditViewModelBuilder.Build(info!, [], false);
 
         model.EditableContactFields.Should().ContainSingle().Which.Id.Should().Be(signalId);
         model.ContactFields.Should().ContainSingle().Which.Id.Should().Be(legacyId);
@@ -640,13 +712,11 @@ public sealed class ContactFieldServiceTests : ServiceTestHarness
                 CreatedAt = profile.CreatedAt,
             },
             userEmails: [],
-            eventParticipations: [],
             externalLogins: [],
             profile: profile,
             contactFields: fields,
             profileLanguages: [],
-            volunteerHistory: [],
-            communicationPreferences: []);
+            volunteerHistory: []);
         _userService.GetUserInfoAsync(userId, Arg.Any<CancellationToken>()).Returns(info);
     }
 

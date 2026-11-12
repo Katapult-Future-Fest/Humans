@@ -39,8 +39,7 @@ internal sealed class EventsModerationController(
             ? unsortedEvents.OrderBy(e => e.SubmittedAt)
             : unsortedEvents.OrderByDescending(e => e.SubmittedAt)).ToList();
 
-        var campsById = await LoadCampsByIdAsync(camps, eventSettings?.GateOpeningDate.Year, ct);
-        var submitterInfoById = await LoadSubmittersAsync(UserService, events.Select(e => e.SubmitterUserId).Distinct(), ct);
+        var campsById = await LoadCampsByIdAsync(camps, eventSettings?.Id, ct);
 
         var model = new ModerationQueueViewModel
         {
@@ -51,7 +50,7 @@ internal sealed class EventsModerationController(
             ResubmitRequestedCount = counts.GetValueOrDefault(EventStatus.ResubmitRequested),
             WithdrawnCount = counts.GetValueOrDefault(EventStatus.Withdrawn),
             TimeZoneId = eventSettings?.TimeZoneId,
-            Events = events.Select(e => BuildRow(e, tz, campsById, submitterInfoById)).ToList()
+            Events = events.Select(e => BuildRow(e, tz, campsById)).ToList()
         };
 
         var campEvents = events.Where(e => e.CampId.HasValue).ToList();
@@ -64,12 +63,8 @@ internal sealed class EventsModerationController(
                 var evt = campEvents.FirstOrDefault(e => e.Id == row.Id);
                 if (evt?.CampId == null) continue;
 
-                row.DuplicateCandidates = allCampEvents
-                    .Where(other => other.Id != evt.Id
-                                 && other.CampId == evt.CampId
-                                 && EventConflictDetector.Overlaps(
-                                     other.StartAt, other.DurationMinutes,
-                                     evt.StartAt, evt.DurationMinutes))
+                row.DuplicateCandidates = EventConflictDetector.FindCampDuplicateCandidates(
+                        evt, allCampEvents, eventSettings?.GateOpeningDate, tz)
                     .Select(other => new DuplicateCandidateViewModel
                     {
                         Id = other.Id,
@@ -102,11 +97,12 @@ internal sealed class EventsModerationController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Withdraw(ModerationActionFormModel model)
     {
-        var moderator = await GetCurrentUserInfoAsync();
+        var ct = HttpContext.RequestAborted;
+        var moderator = await GetCurrentUserInfoAsync(ct);
         if (moderator == null) return Challenge();
         if (!ModelState.IsValid) return BadRequest(ModelState);
 
-        var guideEvent = await guide.GetEventForModerationAsync(model.EventId);
+        var guideEvent = await guide.GetEventForModerationAsync(model.EventId, ct);
         if (guideEvent == null)
         {
             SetError("Event not found.");
@@ -179,10 +175,11 @@ internal sealed class EventsModerationController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Update(Guid eventId, AdminEventFormViewModel model)
     {
-        var moderator = await GetCurrentUserInfoAsync();
+        var ct = HttpContext.RequestAborted;
+        var moderator = await GetCurrentUserInfoAsync(ct);
         if (moderator == null) return Challenge();
 
-        var guideEvent = await guide.GetEventForModerationAsync(eventId);
+        var guideEvent = await guide.GetEventForModerationAsync(eventId, ct);
         if (guideEvent == null) return NotFound();
 
         // The event's own CampId — not the posted flag — is the source of truth
@@ -206,7 +203,7 @@ internal sealed class EventsModerationController(
                 ModelState.AddModelError(nameof(model.VenueId), "Venue is required.");
         }
 
-        var (eventSettings, tz) = await LoadEventSettingsAsync();
+        var (eventSettings, tz) = await LoadEventSettingsAsync(ct);
         if (eventSettings == null)
         {
             SetError("Event settings not configured.");
@@ -232,8 +229,8 @@ internal sealed class EventsModerationController(
         if (!ModelState.IsValid)
         {
             if (isCampEvent)
-                model.CampName = await ResolveCampNameAsync(guideEvent.CampId!.Value, eventSettings);
-            await PopulateAdminFormAsync(model, eventSettings);
+                model.CampName = await ResolveCampNameAsync(guideEvent.CampId!.Value, eventSettings, ct);
+            await PopulateAdminFormAsync(model, eventSettings, ct);
             return View("AdminEventForm", model);
         }
 
@@ -255,13 +252,14 @@ internal sealed class EventsModerationController(
 
     private async Task<string?> ResolveCampNameAsync(Guid campId, EventSettingsInfo eventSettings, CancellationToken ct = default)
     {
-        var campsById = await LoadCampsByIdAsync(camps, eventSettings.GateOpeningDate.Year, ct);
+        var campsById = await LoadCampsByIdAsync(camps, eventSettings.Id, ct);
         return ResolveCampName(campsById.GetValueOrDefault(campId));
     }
 
     private async Task PopulateAdminFormAsync(AdminEventFormViewModel model, EventSettingsInfo burn, CancellationToken ct = default)
     {
         var categories = (await guide.GetActiveCategoriesAsync(ct))
+            .OrderBy(c => c.DisplayOrder)
             .Select(c => new CategoryOptionViewModel { Id = c.Id, Name = c.Name }).ToList();
         // Keep the event's current category selectable even if it has since been
         // deactivated — otherwise editing an unrelated field would silently drop it.
@@ -276,6 +274,7 @@ internal sealed class EventsModerationController(
         if (!model.IsCampEvent)
         {
             var venues = (await guide.GetActiveVenuesAsync(ct))
+                .OrderBy(v => v.DisplayOrder)
                 .Select(v => new VenueOptionViewModel { Id = v.Id, Name = v.Name }).ToList();
             if (model.VenueId is { } venueId && venueId != Guid.Empty && venues.All(v => v.Id != venueId))
             {
@@ -305,11 +304,12 @@ internal sealed class EventsModerationController(
 
     private async Task<IActionResult> ProcessActionAsync(Guid eventId, EventModerationActionType actionType, string? reason)
     {
-        var moderator = await GetCurrentUserInfoAsync();
+        var ct = HttpContext.RequestAborted;
+        var moderator = await GetCurrentUserInfoAsync(ct);
         if (moderator == null) return Challenge();
         if (!ModelState.IsValid) return BadRequest(ModelState);
 
-        var guideEvent = await guide.GetEventForModerationAsync(eventId);
+        var guideEvent = await guide.GetEventForModerationAsync(eventId, ct);
         if (guideEvent == null)
         {
             SetError("Event not found.");
@@ -319,8 +319,8 @@ internal sealed class EventsModerationController(
         string? campSlug = null;
         if (guideEvent.CampId.HasValue)
         {
-            var (eventSettings, _) = await LoadEventSettingsAsync();
-            var campsById = await LoadCampsByIdAsync(camps, eventSettings?.GateOpeningDate.Year);
+            var (eventSettings, _) = await LoadEventSettingsAsync(ct);
+            var campsById = await LoadCampsByIdAsync(camps, eventSettings?.Id, ct);
             campSlug = campsById.GetValueOrDefault(guideEvent.CampId.Value)?.Slug;
         }
 
@@ -361,12 +361,8 @@ internal sealed class EventsModerationController(
     private static ModerationEventRowViewModel BuildRow(
         EventInfo e,
         DateTimeZone? tz,
-        IReadOnlyDictionary<Guid, CampInfo> campsById,
-        IReadOnlyDictionary<Guid, UserInfo> submitterInfoById)
+        IReadOnlyDictionary<Guid, CampInfo> campsById)
     {
-        var submitter = submitterInfoById.GetValueOrDefault(e.SubmitterUserId);
-        var submitterName = submitter?.BurnerName ?? submitter?.Email ?? "Unknown";
-
         var camp = e.CampId.HasValue ? campsById.GetValueOrDefault(e.CampId.Value) : null;
         var campName = ResolveCampName(camp);
 
@@ -375,7 +371,6 @@ internal sealed class EventsModerationController(
             Id = e.Id,
             Title = e.Title,
             Description = e.Description,
-            SubmitterName = submitterName,
             SubmitterUserId = e.SubmitterUserId,
             CampName = campName,
             CampSlug = camp?.Slug,

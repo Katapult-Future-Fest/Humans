@@ -5,25 +5,18 @@
     var es = Model.EventSettings;
     var tz = es != null ? DateTimeZoneProviders.Tzdb[es.TimeZoneId] : null;
     var isAdmin = Model.ViewMode == ShiftSignupsViewMode.Admin;
-    var label = isAdmin && !string.IsNullOrEmpty(Model.DisplayName)
-        ? $"{Model.DisplayName}'s Shifts"
-        : Localizer["Shifts_ShiftSignups_Title"].Value;
-}
 
-@functions {
-    static string StatusBadge(SignupStatus status) => status switch
-    {
-        SignupStatus.Confirmed => "bg-success",
-        SignupStatus.Pending => "bg-warning",
-        SignupStatus.Bailed => "bg-danger",
-        SignupStatus.NoShow => "bg-danger",
-        _ => "bg-secondary"
-    };
 }
 
 <div class="card mb-4">
     <div class="card-header d-flex justify-content-between align-items-center">
-        <span>@label</span>
+        <span>
+            @Localizer["Shifts_ShiftSignups_Title"]
+            @if (isAdmin)
+            {
+                <text> — </text><vc:human user-id="@Model.UserId" link="None" />
+            }
+        </span>
         @if (Model.Upcoming.Count + Model.Pending.Count > 0)
         {
             <span>
@@ -118,7 +111,7 @@
                                     <td class="ps-3">@item.DepartmentName</td>
                                     <td>@signup.RotaName</td>
                                     <td>@signup.Date.ToWeekdayDayMonth()</td>
-                                    <td><span class="badge @StatusBadge(signup.Status)">@Localizer.EnumDisplay(signup.Status)</span></td>
+                                    <td><status-badge value="@signup.Status" localizer="@Localizer" /></td>
                                 </tr>
                             }
                         </tbody>

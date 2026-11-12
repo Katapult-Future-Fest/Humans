@@ -28,6 +28,7 @@ internal sealed class CampController(
     IStringLocalizer<SharedResource> sharedLocalizer)
     : HumansCampControllerBase(userService, campService, authorizationService)
 {
+    private readonly CampDirectoryPageBuilder directoryPageBuilder = new(campService, campRoleService);
     private readonly ICampManagement _campService = campService;
     private readonly IUserService _userService = userService;
     private readonly IClock _clock = clock;
@@ -44,119 +45,11 @@ internal sealed class CampController(
         }
 
         var user = await GetCurrentUserInfoAsync(ct);
-        var settings = await _campService.GetSettingsAsync(ct);
-        var activeEventId = settings.ActiveEventSettingsId;
-        var camps = activeEventId is { } eventId
-            ? await _campService.GetCampsForEventAsync(eventId, ct)
-            : [];
-
-        var roleSummaries = filters?.ShowLeadPositions == true && activeEventId is not null
-            ? await campRoleService.GetDirectoryRoleSummariesAsync(activeEventId.Value, ct)
-            : null;
-
-        var leadCampIds = user is null
-            ? new HashSet<Guid>()
-            : camps.Where(camp => camp.IsLead(user.Id)).Select(camp => camp.Id).ToHashSet();
-
-        var directoryCards = ApplyDirectoryFilters(
-            camps
-                .Select(camp => new { Camp = camp, Season = camp.Seasons.FirstOrDefault() })
-                .Where(row => row.Season is { IsPublic: true })
-                .Select(row => MapCampCard(row.Camp, row.Season!, roleSummaries)),
-            filters);
-
-        var cards = directoryCards
-            .OrderBy(card => leadCampIds.Contains(card.Id) ? 0 : 1)
-            .ThenBy(card => card.Name, StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
-        var myCamps = new List<CampCardViewModel>();
-        if (user is not null)
-        {
-            myCamps = camps
-                .Where(camp => leadCampIds.Contains(camp.Id))
-                .Select(camp => new { Camp = camp, Season = camp.Seasons.FirstOrDefault() })
-                .Where(row => row.Season is { IsPublic: false })
-                .Select(row => MapCampCard(row.Camp, row.Season!, roleSummaries))
-                .Where(card => cards.All(publicCard => publicCard.Id != card.Id))
-                .ToList();
-        }
-
-        ViewBag.PendingCount = camps
-            .SelectMany(camp => camp.Seasons)
-            .Count(season => season.Status == CampSeasonStatus.Pending);
-
-        var viewModel = new CampIndexViewModel
-        {
-            Year = settings.ActiveEvent?.Year ?? settings.PublicYear,
-            Camps = cards,
-            MyCamps = myCamps,
-            Filters = filters ?? new CampFilterViewModel()
-        };
+        var (viewModel, pendingCount) = await directoryPageBuilder.BuildAsync(user, filters, ct);
+        ViewBag.PendingCount = pendingCount;
 
         return View(viewModel);
     }
-
-    private static IEnumerable<CampCardViewModel> ApplyDirectoryFilters(
-        IEnumerable<CampCardViewModel> cards,
-        CampFilterViewModel? filters)
-    {
-        if (filters?.Vibe.HasValue == true)
-        {
-            cards = cards.Where(card => card.Vibes.Contains(filters.Vibe.Value));
-        }
-
-        if (filters?.SoundZone.HasValue == true)
-        {
-            cards = cards.Where(card => card.SoundZone == filters.SoundZone.Value);
-        }
-
-        if (filters?.KidsFriendly == true)
-        {
-            cards = cards.Where(card => card.KidsWelcome == YesNoMaybe.Yes);
-        }
-
-        if (filters?.AcceptingMembers == true)
-        {
-            cards = cards.Where(card => card.AcceptingMembers == YesNoMaybe.Yes);
-        }
-
-        if (!string.IsNullOrWhiteSpace(filters?.Search))
-        {
-            var q = filters.Search.Trim();
-            cards = cards.Where(card =>
-                card.Name.Contains(q, StringComparison.OrdinalIgnoreCase));
-        }
-
-        return cards;
-    }
-
-    private static CampCardViewModel MapCampCard(
-        CampInfo camp,
-        CampSeasonInfo season,
-        IReadOnlyDictionary<Guid, IReadOnlyList<CampDirectoryRoleSummary>>? roleSummaries = null) => new()
-        {
-            Id = camp.Id,
-            SeasonId = season.Id,
-            Slug = camp.Slug,
-            Name = season.Name,
-            BlurbShort = season.BlurbShort,
-            ImageUrl = camp.Images.FirstOrDefault()?.Url,
-            Vibes = [.. season.Vibes],
-            AcceptingMembers = season.AcceptingMembers,
-            KidsWelcome = season.KidsWelcome,
-            SoundZone = season.SoundZone,
-            Status = season.Status,
-            TimesAtNowhere = camp.TimesAtNowhere,
-            LeadPositionPills = roleSummaries is not null && roleSummaries.TryGetValue(season.Id, out var summaries)
-            ? summaries.Select(s => new CampLeadPositionPillViewModel
-            {
-                Name = s.Name,
-                FilledCount = s.Filled,
-                SlotCount = s.SlotCount
-            }).ToList()
-            : []
-        };
 
     /// <summary>New camps register for the open event with the latest gate opening; null when none is open.</summary>
     private async Task<CampEventRegistration?> PopulateRegisterSeasonYearAsync(CancellationToken ct = default)
@@ -284,10 +177,10 @@ internal sealed class CampController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Contact(string slug, CampContactViewModel model)
     {
-        var camp = await GetCampBySlugAsync(slug);
+        var camp = await GetCampBySlugAsync(slug, HttpContext.RequestAborted);
         if (camp is null) return NotFound();
 
-        var currentUser = await GetCurrentUserInfoAsync();
+        var currentUser = await GetCurrentUserInfoAsync(HttpContext.RequestAborted);
         if (currentUser is null) return Unauthorized();
 
         if (!ModelState.IsValid)
@@ -355,22 +248,23 @@ internal sealed class CampController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Register(CampRegisterViewModel model)
     {
+        var ct = HttpContext.RequestAborted;
         ValidatePhoneE164(model.ContactPhone, nameof(model.ContactPhone));
 
         if (!ModelState.IsValid)
         {
-            await PopulateRegisterSeasonYearAsync();
-            await PopulateRegistrationInfoAsync();
+            await PopulateRegisterSeasonYearAsync(ct);
+            await PopulateRegistrationInfoAsync(ct);
             return View(model);
         }
 
-        var (currentUserError, user) = await ResolveCurrentUserOrUnauthorizedAsync();
+        var (currentUserError, user) = await ResolveCurrentUserOrUnauthorizedAsync(ct);
         if (currentUserError is not null)
         {
             return currentUserError;
         }
 
-        var registrationEvent = (await _campService.GetSettingsAsync()).OpenEvents.FirstOrDefault();
+        var registrationEvent = (await _campService.GetSettingsAsync(ct)).OpenEvents.FirstOrDefault();
         if (registrationEvent is null)
         {
             SetError(campsLocalizer["Camps_Flash_RegistrationClosed"].Value);
@@ -517,21 +411,23 @@ internal sealed class CampController(
             .OrderBy(o => o.DisplayName, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        var rows = panelData.Rows.Select(r => new CampRoleRowViewModel
-        {
-            DefinitionId = r.Definition.Id,
-            Name = r.Definition.Name,
-            Description = r.Definition.Description,
-            SlotCount = r.Definition.SlotCount,
-            MinimumRequired = r.Definition.MinimumRequired,
-            FilledSlots = r.FilledSlots
+        var rows = panelData.Rows
+            .OrderBy(r => r.Definition.SortOrder).ThenBy(r => r.Definition.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(r => new CampRoleRowViewModel
+            {
+                DefinitionId = r.Definition.Id,
+                Name = r.Definition.Name,
+                Description = r.Definition.Description,
+                SlotCount = r.Definition.SlotCount,
+                MinimumRequired = r.Definition.MinimumRequired,
+                FilledSlots = r.FilledSlots
                 .Select(s => new CampRoleSlotViewModel(s.AssignmentId, s.CampMemberId, s.UserId))
                 .ToList(),
-            EmptySlotCount = r.EmptySlotCount,
-            OverCapacity = r.OverCapacity,
-            CurrentCount = r.CurrentCount,
-            IsLeadRole = r.Definition.SpecialRole == CampSpecialRole.Lead,
-        }).ToList();
+                EmptySlotCount = r.EmptySlotCount,
+                OverCapacity = r.OverCapacity,
+                CurrentCount = r.CurrentCount,
+                IsLeadRole = r.Definition.SpecialRole == CampSpecialRole.Lead,
+            }).ToList();
 
         return new CampRolesPanelViewModel
         {
@@ -565,8 +461,6 @@ internal sealed class CampController(
         {
             CampMemberId = member.Id,
             UserId = member.UserId,
-            RequestedAt = member.RequestedAt,
-            ConfirmedAt = member.ConfirmedAt,
             HasEarlyEntry = member.HasEarlyEntry,
             Status = member.Status
         };
@@ -627,7 +521,7 @@ internal sealed class CampController(
             return errorResult;
         }
 
-        var eventName = (await _campService.GetSettingsAsync()).Events
+        var eventName = (await _campService.GetSettingsAsync(HttpContext.RequestAborted)).Events
             .FirstOrDefault(e => e.EventSettingsId == eventSettingsId)?.EventName ?? string.Empty;
         var result = await _campService.OptInToSeasonAsync(camp.Id, eventSettingsId, actorUserId: user.Id);
         if (result.ErrorKey is { } key)
@@ -699,11 +593,11 @@ internal sealed class CampController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> AddHistoricalName(string slug, string name)
     {
-        var (errorResult, _, camp) = await ResolveCampManagementAsync(slug);
+        var (errorResult, user, camp) = await ResolveCampManagementAsync(slug);
         if (errorResult is not null)
             return errorResult;
 
-        var result = await _campService.AddHistoricalNameAsync(camp.Id, name);
+        var result = await _campService.AddHistoricalNameAsync(camp.Id, name, actorUserId: user.Id);
         if (result.ErrorKey is { } key)
         {
             logger.LogWarning("Adding a historical name failed for camp {CampId}: {Reason}", camp.Id, key);
@@ -722,11 +616,11 @@ internal sealed class CampController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> RemoveHistoricalName(string slug, Guid nameId)
     {
-        var (errorResult, _, camp) = await ResolveCampManagementAsync(slug);
+        var (errorResult, user, camp) = await ResolveCampManagementAsync(slug);
         if (errorResult is not null)
             return errorResult;
 
-        var result = await _campService.RemoveHistoricalNameAsync(camp.Id, nameId);
+        var result = await _campService.RemoveHistoricalNameAsync(camp.Id, nameId, actorUserId: user.Id);
         if (result.ErrorKey is { } key)
         {
             logger.LogWarning("Removing historical name {NameId} failed for camp {CampId}: {Reason}", nameId, camp.Id, key);
@@ -807,13 +701,13 @@ internal sealed class CampController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> ReorderImages(string slug, List<Guid> imageIds)
     {
-        var (errorResult, _, camp) = await ResolveCampManagementAsync(slug);
+        var (errorResult, user, camp) = await ResolveCampManagementAsync(slug);
         if (errorResult is not null)
         {
             return errorResult;
         }
 
-        await _campService.ReorderImagesAsync(camp.Id, imageIds);
+        await _campService.ReorderImagesAsync(camp.Id, imageIds, actorUserId: user.Id);
         SetSuccess(campsLocalizer["Camps_Flash_ImageOrderUpdated"].Value);
 
         return RedirectToAction(nameof(Edit), new { slug });
@@ -824,10 +718,10 @@ internal sealed class CampController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> RequestMembership(string slug)
     {
-        var camp = await GetCampBySlugAsync(slug);
+        var camp = await GetCampBySlugAsync(slug, HttpContext.RequestAborted);
         if (camp is null) return NotFound();
 
-        var (currentUserError, user) = await ResolveCurrentUserOrUnauthorizedAsync();
+        var (currentUserError, user) = await ResolveCurrentUserOrUnauthorizedAsync(HttpContext.RequestAborted);
         if (currentUserError is not null) return currentUserError;
 
         var result = await _campService.RequestCampMembershipAsync(camp.Id, user.Id);
@@ -852,10 +746,10 @@ internal sealed class CampController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> WithdrawMembershipRequest(string slug, Guid campMemberId)
     {
-        var camp = await GetCampBySlugAsync(slug);
+        var camp = await GetCampBySlugAsync(slug, HttpContext.RequestAborted);
         if (camp is null) return NotFound();
 
-        var (currentUserError, user) = await ResolveCurrentUserOrUnauthorizedAsync();
+        var (currentUserError, user) = await ResolveCurrentUserOrUnauthorizedAsync(HttpContext.RequestAborted);
         if (currentUserError is not null) return currentUserError;
 
         var result = await _campService.WithdrawCampMembershipRequestAsync(campMemberId, user.Id);
@@ -877,10 +771,10 @@ internal sealed class CampController(
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> LeaveMembership(string slug, Guid campMemberId)
     {
-        var camp = await GetCampBySlugAsync(slug);
+        var camp = await GetCampBySlugAsync(slug, HttpContext.RequestAborted);
         if (camp is null) return NotFound();
 
-        var (currentUserError, user) = await ResolveCurrentUserOrUnauthorizedAsync();
+        var (currentUserError, user) = await ResolveCurrentUserOrUnauthorizedAsync(HttpContext.RequestAborted);
         if (currentUserError is not null) return currentUserError;
 
         var result = await _campService.LeaveCampAsync(campMemberId, user.Id);
@@ -1273,7 +1167,7 @@ internal sealed class CampController(
             HideHistoricalNames = camp.HideHistoricalNames,
             TimesAtNowhere = camp.TimesAtNowhere,
             HistoricalNames = [.. camp.HistoricalNames],
-            ImageUrls = camp.Images.Select(image => image.Url).ToList(),
+            ImageUrls = camp.Images.OrderBy(image => image.SortOrder).Select(image => image.Url).ToList(),
             CurrentSeason = new CampSeasonDetailViewModel
             {
                 Id = season.Id,

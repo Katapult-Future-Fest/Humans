@@ -20,16 +20,10 @@ namespace Humans.Rideshare.Tests.Models;
 /// <summary>The offer and request forms: ISO date round-trip, waypoint lines, profile prefill.</summary>
 public sealed class FormViewModelTests
 {
-    [HumansTheory]
-    [InlineData("en")]
-    [InlineData("es")]
-    [InlineData("de")]
-    [InlineData("it")]
-    [InlineData("fr")]
-    [InlineData("ca")]
-    public void MemberForms_LocalizeValidationMessages(string culture)
+    [HumansFact]
+    public void MemberForms_LocalizeValidationMessages()
     {
-        using var cultureScope = new CultureScope(culture);
+        using var cultureScope = new CultureScope(CultureCatalog.DefaultCultureCode);
         var registrations = new ServiceCollection().AddLogging().AddLocalization();
         registrations.AddControllers().AddDataAnnotationsLocalization(options =>
             options.DataAnnotationLocalizerProvider = (_, factory) => factory.Create(typeof(SharedResource)));
@@ -46,16 +40,16 @@ public sealed class FormViewModelTests
             (new OfferFormViewModel { CapacityNote = new string('x', 501) }, "CapacityNote", "Validation_MaxLength", ["CapacityNote", 500]),
             (new OfferFormViewModel { Restrictions = new string('x', 501) }, "Restrictions", "Validation_MaxLength", ["Restrictions", 500]),
             (new OfferFormViewModel { CostNote = new string('x', 501) }, "CostNote", "Validation_MaxLength", ["CostNote", 500]),
-            (new OfferFormViewModel { Latitude = 91 }, "Latitude", "Validation_Range", ["Latitude", -90, 90]),
-            (new OfferFormViewModel { Longitude = 181 }, "Longitude", "Validation_Range", ["Longitude", -180, 180]),
+            (new OfferFormViewModel { Latitude = 90.1 }, "Latitude", "Validation_Range", ["Latitude", -90, 90]),
+            (new OfferFormViewModel { Longitude = 180.1 }, "Longitude", "Validation_Range", ["Longitude", -180, 180]),
             (new OfferFormViewModel { ExpectedDurationDays = 0 }, "ExpectedDurationDays", "Validation_Range", ["ExpectedDurationDays", 1, 30]),
             (new OfferFormViewModel { SeatsOffered = 21 }, "SeatsOffered", "Validation_Range", ["SeatsOffered", 1, 20]),
             (new RequestFormViewModel(), "PickupPlaceLabel", "Validation_Required", ["PickupPlaceLabel"]),
             (new RequestFormViewModel { PickupPlaceLabel = "Town" }, "DesiredDate", "Validation_Required", ["DesiredDate"]),
             (new RequestFormViewModel { PickupPlaceLabel = new string('x', 257) }, "PickupPlaceLabel", "Validation_MaxLength", ["PickupPlaceLabel", 256]),
             (new RequestFormViewModel { Notes = new string('x', 1001) }, "Notes", "Validation_MaxLength", ["Notes", 1000]),
-            (new RequestFormViewModel { Latitude = 91 }, "Latitude", "Validation_Range", ["Latitude", -90, 90]),
-            (new RequestFormViewModel { Longitude = 181 }, "Longitude", "Validation_Range", ["Longitude", -180, 180]),
+            (new RequestFormViewModel { Latitude = 90.1 }, "Latitude", "Validation_Range", ["Latitude", -90, 90]),
+            (new RequestFormViewModel { Longitude = 180.1 }, "Longitude", "Validation_Range", ["Longitude", -180, 180]),
             (new RequestFormViewModel { PartySize = 21 }, "PartySize", "Validation_Range", ["PartySize", 1, 20]),
         };
         foreach (var (model, field, key, arguments) in cases)
@@ -68,10 +62,26 @@ public sealed class FormViewModelTests
         }
     }
 
+    [HumansTheory]
+    [InlineData(90.1, 0)]
+    [InlineData(-90.1, 0)]
+    [InlineData(0, 180.1)]
+    [InlineData(0, -180.1)]
+    public void SettingsCoordinates_RejectFractionalValuesOutsideBounds(double latitude, double longitude)
+    {
+        var model = new RideshareSettingsViewModel { DestinationLatitude = latitude, DestinationLongitude = longitude };
+        var validLatitude = System.ComponentModel.DataAnnotations.Validator.TryValidateProperty(latitude,
+            new System.ComponentModel.DataAnnotations.ValidationContext(model) { MemberName = nameof(model.DestinationLatitude) }, null);
+        var validLongitude = System.ComponentModel.DataAnnotations.Validator.TryValidateProperty(longitude,
+            new System.ComponentModel.DataAnnotations.ValidationContext(model) { MemberName = nameof(model.DestinationLongitude) }, null);
+
+        (validLatitude && validLongitude).Should().BeFalse();
+    }
+
     private static readonly LocalDate July3 = new(2026, 7, 3);
     private static readonly LocalDate Today = new(2026, 3, 1);
     private static readonly Instant Now = Instant.FromUtc(2026, 3, 1, 12, 0);
-    private static readonly SettingsView Settings = new(2026, "Elsewhere", 43.2, -2.4,
+    private static readonly SettingsView Settings = new("Elsewhere", 43.2, -2.4,
         new LocalDate(2026, 7, 1), new LocalDate(2026, 7, 10), new LocalDate(2026, 7, 12), new LocalDate(2026, 7, 20));
 
     [HumansTheory]
@@ -121,10 +131,10 @@ public sealed class FormViewModelTests
     [HumansFact]
     public void OfferForm_FromTrip_RoundTripsThroughToSave()
     {
-        var trip = new TripView(Guid.NewGuid(), Guid.NewGuid(), 2026, RideshareDirection.Outbound, "Paris", 48.85, 2.35,
+        var trip = new TripView(Guid.NewGuid(), Guid.NewGuid(), RideshareDirection.Outbound, "Paris", 48.85, 2.35,
             [new Waypoint("Lyon", 45.76, 4.84), new Waypoint("Bordeaux", 44.84, -0.58)], null,
             July3, 2, "Camping", VehicleType.Van, 4, 4, LuggageSize.Lots, "roof box", "no dogs", true,
-            CostSharing.Other, "20€", null, TripStatus.Active, Now, Now);
+            CostSharing.Other, "20€", null, TripStatus.Active, Now);
 
         var form = OfferFormViewModel.FromTrip(trip);
         form.IsEdit.Should().BeTrue();
@@ -140,8 +150,8 @@ public sealed class FormViewModelTests
     [HumansFact]
     public void RequestForm_FromRequest_RoundTripsThroughToSave()
     {
-        var request = new RequestView(Guid.NewGuid(), Guid.NewGuid(), 2026, RideshareDirection.Outbound, "Lyon", 45.76, 4.84,
-            July3, 2, LuggageSize.Lots, false, "two tents", RequestStatus.Active, false, Now, Now);
+        var request = new RequestView(Guid.NewGuid(), Guid.NewGuid(), RideshareDirection.Outbound, "Lyon", 45.76, 4.84,
+            July3, 2, LuggageSize.Lots, false, "two tents", RequestStatus.Active, false, Now);
 
         var form = RequestFormViewModel.FromRequest(request);
         form.IsEdit.Should().BeTrue();
@@ -205,5 +215,5 @@ public sealed class FormViewModelTests
     private static UserInfo User(ProfileInfo? profile) => new(
         Guid.NewGuid(), "Ada", false, "en", null, Now,
         null, null, null, null, null, null,
-        null, null, null, [], [], [], profile, []);
+        null, null, null, [], [], profile);
 }

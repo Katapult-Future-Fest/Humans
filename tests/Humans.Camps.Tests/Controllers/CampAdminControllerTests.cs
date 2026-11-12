@@ -27,14 +27,129 @@ public class CampAdminControllerTests
     private static readonly Guid ActiveEventId = Guid.NewGuid();
 
     [HumansTheory]
+    [InlineData("Approve")]
+    [InlineData("Reject")]
+    [InlineData("EeSlots")]
+    [InlineData("EditRole")]
+    [InlineData("SeedRoles")]
+    public async Task AdminPreflight_CancelsTheAccountReadBeforeMutation(string action)
+    {
+        using var request = new CancellationTokenSource();
+        var camps = Substitute.For<ICampManagement>();
+        var roles = Substitute.For<ICampRoleService>();
+        var users = Substitute.For<IUserService>();
+        var actorId = Guid.NewGuid();
+        var id = Guid.NewGuid();
+        async ValueTask<UserInfo?> ReadActorAsync(CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            return MakeUser(actorId);
+        }
+        users.GetUserInfoAsync(actorId, Arg.Any<CancellationToken>())
+            .Returns(call => ReadActorAsync(call.Arg<CancellationToken>()));
+        camps.ApproveSeasonAsync(id, actorId, null).Returns(new CampAdminMutationResult(true));
+        camps.RejectSeasonAsync(id, actorId, "Rejected").Returns(new CampAdminMutationResult(true));
+        camps.SetCampSeasonEeSlotCountAsync(id, 3, actorId, Arg.Any<CancellationToken>())
+            .Returns(new CampAdminMutationResult(true));
+        roles.UpdateDefinitionAsync(id, Arg.Any<CampRoleDefinitionInput>(), actorId, Arg.Any<CancellationToken>())
+            .Returns(new UpdateCampRoleDefinitionResult(UpdateCampRoleDefinitionStatus.Updated, "Updated"));
+        var controller = CreateController(camps, roles, users, actorId);
+        controller.HttpContext.RequestAborted = request.Token;
+        Task<IActionResult> InvokeAsync() => action switch
+        {
+            "Approve" => controller.Approve(id, null),
+            "Reject" => controller.Reject(id, "Rejected"),
+            "EeSlots" => controller.SetCampSeasonEeSlotCount(id, 3, request.Token),
+            "EditRole" => controller.EditRole(id, new CampRoleDefinitionFormViewModel { Name = "Role", Slug = "role" }, request.Token),
+            _ => controller.SeedSystemRoles(request.Token),
+        };
+        Assert.IsType<RedirectToActionResult>(await InvokeAsync());
+        var mutation = Assert.Single(camps.ReceivedCalls().Concat(roles.ReceivedCalls()));
+        var mutationToken = Assert.Single(mutation.GetArguments().OfType<CancellationToken>());
+        Assert.Equal(action is "Approve" or "Reject" ? CancellationToken.None : request.Token, mutationToken);
+        camps.ClearReceivedCalls();
+        roles.ClearReceivedCalls();
+        await request.CancelAsync();
+
+        await Assert.ThrowsAsync<OperationCanceledException>(InvokeAsync);
+        Assert.Empty(camps.ReceivedCalls());
+        Assert.Empty(roles.ReceivedCalls());
+        await users.Received(2).GetUserInfoAsync(actorId, request.Token);
+    }
+
+    [HumansTheory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task Export_AuditsAdministratorAndEmittedRows_IncludingEmptyExports(bool hasSeason)
+    public async Task Export_StopsBeforeReadingContactsWhenTheActorIsMissingOrCancelled(bool cancelled)
+    {
+        var actorId = Guid.NewGuid();
+        var camps = Substitute.For<ICampManagement>();
+        camps.GetSettingsAsync(Arg.Any<CancellationToken>()).Returns(new CampSettingsInfo(2026, []));
+        var users = Substitute.For<IUserService>();
+        users.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<Guid, UserInfo>());
+        var audit = Substitute.For<IAuditLogService>();
+        using var request = new CancellationTokenSource();
+        async ValueTask<UserInfo?> ReadActorAsync(CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            return null;
+        }
+        users.GetUserInfoAsync(actorId, Arg.Any<CancellationToken>())
+            .Returns(call => ReadActorAsync(call.Arg<CancellationToken>()));
+        var controller = CreateController(camps, Substitute.For<ICampRoleService>(), users, actorId, audit: audit);
+        controller.HttpContext.RequestAborted = request.Token;
+        if (cancelled)
+        {
+            await request.CancelAsync();
+            await Assert.ThrowsAsync<OperationCanceledException>(() => controller.ExportCamps());
+        }
+        else
+        {
+            Assert.IsType<UnauthorizedResult>(await controller.ExportCamps());
+        }
+        Assert.Empty(camps.ReceivedCalls());
+        Assert.Empty(audit.ReceivedCalls());
+        await users.Received(1).GetUserInfoAsync(actorId, request.Token);
+        await users.DidNotReceive().GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>());
+    }
+
+    [HumansFact]
+    public async Task Roles_orders_active_and_deactivated_definitions_by_position_then_name()
+    {
+        var camps = Substitute.For<ICampManagement>();
+        camps.GetSettingsAsync(Arg.Any<CancellationToken>()).Returns(new CampSettingsInfo(2026, [2026]));
+        var roles = Substitute.For<ICampRoleService>();
+        CampRoleDefinitionInfo Definition(string name, int order, bool active) =>
+            new(Guid.NewGuid(), name, "", null, 1, 1, order, default, default,
+                active ? null : Instant.FromUtc(2026, 1, 1, 0, 0), CampSpecialRole.None);
+        roles.ListDefinitionsAsync(true, Arg.Any<CancellationToken>()).Returns([
+            Definition("Zebra", 1, true), Definition("Old Zebra", 1, false),
+            Definition("Alpha", 1, true), Definition("Old Alpha", 1, false),
+            Definition("Priority", -1, true), Definition("Old Priority", -1, false),
+        ]);
+        var controller = CreateController(camps, roles, Substitute.For<IUserService>(), Guid.NewGuid());
+
+        var result = await controller.Roles(TestContext.Current.CancellationToken);
+
+        var model = result.Should().BeOfType<ViewResult>().Which.Model.Should().BeOfType<CampRoleDefinitionListViewModel>().Which;
+        model.Active.Select(role => role.Name).Should().Equal("Priority", "Alpha", "Zebra");
+        model.Deactivated.Select(role => role.Name).Should().Equal("Old Priority", "Old Alpha", "Old Zebra");
+    }
+
+    [HumansTheory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task Export_AuditsAdministratorAndEmittedRows_IncludingEmptyExports(bool hasSeason, bool mergedAlias)
     {
         var camps = Substitute.For<ICampManagement>();
         var users = Substitute.For<IUserService>();
         var audit = Substitute.For<IAuditLogService>();
         var actorId = Guid.NewGuid();
+        var resolvedActorId = mergedAlias ? Guid.NewGuid() : actorId;
+        users.GetUserInfoAsync(actorId, Arg.Any<CancellationToken>()).Returns(MakeUser(resolvedActorId));
         var leadId = Guid.NewGuid();
         var camp = new CampInfo(Guid.NewGuid(), "camp", "contact@example.org", "+34600000000", false, 1, []);
         if (hasSeason)
@@ -64,7 +179,7 @@ public class CampAdminControllerTests
             csv.Should().Contain("contact@example.org").And.Contain("Lead <lead@example.org>");
         file.FileDownloadName.Should().Be("barrios-2026.csv");
         await audit.Received(1).LogAsync(CampsAuditActions.CampsExported, "Camps", Guid.Empty,
-            $"Camp contact and lead list exported for 2026: {(hasSeason ? 1 : 0)} rows", actorId);
+            $"Camp contact and lead list exported for 2026: {(hasSeason ? 1 : 0)} rows", resolvedActorId);
     }
 
     [HumansFact]
@@ -279,7 +394,9 @@ public class CampAdminControllerTests
             return [];
         });
         var logger = Substitute.For<ILogger<CampAdminController>>();
-        var controller = CreateController(camps, roles, users, Guid.NewGuid(), logger);
+        var actorId = Guid.NewGuid();
+        users.GetUserInfoAsync(actorId, Arg.Any<CancellationToken>()).Returns(MakeUser(actorId));
+        var controller = CreateController(camps, roles, users, actorId, logger);
         controller.HttpContext.RequestAborted = cancellation.Token;
         Func<Task<IActionResult>> read = dashboard ? controller.Index : controller.ExportCamps;
 
@@ -589,5 +706,5 @@ public class CampAdminControllerTests
 
     private static UserInfo MakeUser(Guid id) => new(
         id, "actor", false, "en", null, SystemClock.Instance.GetCurrentInstant(), null,
-        null, null, null, null, null, null, null, null, [], [], [], null, []);
+        null, null, null, null, null, null, null, null, [], [], null);
 }

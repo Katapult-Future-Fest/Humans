@@ -131,6 +131,8 @@ public class NotificationMeterProviderTests : IDisposable
             });
         _campService.GetSettingsAsync(Arg.Any<CancellationToken>()).Returns(new CampSettingsInfo(2026, [2026]));
         _campService.GetCampsForYearAsync(2026, Arg.Any<CancellationToken>()).Returns(Array.Empty<CampInfo>());
+        _userService.GetUserInfoAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>())
+            .Returns(call => UserInfo.Create(new User { Id = call.Arg<Guid>() }, [], [], null));
         var controller = new NotificationsController(inbox, _userService, _provider, NullLogger<NotificationsController>.Instance)
         {
             ControllerContext = new()
@@ -155,14 +157,8 @@ public class NotificationMeterProviderTests : IDisposable
         meters.Should().Contain(m => m.Title == "Failed Google sync events" && m.Count == 3);
     }
 
-    [HumansTheory]
-    [InlineData("en")]
-    [InlineData("es")]
-    [InlineData("de")]
-    [InlineData("it")]
-    [InlineData("fr")]
-    [InlineData("ca")]
-    public async Task MeterTitles_FollowRequestCultureIncludingCampRequestCounts(string culture)
+    [HumansFact]
+    public async Task MeterTitles_FollowRequestCultureIncludingCampRequestCounts()
     {
         using var initialCulture = new CultureScope("en");
         using var services = new ServiceCollection().AddLogging().AddLocalization().BuildServiceProvider();
@@ -195,13 +191,14 @@ public class NotificationMeterProviderTests : IDisposable
             "TicketSyncError", "CampJoinRequest"
         };
 
-        _ = await _provider.GetMetersForUserAsync(principal, TestContext.Current.CancellationToken);
-        using var requestCulture = new CultureScope(culture);
+        var english = (await _provider.GetMetersForUserAsync(principal, TestContext.Current.CancellationToken))
+            .Select(m => m.Title).ToList();
+        using var requestCulture = new CultureScope(CultureCatalog.CanonicalLegalCultureCode);
         var meters = await _provider.GetMetersForUserAsync(principal, TestContext.Current.CancellationToken);
 
         var expected = keys.Select(key => localizer["Notifications_Meter_" + key]).ToList();
         expected.Should().OnlyContain(value => !value.ResourceNotFound);
-        meters.Select(m => m.Title).Should().Equal(expected.Select(value => value.Value));
+        meters.Select(m => m.Title).Should().Equal(expected.Select(value => value.Value)).And.NotEqual(english);
         // No per-user cache over the camp reads: a changed roster shows on the next call.
         _campService.GetCampsForYearAsync(2026, Arg.Any<CancellationToken>())
             .Returns([MakeCampInfoWithPendingRequest(userId), MakeCampInfoWithPendingRequest(userId)]);
@@ -226,6 +223,7 @@ public class NotificationMeterProviderTests : IDisposable
         var onboardingMeter = meters.Single(m =>
             string.Equals(m.Title, "Onboarding profiles pending", StringComparison.Ordinal));
         onboardingMeter.Count.Should().Be(1);
+        onboardingMeter.Audience.Should().Be("the Board");
     }
 
     [HumansFact]
@@ -240,7 +238,8 @@ public class NotificationMeterProviderTests : IDisposable
 
         meters.Should().ContainSingle(m =>
             string.Equals(m.Title, "Onboarding profiles pending", StringComparison.Ordinal) &&
-            string.Equals(m.ActionUrl, "/OnboardingReview", StringComparison.Ordinal));
+            string.Equals(m.ActionUrl, "/Consent/ReviewQueue", StringComparison.Ordinal) &&
+            string.Equals(m.Audience, "Shifts Admins", StringComparison.Ordinal));
     }
 
     [HumansFact]
@@ -264,15 +263,17 @@ public class NotificationMeterProviderTests : IDisposable
             m.Count == 2);
     }
 
-    [HumansFact]
-    public async Task GetMetersForUserAsync_ConsentCoordinator_SeesConsentReviewsPending()
+    [HumansTheory]
+    [InlineData(ConsentRoles.ConsentCoordinator)]
+    [InlineData(RoleNames.Admin)]
+    public async Task GetMetersForUserAsync_ConsentReviewer_SeesConsentReviewsPending(string role)
     {
         _userService.GetAllUserInfosAsync(Arg.Any<CancellationToken>())
             .Returns(Task.FromResult(MakeNeedsConsentReview(3)));
         _googleSyncService.GetFailedSyncEventCountAsync(Arg.Any<CancellationToken>()).Returns(0);
         _ticketSyncService.IsInErrorStateAsync(Arg.Any<CancellationToken>()).Returns(false);
 
-        var meters = await _provider.GetMetersForUserAsync(CreatePrincipal(ConsentRoles.ConsentCoordinator), TestContext.Current.CancellationToken);
+        var meters = await _provider.GetMetersForUserAsync(CreatePrincipal(role), TestContext.Current.CancellationToken);
 
         meters.Should().ContainSingle(m =>
             string.Equals(m.Title, "Consent reviews pending", StringComparison.Ordinal) &&
@@ -474,14 +475,11 @@ public class NotificationMeterProviderTests : IDisposable
                     CreatedAt = Instant.FromUtc(2026, 1, 1, 0, 0),
                 },
                 userEmails: [],
-                eventParticipations: [],
                 externalLogins: [],
                 profile: UserFixtures.Profile(
                     burnerName: "B",
                     firstName: "F",
-                    lastName: "L",
-                    isApproved: false),
-                communicationPreferences: []);
+                    lastName: "L"));
         }).ToList();
 
     private static CampInfo MakeCampInfoWithPendingRequest(Guid leadUserId, int year = 2026)

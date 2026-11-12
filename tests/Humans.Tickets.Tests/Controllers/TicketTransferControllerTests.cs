@@ -4,6 +4,7 @@ using AwesomeAssertions;
 using Humans.Base.Constants;
 using Humans.EarlyEntry.Contracts;
 using Humans.Tickets.Controllers;
+using Humans.Tickets.Contracts;
 using Humans.Tickets.Models;
 using Humans.Tickets.Services;
 using Humans.Tickets.Services.Dtos;
@@ -21,6 +22,82 @@ namespace Humans.Tickets.Tests.Controllers;
 
 public class TicketTransferControllerTests
 {
+    [HumansTheory]
+    [InlineData("confirm")]
+    [InlineData("submit")]
+    [InlineData("cancel")]
+    [InlineData("decide")]
+    public async Task TransferActions_CancelActorLookupBeforeAnyOperation(string action)
+    {
+        using var request = new CancellationTokenSource();
+        var id = Guid.NewGuid();
+        var users = Substitute.For<IUserService>();
+        users.GetUserInfoAsync(id, Arg.Any<CancellationToken>()).Returns(call =>
+        {
+            call.Arg<CancellationToken>().ThrowIfCancellationRequested();
+            return new ValueTask<UserInfo?>((UserInfo?)null);
+        });
+        var transfers = Substitute.For<ITicketTransferService>();
+        var http = new DefaultHttpContext
+        {
+            RequestAborted = request.Token,
+            User = new ClaimsPrincipal(new ClaimsIdentity([new Claim(ClaimTypes.NameIdentifier, id.ToString())], "test"))
+        };
+        var controller = new TicketTransferController(transfers, Substitute.For<IEarlyEntryService>(), users,
+            NullLogger<TicketTransferController>.Instance, Substitute.For<IStringLocalizer<TicketsResource>>())
+        {
+            ControllerContext = new ControllerContext { HttpContext = http }
+        };
+        var admin = new TicketTransferAdminController(transfers, Substitute.For<ITicketManagement>(), users)
+        {
+            ControllerContext = new ControllerContext { HttpContext = http }
+        };
+        await request.CancelAsync();
+        Func<Task<IActionResult>> run = () => action switch
+        {
+            "confirm" => controller.Confirm(Guid.NewGuid(), Guid.NewGuid(), request.Token),
+            "submit" => controller.Submit(Guid.NewGuid(), Guid.NewGuid(), "reason", request.Token),
+            "cancel" => controller.Cancel(Guid.NewGuid(), request.Token),
+            _ => admin.Decide(Guid.NewGuid(), "process", null, request.Token)
+        };
+
+        await run.Should().ThrowAsync<OperationCanceledException>();
+        transfers.ReceivedCalls().Should().BeEmpty();
+    }
+
+    [HumansFact]
+    public async Task Index_OrdersTransferableTicketsByNameIgnoringCase()
+    {
+        var userId = Guid.NewGuid();
+        var users = Substitute.For<IUserService>();
+        users.GetUserInfoAsync(userId, Arg.Any<CancellationToken>())
+            .Returns(UserInfo.Create(new User { Id = userId }, [], [], null));
+        var transfers = Substitute.For<ITicketTransferService>();
+        transfers.GetMyAttendeesAsync(userId, Arg.Any<CancellationToken>()).Returns(
+        [
+            new MyAttendeeRowDto(new(Guid.NewGuid(), "Zoe", null, "z", "GA", TicketAttendeeStatus.Valid), true),
+            new MyAttendeeRowDto(new(Guid.NewGuid(), "alpha", null, "a", "GA", TicketAttendeeStatus.Valid), true)
+        ]);
+        transfers.GetBySenderAsync(userId, Arg.Any<CancellationToken>()).Returns([]);
+        var controller = new TicketTransferController(transfers, Substitute.For<IEarlyEntryService>(),
+            users, NullLogger<TicketTransferController>.Instance, Substitute.For<IStringLocalizer<TicketsResource>>())
+        {
+            ControllerContext = new ControllerContext
+            {
+                HttpContext = new DefaultHttpContext
+                {
+                    User = new ClaimsPrincipal(new ClaimsIdentity(
+                        [new Claim(ClaimTypes.NameIdentifier, userId.ToString())], "Test"))
+                }
+            }
+        };
+
+        var result = await controller.Index(TestContext.Current.CancellationToken);
+
+        result.Should().BeOfType<ViewResult>().Which.Model.Should().BeOfType<TicketTransferWizardViewModel>()
+            .Subject.MyTickets.Select(t => t.Ticket.AttendeeName).Should().Equal("alpha", "Zoe");
+    }
+
     [HumansFact]
     public async Task Index_CancelsAtViewerResolution()
     {
@@ -30,7 +107,7 @@ public class TicketTransferControllerTests
         users.GetUserInfoAsync(id, Arg.Any<CancellationToken>()).Returns(call =>
         {
             call.Arg<CancellationToken>().ThrowIfCancellationRequested();
-            return new ValueTask<UserInfo?>(UserInfo.Create(new User { Id = id }, [], [], [], null, []));
+            return new ValueTask<UserInfo?>(UserInfo.Create(new User { Id = id }, [], [], null));
         });
         var transfers = Substitute.For<ITicketTransferService>();
         transfers.GetMyAttendeesAsync(id, Arg.Any<CancellationToken>()).Returns([]);
@@ -69,7 +146,7 @@ public class TicketTransferControllerTests
             var user = new User { Id = userId };
             var users = Substitute.For<IUserService>();
             users.GetUserInfoAsync(userId, Arg.Any<CancellationToken>())
-                .Returns(UserInfo.Create(user, [], [], [], null, []));
+                .Returns(UserInfo.Create(user, [], [], null));
             var transfers = Substitute.For<ITicketTransferService>();
             transfers.GetMyAttendeesAsync(userId, Arg.Any<CancellationToken>()).Returns([]);
             transfers.GetBySenderAsync(userId, Arg.Any<CancellationToken>()).Returns([]);
@@ -110,7 +187,7 @@ public class TicketTransferControllerTests
             if (cancel)
             {
                 await controller.Cancel(Guid.NewGuid(), TestContext.Current.CancellationToken);
-                controller.TempData[TempDataKeys.ErrorMessage].Should().Be("Transferencia no encontrada.");
+                controller.TempData[TempDataKeys.ErrorMessage].Should().Be(localizer["Tickets_TicketTransfer_NotFound"].Value);
             }
             else
             {

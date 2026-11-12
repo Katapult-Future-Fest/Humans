@@ -18,8 +18,8 @@ public interface IShiftService : IApplicationService
     Task<IReadOnlyList<Guid>> GetCoordinatorTeamIdsAsync(Guid userId, CancellationToken ct = default);
 
     /// <summary>
-    /// Volunteer-visible rotas in the active event, matched by name and scored, in no order: the search
-    /// orchestrator ranks. Every caller sees the public surface whatever their role.
+    /// At most <paramref name="max"/> highest-scoring volunteer-visible rotas in the active event, matched by name.
+    /// The caller controls presentation order. Every caller sees the public surface whatever their role.
     /// </summary>
     Task<IReadOnlyList<RotaSearchHit>> SearchAsync(
         string query, int max,
@@ -90,7 +90,8 @@ public sealed record ShiftBrowseQuery(
     Guid? DepartmentId = null,
     LocalDate? FromDate = null,
     LocalDate? ToDate = null,
-    ShiftBrowseQueryFlags Flags = ShiftBrowseQueryFlags.None);
+    ShiftBrowseQueryFlags Flags = ShiftBrowseQueryFlags.None,
+    Guid? ViewerUserId = null);
 
 public record DailyStaffingData(
     int DayOffset,

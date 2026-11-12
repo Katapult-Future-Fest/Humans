@@ -15,13 +15,6 @@ internal sealed class NotificationRepository(IDbContextFactory<NotificationsDbCo
         await ctx.SaveChangesAsync(ct);
     }
 
-    public async Task AddAsync(Notification notification, CancellationToken ct = default)
-    {
-        await using var ctx = await factory.CreateDbContextAsync(ct);
-        ctx.Notifications.Add(notification);
-        await ctx.SaveChangesAsync(ct);
-    }
-
     public async Task<NotificationMutationOutcome> ResolveAsync(
         Guid notificationId, Guid actorUserId, Instant now, NotificationClass expectedClass, CancellationToken ct = default)
     {
@@ -99,7 +92,7 @@ internal sealed class NotificationRepository(IDbContextFactory<NotificationsDbCo
         await PersistResolutionAsync(ctx, notifications, now, userId, ct);
     }
 
-    public async Task<ClickThroughOutcome> ClickThroughAsync(
+    public async Task<string?> ClickThroughAsync(
         Guid notificationId, Guid userId, Instant now, CancellationToken ct = default)
     {
         await using var ctx = await factory.CreateDbContextAsync(ct);
@@ -108,7 +101,7 @@ internal sealed class NotificationRepository(IDbContextFactory<NotificationsDbCo
             .FirstOrDefaultAsync(nr => nr.NotificationId == notificationId && nr.UserId == userId, ct);
 
         if (recipient is null)
-            return new ClickThroughOutcome(ActionUrl: null, NotFound: true);
+            return null;
 
         if (recipient.ReadAt is null)
         {
@@ -116,7 +109,7 @@ internal sealed class NotificationRepository(IDbContextFactory<NotificationsDbCo
             await ctx.SaveChangesAsync(ct);
         }
 
-        return new ClickThroughOutcome(recipient.Notification.ActionUrl, NotFound: false);
+        return recipient.Notification.ActionUrl;
     }
 
     public async Task ResolveBySourceAsync(
@@ -256,16 +249,17 @@ internal sealed class NotificationRepository(IDbContextFactory<NotificationsDbCo
                 break;
         }
 
+        var recipients = await query.ToListAsync(ct);
         if (!string.IsNullOrWhiteSpace(search) && search.Trim().Length >= 2)
         {
-            var term = $"%{search.Trim()}%";
-            query = query.Where(nr =>
-                EF.Functions.ILike(nr.Notification.Title, term) ||
-                (nr.Notification.Body != null && EF.Functions.ILike(nr.Notification.Body, term)));
+            var term = search.Trim();
+            return recipients.Where(nr =>
+                nr.Notification.Title.Contains(term, StringComparison.OrdinalIgnoreCase) ||
+                nr.Notification.Body?.Contains(term, StringComparison.OrdinalIgnoreCase) == true)
+                .ToList();
         }
 
-        return await query
-            .ToListAsync(ct);
+        return recipients;
     }
 
     public async Task<IReadOnlyList<NotificationRecipient>> GetPopupAsync(
@@ -273,7 +267,7 @@ internal sealed class NotificationRepository(IDbContextFactory<NotificationsDbCo
     {
         await using var ctx = await factory.CreateDbContextAsync(ct);
         return await ctx.NotificationRecipients
-            .Where(nr => nr.UserId == userId && nr.Notification.ResolvedAt == null)
+            .Where(nr => nr.UserId == userId && nr.ReadAt == null && nr.Notification.ResolvedAt == null)
             .Include(nr => nr.Notification)
             .AsNoTracking()
             .ToListAsync(ct);

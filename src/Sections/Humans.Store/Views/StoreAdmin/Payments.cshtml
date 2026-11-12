@@ -18,14 +18,13 @@
     };
 }
 
-<div class="d-flex justify-content-between align-items-center mb-4">
-    <h1 class="mb-0">Stripe Payments</h1>
+<page-header title="Stripe Payments">
     <div class="btn-group">
         <a asp-action="Catalog" class="btn btn-outline-secondary">Catalog</a>
         <a asp-action="Summary" class="btn btn-outline-secondary">Summary</a>
         <a asp-controller="Store" asp-action="Index" class="btn btn-outline-secondary">Back to Store</a>
     </div>
-</div>
+</page-header>
 
 
 @if (!report.WebhookConfigured)
@@ -96,15 +95,11 @@ else if (!report.StripeQueried)
 @if (Model.Rows.Count == 0)
 {
     <div class="card">
-        <div class="card-body text-center py-4 text-muted">No Stripe Checkout payments found for the Store account.</div>
+        <div class="card-body py-4"><empty-state class="mb-0">No Stripe Checkout payments found for the Store account.</empty-state></div>
     </div>
 }
 else
 {
-    Func<StripeReconciliationRow, IHtmlContent> stripeCreatedCell =
-        @<text>@(item.CreatedAt?.ToInvariantTimestamp() ?? "—")</text>;
-    Func<StripeReconciliationRow, IHtmlContent> stripeAmountCell =
-        @<text>@(item.AmountEur.HasValue ? item.AmountEur.Value.ToEuro() : "—")</text>;
     Func<StripeReconciliationRow, IHtmlContent> stripeStatusCell = @<text>
         @{
             var (css, label) = StatusBadge(item.Status);
@@ -121,16 +116,14 @@ else
             <span class="text-muted">no order metadata</span>
         }
     </text>;
-    Func<StripeReconciliationRow, IHtmlContent> stripePiCell =
-        @<text><code class="small">@(item.PaymentIntentId ?? "—")</code></text>;
     <div class="card">
         @{
             var stripeTable = TableModel.For(Model.Rows)
-                .Template("Created (UTC)", stripeCreatedCell)
-                .Template("Amount", stripeAmountCell, c => c.NoSort().End())
+                .Column("Created (UTC)", r => r.CreatedAt?.ToInvariantTimestamp() ?? "—")
+                .Column("Amount", r => r.AmountEur.HasValue ? r.AmountEur.Value.ToEuro() : "—", c => c.Css("text-nowrap").NoSort().End())
                 .Template("Status", stripeStatusCell)
                 .Template("Order", stripeOrderCell)
-                .Template("PaymentIntent", stripePiCell)
+                .Column("PaymentIntent", r => r.PaymentIntentId ?? "—", o => o.Code().Css("small"))
                 .Build();
         }
         <partial name="_Table" model="stripeTable" />
@@ -141,19 +134,13 @@ else
 {
     <h2 class="h5 mt-4 mb-2 text-warning">Orphan payments — recorded here but not found in Stripe</h2>
     <p class="text-muted small">Investigate manually; these are never auto-removed.</p>
-    Func<StripeOrphanPayment, IHtmlContent> orphanAmountCell =
-        @<text>@item.AmountEur.ToEuro()</text>;
-    Func<StripeOrphanPayment, IHtmlContent> orphanOrderCell =
-        @<text><a asp-controller="Store" asp-action="Order" asp-route-id="@item.OrderId">@(item.OrderLabel ?? item.OrderId.ToString())</a></text>;
-    Func<StripeOrphanPayment, IHtmlContent> orphanPiCell =
-        @<text><code class="small">@item.PaymentIntentId</code></text>;
     <div class="card">
         @{
             var orphansTable = TableModel.For(report.Orphans)
                 .Column("Recorded (UTC)", o => o.ReceivedAt.ToInvariantTimestamp())
-                .Template("Amount", orphanAmountCell, c => c.NoSort().End())
-                .Template("Order", orphanOrderCell)
-                .Template("PaymentIntent", orphanPiCell)
+                .Column("Amount", o => o.AmountEur.ToEuro(), c => c.Css("text-nowrap").NoSort().End())
+                .Link("Order", o => o.OrderLabel ?? o.OrderId.ToString(), o => Url.Action("Order", "Store", new { id = o.OrderId }))
+                .Column("PaymentIntent", o => o.PaymentIntentId, o => o.Code().Css("small"))
                 .Build();
         }
         <partial name="_Table" model="orphansTable" />

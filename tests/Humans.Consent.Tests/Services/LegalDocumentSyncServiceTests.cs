@@ -1,3 +1,5 @@
+using Humans.Base.Interfaces;
+using Humans.Consent.Jobs;
 using System.Globalization;
 using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Microsoft.AspNetCore.Mvc.ModelBinding.Validation;
@@ -13,6 +15,8 @@ using Humans.AuditLog.Contracts;
 using AwesomeAssertions;
 using Humans.Notifications.Contracts;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NodaTime;
@@ -22,6 +26,8 @@ using Humans.Teams.Contracts;
 using Humans.Consent.Services;
 using Humans.Consent.Domain;
 using Humans.Consent.Data;
+using Humans.Consent.Contracts;
+using Humans.Email.Contracts;
 using Humans.Users.Contracts;
 
 namespace Humans.Consent.Tests.Services;
@@ -53,7 +59,6 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
 
         _teamService.GetTeamAsync(_team.Id, Arg.Any<CancellationToken>()).Returns(_team);
 
-        // Team-name stitch: return the seed team when queried.
         _teamService
             .GetTeamsWithParentsAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
             .Returns(ci =>
@@ -65,8 +70,6 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
                 return Task.FromResult(map);
             });
 
-        _userService.GetAllUserInfosAsync(Arg.Any<CancellationToken>())
-            .Returns([]);
 
         _cache = new CachingLegalDocumentSyncService(
             new ServiceCollection().BuildServiceProvider().GetRequiredService<IServiceScopeFactory>(),
@@ -92,6 +95,240 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
     }
 
     [HumansTheory]
+    [Xunit.InlineData("create")]
+    [Xunit.InlineData("update")]
+    [Xunit.InlineData("archive")]
+    [Xunit.InlineData("summary")]
+    [Xunit.InlineData("touch")]
+    [Xunit.InlineData("publish")]
+    public async Task LegalWrite_LostSaveAcknowledgement_DiscardsStaleSnapshot(string operation)
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var document = await SeedDocumentAsync("Privacy", folderPath: "privacy/", currentCommitSha: "old-sha");
+        var versionId = Guid.NewGuid();
+        LegalDb.DocumentVersions.Add(new DocumentVersion
+        {
+            Id = versionId,
+            LegalDocumentId = document.Id,
+            VersionNumber = "v1.0",
+            CommitSha = "old-sha",
+            Content = new Dictionary<string, string>(StringComparer.Ordinal) { ["es"] = "old" },
+            EffectiveFrom = Clock.GetCurrentInstant(),
+            CreatedAt = Clock.GetCurrentInstant(),
+            ChangesSummary = "old"
+        });
+        await SaveAllAsync(ct);
+        var services = new ServiceCollection();
+        services.AddKeyedScoped<ILegalDocumentSyncManagement>(CachingLegalDocumentSyncService.InnerServiceKey,
+            (_, _) => _service);
+        var cache = new CachingLegalDocumentSyncService(
+            services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>(), Clock,
+            NullLogger<CachingLegalDocumentSyncService>.Instance);
+        (await cache.GetActiveRequiredDocumentsForTeamsAsync(null, ct)).Should().ContainSingle();
+
+        var failure = new IOException("Persistence acknowledgement failed");
+        var options = new DbContextOptionsBuilder<LegalDbContext>(
+            (DbContextOptions<LegalDbContext>)LegalDb.GetService<IDbContextOptions>())
+            .AddInterceptors(new LostLegalSaveAcknowledgement(failure)).Options;
+        var writer = new LegalDocumentSyncService(
+            new LegalDocumentRepository(new TestDbContextFactory<LegalDbContext>(options)),
+            _gitHub, Notifier, _teamService, _userService, cache, _audit,
+            Options.Create(new GitHubSettings()), Clock, NullLogger<LegalDocumentSyncService>.Instance);
+        var request = new AdminLegalDocumentUpsertRequest("Revised", _team.Id, true, true, 14, null);
+        Clock.Advance(Duration.FromHours(1));
+        StubGitHubFolder("privacy/", "new", string.Equals(operation, "touch", StringComparison.Ordinal) ? "old-sha" : "new-sha", "new summary");
+        Func<Task> write = operation switch
+        {
+            "create" => async () => { await writer.CreateLegalDocumentWithInitialSyncAsync(request, _actorUserId, ct); }
+            ,
+            "update" => async () => { await writer.UpdateLegalDocumentAsync(document.Id, request, _actorUserId, ct); }
+            ,
+            "archive" => async () => { await writer.ArchiveLegalDocumentAsync(document.Id, _actorUserId, ct); }
+            ,
+            "summary" => async () => { await writer.UpdateVersionSummaryAsync(document.Id, versionId, "revised summary", _actorUserId, ct); }
+            ,
+            _ => async () => { await writer.SyncDocumentAsync(document.Id, ct); }
+        };
+
+        (await write.Should().ThrowAsync<IOException>()).Which.Should().BeSameAs(failure);
+
+        cache.BulkInvalidations.Should().Be(1);
+        var refreshed = await cache.GetActiveRequiredDocumentsForTeamsAsync(null, ct);
+        switch (operation)
+        {
+            case "create":
+                refreshed.Should().HaveCount(2).And.Contain(d => d.Name == "Revised");
+                break;
+            case "update":
+                refreshed.Single().Name.Should().Be("Revised");
+                break;
+            case "archive":
+                refreshed.Should().BeEmpty();
+                break;
+            case "summary":
+                refreshed.Single().Versions.Single().ChangesSummary.Should().Be("revised summary");
+                break;
+            case "publish":
+                refreshed.Single().Versions.Should().HaveCount(2)
+                    .And.Contain(v => v.Content["es"] == "new");
+                break;
+            case "touch":
+                await using (var verify = await LegalDbFactory.CreateDbContextAsync(ct))
+                    (await verify.LegalDocuments.SingleAsync(ct)).LastSyncedAt.Should().Be(Clock.GetCurrentInstant());
+                break;
+        }
+        _audit.ReceivedCalls().Should().BeEmpty();
+        Notifier.ReceivedCalls().Should().BeEmpty();
+    }
+
+    private sealed class LostLegalSaveAcknowledgement(IOException failure) : SaveChangesInterceptor
+    {
+        public override ValueTask<int> SavedChangesAsync(
+            SaveChangesCompletedEventData eventData, int result, CancellationToken cancellationToken = default) => throw failure;
+    }
+
+    [HumansTheory]
+    [Xunit.InlineData(false)]
+    [Xunit.InlineData(true)]
+    public async Task SyncAndNotify_RetainsBatchAcrossFailureAndRestartWithoutAnotherGitHubChange(bool completionFails)
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var first = await SeedDocumentAsync("Privacy", folderPath: "privacy/");
+        var second = await SeedDocumentAsync("Code", folderPath: "code/");
+        StubGitHubFolder("privacy/", "Privacy content", "sha-privacy", "Privacy update");
+        StubGitHubFolder("code/", "Code content", "sha-code", "Code update");
+        var person = UserInfo.Create(new User { Id = Guid.NewGuid(), BurnerName = "Human", Email = "human@example.com" },
+            [], [], UserFixtures.Profile());
+        var reached = UserInfo.Create(new User { Id = Guid.NewGuid(), BurnerName = "Reached", Email = "reached@example.com" },
+            [], [], UserFixtures.Profile());
+        _teamService.GetTeamAsync(_team.Id, Arg.Any<CancellationToken>()).Returns(_team with
+        {
+            Members = new[] { person, reached }.Select(user => new TeamMemberInfo(
+                Guid.NewGuid(), user.Id, user.BurnerName, user.Email, null, TeamMemberRole.Member, default)).ToList()
+        });
+        _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<Guid, UserInfo> { [person.Id] = person, [reached.Id] = reached });
+        var consents = Substitute.For<IConsentService>();
+        consents.GetConsentMapForUsersAsync(Arg.Any<IReadOnlyList<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<Guid, IReadOnlySet<Guid>>());
+        var pendingRepository = Substitute.For<ILegalDocumentRepository>();
+        pendingRepository.GetDocumentsAsync(null, Arg.Any<CancellationToken>())
+            .Returns(call => _repository.GetDocumentsAsync(null, call.Arg<CancellationToken>()));
+        var email = Substitute.For<Humans.Email.Contracts.IEmailService>();
+        var recovered = false;
+        email.SendAsync(Arg.Any<EmailMessage>(), Arg.Any<CancellationToken>())
+            .Returns(call => recovered || completionFails || call.Arg<EmailMessage>().UserId != person.Id
+                ? Task.CompletedTask : Task.FromException(new IOException("Outbox unavailable")));
+        pendingRepository.CompleteReConsentBatchAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>())
+            .Returns(call => completionFails && !recovered
+                ? Task.FromException(new IOException("Batch completion unavailable"))
+                : _repository.CompleteReConsentBatchAsync(call.Arg<Guid>(), call.Arg<CancellationToken>()));
+        var runner = new LegalDocumentSyncRunner(_service, email, Infrastructure.TestConsentEmails.Create(),
+            _teamService, _userService, consents, pendingRepository, NullLogger<LegalDocumentSyncRunner>.Instance);
+
+        var failedRun = () => runner.SyncAndNotifyAsync(ct);
+        await failedRun.Should().ThrowAsync<AggregateException>();
+        var firstMessages = email.ReceivedCalls().Select(call => (EmailMessage)call.GetArguments()[0]!).ToList();
+        firstMessages.Select(message => message.UserId).Should().BeEquivalentTo(new Guid?[] { person.Id, reached.Id });
+        firstMessages.Select(message => message.DeliveryId).Distinct().Should().HaveCount(2);
+        var pending = (await _repository.GetDocumentsAsync(null, ct)).SelectMany(document => document.Versions).ToList();
+        pending.Should().HaveCount(2).And.OnlyContain(version => version.PendingReConsentBatchId.HasValue);
+        pending.Select(version => version.PendingReConsentBatchId).Distinct().Should().ContainSingle();
+        (await _repository.GetByIdAsync(first.Id, ct))!.Versions.Should().ContainSingle();
+        (await _repository.GetByIdAsync(second.Id, ct))!.Versions.Should().ContainSingle();
+        recovered = true;
+        email.ClearReceivedCalls();
+
+        runner = new LegalDocumentSyncRunner(_service, email, Infrastructure.TestConsentEmails.Create(),
+            _teamService, _userService, consents, pendingRepository, NullLogger<LegalDocumentSyncRunner>.Instance);
+        await runner.SyncAndNotifyAsync(ct);
+
+        var retried = email.ReceivedCalls().Select(call => (EmailMessage)call.GetArguments()[0]!).ToList();
+        retried.Should().HaveCount(2);
+        foreach (var message in retried)
+        {
+            message.HtmlBody.Should().Contain("Privacy").And.Contain("Code");
+            message.DeliveryId.Should().NotBeNull().And.Be(firstMessages.Single(firstMessage => firstMessage.UserId == message.UserId).DeliveryId);
+        }
+        (await _repository.GetDocumentsAsync(null, ct)).SelectMany(document => document.Versions)
+            .Should().OnlyContain(version => version.PendingReConsentBatchId == null);
+        email.ClearReceivedCalls();
+        await runner.SyncAndNotifyAsync(ct);
+        email.ReceivedCalls().Should().BeEmpty();
+    }
+
+    [HumansTheory]
+    [Xunit.InlineData("transient")]
+    [Xunit.InlineData("permanent")]
+    [Xunit.InlineData("unexpected")]
+    public async Task ScheduledSync_ReportsDocumentFailuresAfterDrainingSuccessfulUpdates(string kind)
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var broken = await SeedDocumentAsync("Broken", folderPath: "broken/");
+        var good = await SeedDocumentAsync("Good", folderPath: "good/");
+        StubGitHubFolder("good/", "Good content", "good-sha", "Good update");
+        var transient = kind is "transient";
+        Exception failure = kind is "unexpected" ? new IOException("Storage read failed")
+            : new GitHubApiException(transient ? System.Net.HttpStatusCode.ServiceUnavailable : System.Net.HttpStatusCode.Forbidden,
+                transient, new IOException("PRIVATE_GITHUB_BODY"));
+        _gitHub.DiscoverLanguageFilesAsync("broken/", Arg.Any<CancellationToken>())
+            .Returns(Task.FromException<IReadOnlyDictionary<string, string>>(failure));
+        var person = UserInfo.Create(new User { Id = Guid.NewGuid(), BurnerName = "Human", Email = "human@example.com" },
+            [], [], UserFixtures.Profile());
+        _teamService.GetTeamAsync(_team.Id, Arg.Any<CancellationToken>()).Returns(_team with
+        {
+            Members = [new TeamMemberInfo(Guid.NewGuid(), person.Id, person.BurnerName, person.Email, null, TeamMemberRole.Member, default)]
+        });
+        _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<Guid, UserInfo> { [person.Id] = person });
+        var consents = Substitute.For<IConsentService>();
+        consents.GetConsentMapForUsersAsync(Arg.Any<IReadOnlyList<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<Guid, IReadOnlySet<Guid>>());
+        var email = Substitute.For<IEmailService>();
+        var runner = new LegalDocumentSyncRunner(_service, email, Infrastructure.TestConsentEmails.Create(),
+            _teamService, _userService, consents, _repository, NullLogger<LegalDocumentSyncRunner>.Instance);
+        var metrics = Substitute.For<IHumansMetrics>();
+        var job = new SyncLegalDocumentsJob(runner, metrics, NullLogger<SyncLegalDocumentsJob>.Instance, Clock);
+
+        var run = () => job.ExecuteAsync(ct);
+        var error = await run.Should().ThrowAsync<AggregateException>();
+
+        var reported = error.Which.Flatten().InnerExceptions.Should().ContainSingle().Subject;
+        if (kind is "unexpected") reported.Should().BeSameAs(failure);
+        else
+        {
+            reported.InnerException.Should().BeNull();
+            reported.Message.Should().Contain(broken.Id.ToString()).And.Contain(transient ? "503" : "403");
+        }
+        error.Which.ToString().Should().NotContain("PRIVATE_GITHUB_BODY");
+        var message = email.ReceivedCalls().Should().ContainSingle().Subject.GetArguments()[0].Should().BeOfType<EmailMessage>().Subject;
+        message.HtmlBody.Should().Contain("Good").And.NotContain("Broken");
+        (await _repository.GetByIdAsync(good.Id, ct))!.Versions.Should().ContainSingle()
+            .Which.PendingReConsentBatchId.Should().BeNull();
+        (await _repository.GetByIdAsync(broken.Id, ct))!.Versions.Should().BeEmpty();
+        metrics.Received(1).RecordJobRun("sync_legal_documents", "failure");
+        metrics.DidNotReceive().RecordJobRun("sync_legal_documents", "success");
+    }
+
+    [HumansFact]
+    public async Task SyncAll_RequestedCancellationStopsBeforeNextDocument()
+    {
+        await SeedDocumentAsync("First", folderPath: "first/");
+        await SeedDocumentAsync("Second", folderPath: "second/");
+        using var request = new CancellationTokenSource();
+        _gitHub.DiscoverLanguageFilesAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns(async call =>
+        {
+            await request.CancelAsync();
+            return await Task.FromException<IReadOnlyDictionary<string, string>>(new OperationCanceledException(request.Token));
+        });
+
+        var run = () => _service.SyncAllDocumentsAsync(request.Token);
+
+        await run.Should().ThrowAsync<OperationCanceledException>();
+        await _gitHub.Received(1).DiscoverLanguageFilesAsync(Arg.Any<string>(), request.Token);
+    }
+
+    [HumansTheory]
     [Xunit.InlineData(false, false)]
     [Xunit.InlineData(true, false)]
     [Xunit.InlineData(false, true)]
@@ -106,9 +343,9 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
         var currentId = Guid.NewGuid();
         foreach (var (documentId, id, effectiveFrom) in new[]
         {
+            (document.Id, Guid.NewGuid(), now.Plus(Duration.FromDays(1))),
             (document.Id, Guid.NewGuid(), now.Minus(Duration.FromDays(1))),
             (document.Id, currentId, now),
-            (document.Id, Guid.NewGuid(), now.Plus(Duration.FromDays(1))),
             (futureOnly.Id, Guid.NewGuid(), now.Plus(Duration.FromDays(1)))
         })
         {
@@ -243,6 +480,8 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
     [Xunit.InlineData(null, true)]
     public async Task AdminDocumentForms_require_explicit_consent_policy_before_editing(string? omitted, bool enabled)
     {
+        _userService.GetUserInfoAsync(_actorUserId, Arg.Any<CancellationToken>())
+            .Returns(UserInfo.Create(new User { Id = _actorUserId }, [], [], null));
         var document = await SeedDocumentAsync("Existing document");
         document.IsRequired = false;
         document.IsActive = false;
@@ -323,6 +562,8 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
     [Xunit.InlineData(true, true)]
     public async Task AdminDocumentWrites_reject_missing_teams_before_persistence_or_sync(bool edit, bool empty)
     {
+        _userService.GetUserInfoAsync(_actorUserId, Arg.Any<CancellationToken>())
+            .Returns(UserInfo.Create(new User { Id = _actorUserId }, [], [], null));
         var document = await SeedDocumentAsync("Existing document");
         StubGitHubFolder("privacy/", "Spanish agreement", "new-sha", "Initial version");
         var targetTeamId = empty ? Guid.Empty : Guid.NewGuid();
@@ -666,8 +907,11 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
                 PreferredLanguage = spanishIds.Contains(id) || id == inactiveId ? "es" : id == englishIds[0] ? "en" : "unsupported",
                 State = id == inactiveId ? UserState.Rejected : UserState.Active
             },
-            [], [], [], UserFixtures.Profile(), [])).ToList();
-        _userService.GetAllUserInfosAsync(Arg.Any<CancellationToken>()).Returns(users);
+            [], [], UserFixtures.Profile())).ToList();
+        var outsiderId = Guid.NewGuid();
+        StubTeamRecipients(users, [UserInfo.Create(
+            new User { Id = outsiderId, PreferredLanguage = "es", State = UserState.Active },
+            [], [], UserFixtures.Profile())]);
         var document = await SeedDocumentAsync("Privacy", folderPath: "privacy/", currentCommitSha: "sha-1");
         if (update)
         {
@@ -707,7 +951,8 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
         ((IReadOnlyList<Guid>)english[4]!).Should().BeEquivalentTo(englishIds);
         english[3].Should().Be(update ? "Privacy has been updated — re-consent required" : "New legal document published: Privacy");
         english[7].Should().Be("Review & Consent");
-        await _userService.Received(1).GetAllUserInfosAsync(Arg.Any<CancellationToken>());
+        notices.SelectMany(args => (IReadOnlyList<Guid>)args[4]!).Should().NotContain(outsiderId,
+            because: "only members of the document's team are notified");
     }
 
     [HumansFact]
@@ -848,12 +1093,22 @@ public sealed class LegalDocumentSyncServiceTests : ConsentTestHarness
                 State = UserFixtures.StateFor(profile),
             },
             userEmails: [],
-            eventParticipations: [],
             externalLogins: [],
-            profile: profile,
-            communicationPreferences: []);
-        _userService.GetAllUserInfosAsync(Arg.Any<CancellationToken>())
-            .Returns([user]);
+            profile: profile);
+        StubTeamRecipients([user], []);
+    }
+
+    private void StubTeamRecipients(IReadOnlyList<UserInfo> members, IReadOnlyList<UserInfo> outsiders)
+    {
+        _teamService.GetTeamAsync(_team.Id, Arg.Any<CancellationToken>()).Returns(_team with
+        {
+            Members = members.Select(u => new TeamMemberInfo(
+                Guid.NewGuid(), u.Id, "Member", u.Email, null, TeamMemberRole.Member, default)).ToList()
+        });
+        var everyone = members.Concat(outsiders).ToDictionary(u => u.Id);
+        _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(ci => new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(ci.ArgAt<IReadOnlyCollection<Guid>>(0)
+                .Where(everyone.ContainsKey).ToDictionary(id => id, id => everyone[id])));
     }
 
     private void StubGitHubFolder(string folderPath, string content, string sha, string commitMessage)

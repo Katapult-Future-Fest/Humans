@@ -21,16 +21,13 @@ internal static class UserInfoStubHelpers
             user,
             userEmails ?? user.UserEmails?.ToList() ?? [],
             [],
-            [],
             profile: profile,
-            [],
             [],
             [],
             []);
 
     /// <summary>
-    /// Stubs GetUserInfosAsync to read from the provided DbContext options (new context per call,
-    /// includes UserEmails + Profile slice).
+    /// Opens a new context per call.
     /// </summary>
     public static IUserService StubGetUserInfosFromDb(this IUserService userService, DbContextOptions<UsersDbContext> options)
     {
@@ -59,8 +56,7 @@ internal static class UserInfoStubHelpers
     }
 
     /// <summary>
-    /// Stubs GetAllUserInfosAsync to read from the provided DbContext options
-    /// (new context per call, includes UserEmails + Profile slice).
+    /// Opens a new context per call.
     /// </summary>
     public static IUserService StubGetAllUserInfosFromDb(this IUserService userService, DbContextOptions<UsersDbContext> options)
     {
@@ -85,8 +81,7 @@ internal static class UserInfoStubHelpers
     }
 
     /// <summary>
-    /// Stubs GetUserInfosAsync to read from a long-lived DbContext (uses AsNoTracking but reuses
-    /// the same instance — fine for in-memory tests that share one ctx).
+    /// Reuses one shared context.
     /// </summary>
     public static IUserService StubGetUserInfosFromContext(this IUserService userService, UsersDbContext dbContext)
     {

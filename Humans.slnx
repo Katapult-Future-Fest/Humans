@@ -30,7 +30,6 @@
     <Project Path="src/Sections/Humans.GoogleIntegration/Humans.GoogleIntegration.csproj" />
     <Project Path="src/Sections/Humans.Events/Humans.Events.csproj" />
     <Project Path="src/Sections/Humans.Expenses/Humans.Expenses.csproj" />
-    <Project Path="src/Sections/Humans.Feedback/Humans.Feedback.csproj" />
     <Project Path="src/Sections/Humans.Finance/Humans.Finance.csproj" />
     <Project Path="src/Sections/Humans.Finance.Contracts/Humans.Finance.Contracts.csproj" />
     <Project Path="src/Sections/Humans.Gate/Humans.Gate.csproj" />
@@ -40,6 +39,7 @@
     <Project Path="src/Sections/Humans.Grants/Humans.Grants.csproj" />
     <Project Path="src/Sections/Humans.Guide/Humans.Guide.csproj" />
     <Project Path="src/Sections/Humans.Holded/Humans.Holded.csproj" />
+    <Project Path="src/Sections/Humans.Pleo/Humans.Pleo.csproj" />
     <Project Path="src/Sections/Humans.Issues/Humans.Issues.csproj" />
     <Project Path="src/Sections/Humans.LowIncome/Humans.LowIncome.csproj" />
     <Project Path="src/Sections/Humans.MailerLite/Humans.MailerLite.csproj" />
@@ -92,13 +92,13 @@
     <Project Path="tests/Humans.Email.Tests/Humans.Email.Tests.csproj" />
     <Project Path="tests/Humans.Events.Tests/Humans.Events.Tests.csproj" />
     <Project Path="tests/Humans.Expenses.Tests/Humans.Expenses.Tests.csproj" />
-    <Project Path="tests/Humans.Feedback.Tests/Humans.Feedback.Tests.csproj" />
     <Project Path="tests/Humans.Finance.Tests/Humans.Finance.Tests.csproj" />
     <Project Path="tests/Humans.Gate.Tests/Humans.Gate.Tests.csproj" />
     <Project Path="tests/Humans.Gdpr.Tests/Humans.Gdpr.Tests.csproj" />
     <Project Path="tests/Humans.Governance.Tests/Humans.Governance.Tests.csproj" />
     <Project Path="tests/Humans.Guide.Tests/Humans.Guide.Tests.csproj" />
     <Project Path="tests/Humans.Holded.Tests/Humans.Holded.Tests.csproj" />
+    <Project Path="tests/Humans.Pleo.Tests/Humans.Pleo.Tests.csproj" />
     <Project Path="tests/Humans.Grants.Tests/Humans.Grants.Tests.csproj" />
     <Project Path="tests/Humans.Issues.Tests/Humans.Issues.Tests.csproj" />
     <Project Path="tests/Humans.GoogleIntegration.Tests/Humans.GoogleIntegration.Tests.csproj" />

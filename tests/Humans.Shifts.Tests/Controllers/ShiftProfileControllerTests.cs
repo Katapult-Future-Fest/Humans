@@ -22,16 +22,10 @@ namespace Humans.Shifts.Tests.Controllers;
 
 public class ShiftProfileControllerTests
 {
-    [HumansTheory]
-    [InlineData("en")]
-    [InlineData("es")]
-    [InlineData("de")]
-    [InlineData("it")]
-    [InlineData("fr")]
-    [InlineData("ca")]
-    public async Task ShiftInfo_RejectsOversizedFreeTextWithoutChangingTheProfile(string culture)
+    [HumansFact]
+    public async Task ShiftInfo_RejectsOversizedFreeTextWithoutChangingTheProfile()
     {
-        using var cultureScope = new CultureScope(culture);
+        using var cultureScope = new CultureScope(CultureCatalog.DefaultCultureCode);
         var registrations = new ServiceCollection().AddLogging().AddLocalization();
         registrations.AddControllers().AddDataAnnotationsLocalization(options =>
             options.DataAnnotationLocalizerProvider = (_, factory) => factory.Create(typeof(SharedResource)));
@@ -42,7 +36,7 @@ public class ShiftProfileControllerTests
         var users = Substitute.For<IUserService>();
         var userId = Guid.NewGuid();
         users.GetUserInfoAsync(userId, Arg.Any<CancellationToken>())
-            .Returns(new ValueTask<UserInfo?>(UserInfo.Create(new User { Id = userId }, [], [], [], null, [])));
+            .Returns(new ValueTask<UserInfo?>(UserInfo.Create(new User { Id = userId }, [], [], null)));
         ShiftVolunteerProfileInfo? saved = null;
         await shifts.UpdateShiftProfileAsync(Arg.Do<ShiftVolunteerProfileInfo>(p => { saved = p; }));
         var http = new DefaultHttpContext
@@ -88,7 +82,7 @@ public class ShiftProfileControllerTests
         var users = Substitute.For<IUserService>();
         var userId = Guid.NewGuid();
         users.GetUserInfoAsync(userId, Arg.Any<CancellationToken>())
-            .Returns(new ValueTask<UserInfo?>(UserInfo.Create(new User { Id = userId }, [], [], [], null, [])));
+            .Returns(new ValueTask<UserInfo?>(UserInfo.Create(new User { Id = userId }, [], [], null)));
         var http = new DefaultHttpContext
         {
             RequestServices = services,
@@ -106,12 +100,41 @@ public class ShiftProfileControllerTests
             userId, Arg.Is<IReadOnlyList<Guid>>(ids => ids.Count == 1 && ids[0] == tagId));
     }
 
+    [HumansFact]
+    public async Task ShiftInfo_UnknownTags_RedisplaysWithoutChangingProfile()
+    {
+        using var services = new ServiceCollection().AddLogging().AddLocalization().BuildServiceProvider();
+        var shifts = Substitute.For<IShiftManagement>();
+        var profiles = Substitute.For<IShiftVolunteerProfiles>();
+        var users = Substitute.For<IUserService>();
+        var userId = Guid.NewGuid();
+        users.GetUserInfoAsync(userId, Arg.Any<CancellationToken>())
+            .Returns(new ValueTask<UserInfo?>(UserInfo.Create(new User { Id = userId }, [], [], null)));
+        var http = new DefaultHttpContext
+        {
+            RequestServices = services,
+            User = new ClaimsPrincipal(new ClaimsIdentity([new Claim(ClaimTypes.NameIdentifier, userId.ToString())], "Test")),
+        };
+        var controller = Build(shifts, profiles, Substitute.For<IShiftView>(), users,
+            services.GetRequiredService<IStringLocalizer<SharedResource>>(),
+            services.GetRequiredService<IStringLocalizer<ShiftsResource>>(), http);
+        profiles.SetVolunteerTagPreferencesAsync(userId, Arg.Any<IReadOnlyList<Guid>>()).Returns(false);
+        var model = new ShiftInfoViewModel { EditableShiftTagIds = [Guid.NewGuid()] };
+
+        (await controller.ShiftInfo(model)).Should().BeOfType<ViewResult>().Which.Model.Should().BeSameAs(model);
+
+        await shifts.DidNotReceive().UpdateShiftProfileAsync(Arg.Any<ShiftVolunteerProfileInfo>());
+    }
+
     [HumansTheory]
-    [InlineData("viewer")]
-    [InlineData("profile")]
-    [InlineData("catalog")]
-    [InlineData("preferences")]
-    public async Task ShiftInfo_Get_PropagatesCancellationFromEveryRead(string boundary)
+    [InlineData("get", "viewer")]
+    [InlineData("get", "profile")]
+    [InlineData("get", "catalog")]
+    [InlineData("get", "preferences")]
+    [InlineData("post", "viewer")]
+    [InlineData("post", "profile")]
+    [InlineData("post", "catalog")]
+    public async Task ShiftInfo_PreflightReads_PropagateCancellation(string method, string boundary)
     {
         using var services = new ServiceCollection().AddLogging().AddLocalization().BuildServiceProvider();
         using var aborted = new CancellationTokenSource();
@@ -121,7 +144,7 @@ public class ShiftProfileControllerTests
         var view = Substitute.For<IShiftView>();
         var users = Substitute.For<IUserService>();
         var userId = Guid.NewGuid();
-        var user = UserInfo.Create(new User { Id = userId }, [], [], [], null, []);
+        var user = UserInfo.Create(new User { Id = userId }, [], [], null);
         users.GetUserInfoAsync(userId, Arg.Any<CancellationToken>()).Returns(call =>
         {
             if (string.Equals(boundary, "viewer", StringComparison.Ordinal)) call.Arg<CancellationToken>().ThrowIfCancellationRequested();
@@ -152,18 +175,26 @@ public class ShiftProfileControllerTests
             services.GetRequiredService<IStringLocalizer<SharedResource>>(),
             services.GetRequiredService<IStringLocalizer<ShiftsResource>>(), http);
 
-        var load = () => controller.ShiftInfo();
+        var post = string.Equals(method, "post", StringComparison.Ordinal);
+        if (post && string.Equals(boundary, "catalog", StringComparison.Ordinal))
+            controller.ModelState.AddModelError("Skills", "Invalid");
+        Func<Task<IActionResult>> load = post
+            ? () => controller.ShiftInfo(new ShiftInfoViewModel())
+            : () => controller.ShiftInfo();
         await load.Should().ThrowAsync<OperationCanceledException>();
         controller.TempData.Should().BeEmpty();
     }
 
     private static ShiftProfileController Build(
         IShiftManagement shifts, IShiftVolunteerProfiles profiles, IShiftView view, IUserService users,
-        IStringLocalizer<SharedResource> shared, IStringLocalizer<ShiftsResource> shiftsLocalizer, DefaultHttpContext http) =>
-        new(shifts, profiles, view, users, shared, shiftsLocalizer, NullLogger<ShiftProfileController>.Instance)
+        IStringLocalizer<SharedResource> shared, IStringLocalizer<ShiftsResource> shiftsLocalizer, DefaultHttpContext http)
+    {
+        profiles.SetVolunteerTagPreferencesAsync(Arg.Any<Guid>(), Arg.Any<IReadOnlyList<Guid>>()).Returns(true);
+        return new(shifts, profiles, view, users, shared, shiftsLocalizer, NullLogger<ShiftProfileController>.Instance)
         {
             ControllerContext = new ControllerContext { HttpContext = http },
             TempData = new TempDataDictionary(http, Substitute.For<ITempDataProvider>()),
             Url = Substitute.For<IUrlHelper>(),
         };
+    }
 }

@@ -1,0 +1,126 @@
+@model HoldedAccountsPage
+@using System.Globalization
+@{
+    ViewData["Title"] = "Holded accounts";
+    var f = Model.Filter;
+    string N(int n) => n.ToString("N0", CultureInfo.InvariantCulture);
+
+    void Totals(int accounts, decimal holded, decimal mirror, int lines, int mismatches)
+    {
+        <span class="small text-muted">@N(accounts) accounts</span>
+        <span class="small">Holded @holded.ToSignedEuro()</span>
+        <span class="small">Mirror @mirror.ToSignedEuro()</span>
+        <span class="small text-muted">@N(lines) lines</span>
+        if (mismatches > 0)
+        {
+            <span class="badge bg-danger">@mismatches ✗</span>
+        }
+        else
+        {
+            <span class="badge bg-success">✓</span>
+        }
+    }
+}
+
+<page-header title="Holded accounts">
+    <page-header-subtitle>
+        Holded's chart of accounts beside the mirror. <strong>Holded</strong> is Holded's own running
+        balance, <strong>Mirror</strong> is the sum of the mirrored lines; both read in the association's
+        point of view (+ money in, − money out). A ✗ means they disagree, compared before that sign is applied.
+        Groups follow the account number's leading digit, and subgroups its first two.
+    </page-header-subtitle>
+</page-header>
+
+<div class="d-flex flex-wrap gap-2 mb-3 align-items-center">
+    @if (f.Mismatched)
+    {
+        <span class="badge bg-danger">Only accounts where the mirror disagrees</span>
+        <a asp-action="Accounts" class="small">show all</a>
+    }
+    else
+    {
+        <a asp-action="Accounts" asp-route-archived="@(!f.ShowArchived)" asp-route-empty="@f.ShowEmpty"
+           class="btn btn-sm @(f.ShowArchived ? "btn-secondary" : "btn-outline-secondary")">
+            @(f.ShowArchived ? "Hide archived" : $"Show archived ({N(Model.HiddenArchived)})")
+        </a>
+        <a asp-action="Accounts" asp-route-archived="@f.ShowArchived" asp-route-empty="@(!f.ShowEmpty)"
+           class="btn btn-sm @(f.ShowEmpty ? "btn-secondary" : "btn-outline-secondary")">
+            @(f.ShowEmpty ? "Hide empty" : $"Show empty ({N(Model.HiddenEmpty)})")
+        </a>
+        <a asp-action="Accounts" asp-route-mismatched="true" class="btn btn-sm btn-outline-danger">Only mismatches</a>
+    }
+</div>
+
+@if (Model.Groups.Count == 0)
+{
+    <div class="card"><div class="card-body text-muted">No accounts to show@(f.Mismatched ? ": the mirror agrees with Holded everywhere" : " — run a sync")</div></div>
+}
+
+@foreach (var g in Model.Groups)
+{
+    @* A boolean attribute acts on presence, so it is emitted only inside the conditional. *@
+    if (f.Mismatched)
+    {
+        @:<details class="card mb-2" open>
+    }
+    else
+    {
+        @:<details class="card mb-2">
+    }
+        <summary class="card-header d-flex flex-wrap gap-3 align-items-center" style="cursor: pointer;">
+            <span class="fw-semibold me-auto">@g.Digit · @g.Name</span>
+            @{ Totals(g.Accounts.Count, g.HoldedBalance, g.MirrorBalance, g.LineCount, g.Mismatches); }
+        </summary>
+        <div class="card-body p-2">
+        @foreach (var sg in g.Subgroups)
+        {
+            @* One subgroup is the whole group: hiding it behind a second click buys nothing. *@
+            if (f.Mismatched || g.Subgroups.Count == 1)
+            {
+                @:<details class="border rounded mb-2" open>
+            }
+            else
+            {
+                @:<details class="border rounded mb-2">
+            }
+                <summary class="d-flex flex-wrap gap-3 align-items-center px-3 py-2 bg-body-tertiary" style="cursor: pointer;">
+                    <span class="me-auto">@sg.Number@(sg.Name is null ? "" : $" · {sg.Name}")</span>
+                    @{ Totals(sg.Accounts.Count, sg.HoldedBalance, sg.MirrorBalance, sg.LineCount, sg.Mismatches); }
+                </summary>
+                    Func<HoldedAccountRow, IHtmlContent> nameHoldedCell = @<text>@item.Name @if (item.Archived) { <span class="badge bg-secondary ms-1">archived</span> }</text>;
+                    Func<HoldedAccountRow, IHtmlContent> holdedBalanceCell = @<text>@item.HoldedBalance.ToSignedEuro()</text>;
+                    Func<HoldedAccountRow, IHtmlContent> mirrorBalanceCell = @<text>@(item.LocalBalance is null ? "—" : item.LocalBalance.Value.ToSignedEuro())</text>;
+                    Func<HoldedAccountRow, IHtmlContent> linesCell = @<text>@N(item.LocalLineCount)</text>;
+                    Func<HoldedAccountRow, IHtmlContent> okCell = @<text>
+                        @if (item.Reconciled)
+                        {
+                            <i class="fa-solid fa-check text-success"></i>
+                        }
+                        else
+                        {
+                            <i class="fa-solid fa-xmark text-danger"></i>
+                        }
+
+                    </text>;
+                    var accountsTable = TableModel.For(sg.Accounts)
+                        .Link("Number", a => a.Number, a => Url.Action("Account", new { number = a.Number }), o => o.Css("text-nowrap").Code())
+                        .Template("Name (Holded)", nameHoldedCell, sortBy: a => a.Name)
+                        .Column("English name", a => a.EnglishName, o => o.Css("text-muted"))
+                        .Template("Holded balance", holdedBalanceCell, o => o.End(), sortBy: a => a.HoldedBalance)
+                        .Template("Mirror balance", mirrorBalanceCell, o => o.End(), sortBy: a => a.LocalBalance)
+                        .Template("Lines", linesCell, o => o.End(), sortBy: a => a.LocalLineCount)
+                        .Template("OK", okCell, o => o.Css("text-center").HeaderCss("text-center"), sortBy: a => a.Reconciled ? 1 : 0)
+                        .RowCss(a => a.Archived ? "text-muted" : null)
+                        .Css("align-middle")
+                        .Build();
+                <partial name="_Table" model="accountsTable" />
+            @:</details>
+        }
+        </div>
+    @:</details>
+}
+
+<p class="text-muted small mt-3">
+    Empty means no mirrored line, nothing posted at Holded, and no disagreement: an account Holded
+    has posted to stays listed even when the mirror has no line for it.
+</p>

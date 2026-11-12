@@ -1,9 +1,11 @@
+using Humans.Base.Enums;
 using System.Globalization;
 using Humans.Base.ViewComponents;
 using Humans.Base.Extensions;
 using Humans.Tickets.Models;
 using Humans.Tickets.Services.Dtos;
 using Humans.Tickets.Contracts;
+using Humans.Tickets.ViewComponents;
 using Humans.Users.Contracts;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Authorization;
@@ -25,6 +27,47 @@ namespace Humans.Tickets.Tests.ViewComponents;
 
 public class TicketDashboardViewTests
 {
+    [HumansTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TicketStubLists_OrderNamesIgnoringCase_AndPutVoidsLast(bool holdingsCard)
+    {
+        var stubs = new List<TicketStubInfo>
+        {
+            new("Aaron void", null, TicketAttendeeStatus.Void, false, null, null),
+            new("Zoe active", null, TicketAttendeeStatus.Valid, false, null, null),
+            new("alpha active", null, TicketAttendeeStatus.Valid, false, null, null)
+        };
+        object model = holdingsCard ? new TicketHoldingsViewModel(Guid.NewGuid(), ProfileCardViewMode.Self, 1, stubs) : stubs;
+        var component = holdingsCard ? "TicketHoldings" : "MyTicketStubs";
+
+        var html = await RenderAsync(component, model, viewPath:
+            $"/Views/Shared/Components/{component}/Default.cshtml");
+
+        var alpha = html.IndexOf("alpha active", StringComparison.Ordinal);
+        var zoe = html.IndexOf("Zoe active", StringComparison.Ordinal);
+        var voided = html.IndexOf("Aaron void", StringComparison.Ordinal);
+        Assert.True(alpha >= 0 && zoe > alpha && voided > zoe);
+    }
+
+    [HumansFact]
+    public async Task FeeTable_OrdersPaymentMethodsByStripeFeesDescending()
+    {
+        var html = await RenderAsync("Index", new TicketDashboardViewModel
+        {
+            IsConfigured = true,
+            FeesByPaymentMethod =
+            [
+                new() { PaymentMethod = "Lower fees", TotalStripeFees = 2m },
+                new() { PaymentMethod = "Higher fees", TotalStripeFees = 20m }
+            ]
+        });
+
+        var higher = html.IndexOf("Higher fees", StringComparison.Ordinal);
+        var lower = html.IndexOf("Lower fees", StringComparison.Ordinal);
+        Assert.True(higher >= 0 && lower > higher);
+    }
+
     [HumansTheory]
     [InlineData("Orders", "buyer@example.com")]
     [InlineData("Attendees", "attendee@example.com")]
@@ -83,14 +126,10 @@ public class TicketDashboardViewTests
     }
 
     [HumansTheory]
-    [InlineData("en", "1,234.50 USD")]
-    [InlineData("es", "1.234,50 USD")]
-    [InlineData("de", "1.234,50 USD")]
-    [InlineData("it", "1.234,50 USD")]
-    [InlineData("fr", "1\u202f234,50 USD")]
-    [InlineData("ca", "1.234,50 USD")]
-    public async Task GuestOrders_RenderAmountInUiCultureAndKeepCurrencyCode(string culture, string expected)
+    [MemberData(nameof(SupportedCultures.All), MemberType = typeof(SupportedCultures))]
+    public async Task GuestOrders_RenderAmountInUiCultureAndKeepCurrencyCode(string culture)
     {
+        var expected = $"{1234.5m.ToString("N2", CultureInfo.GetCultureInfo(culture))} USD";
         var orders = new List<UserTicketOrderSummary>
         {
             new("Buyer", Instant.FromUtc(2026, 7, 1, 12, 0), 2, 1234.5m, "USD"),
@@ -103,15 +142,15 @@ public class TicketDashboardViewTests
     }
 
     [HumansTheory]
-    [InlineData("en", "1,234", "1,234.50", "315.00", "919.50", "12.5%")]
-    [InlineData("es", "1.234", "1.234,50", "315,00", "919,50", "12,5%")]
-    [InlineData("de", "1.234", "1.234,50", "315,00", "919,50", "12,5%")]
-    [InlineData("it", "1.234", "1.234,50", "315,00", "919,50", "12,5%")]
-    [InlineData("fr", "1\u202f234", "1\u202f234,50", "315,00", "919,50", "12,5%")]
-    [InlineData("ca", "1.234", "1.234,50", "315,00", "919,50", "12,5%")]
-    public async Task DashboardNumbers_UseUiCultureAcrossCardsRowsAndTotals(
-        string language, string count, string amount, string taxable, string vip, string rate)
+    [MemberData(nameof(SupportedCultures.All), MemberType = typeof(SupportedCultures))]
+    public async Task DashboardNumbers_UseUiCultureAcrossCardsRowsAndTotals(string language)
     {
+        var ui = CultureInfo.GetCultureInfo(language);
+        var count = 1234.ToString("N0", ui);
+        var amount = 1234.5m.ToString("N2", ui);
+        var taxable = 315m.ToString("N2", ui);
+        var vip = 919.5m.ToString("N2", ui);
+        var rate = $"{12.5m.ToString(ui)}%";
         var index = await RenderAsync("Index", new TicketDashboardViewModel
         {
             IsConfigured = true,
@@ -198,6 +237,8 @@ public class TicketDashboardViewTests
             .AddApplicationPart(typeof(TicketsResource).Assembly)
             .AddApplicationPart(typeof(HumanViewComponent).Assembly);
         builder.Services.AddSingleton(Substitute.For<IUserService>());
+        builder.Services.AddSingleton(Substitute.For<ITicketService>());
+        builder.Services.AddSingleton(Substitute.For<Humans.Settings.Contracts.ISettingsService>());
         var authorization = Substitute.For<IAuthorizationService>();
         authorization.AuthorizeAsync(Arg.Any<ClaimsPrincipal>(), Arg.Any<object?>(), Arg.Any<string>())
             .Returns(AuthorizationResult.Failed());

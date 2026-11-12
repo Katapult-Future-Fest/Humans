@@ -4,6 +4,8 @@ using Humans.Settings.Contracts;
 using Humans.Settings.Data;
 using Humans.Settings.Domain;
 using Humans.Settings.Services;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using NodaTime;
 using NSubstitute;
 using TestContext = Xunit.TestContext;
@@ -45,15 +47,135 @@ public sealed class ServiceTests
         BuildStartOffset = -25,
         EventEndOffset = 6,
         StrikeEndOffset = 9,
-        FirstCrewStartOffset = -25,
-        SetupWeekStartOffset = -16,
-        PreEventWeekStartOffset = -9,
-        FinishingWeekendStartOffset = -4,
         EarlyEntryCapacity = new Dictionary<int, int> { [-14] = 50, [-7] = 100 },
         BarriosEarlyEntryAllocation = new Dictionary<int, int> { [-7] = 20 },
         EarlyEntryClose = Instant.FromUtc(2026, 7, 4, 12, 0),
         Status = isActive ? EventSettingsStatus.Active : EventSettingsStatus.Inactive,
     };
+
+    [HumansTheory]
+    [Xunit.InlineData("save", 1)]
+    [Xunit.InlineData("timezone", 1)]
+    [Xunit.InlineData("activate", 1)]
+    [Xunit.InlineData("seed", 1)]
+    [Xunit.InlineData("seed", 2)]
+    [Xunit.InlineData("delete", 1)]
+    public async Task EventWrite_LostSaveAcknowledgement_NotifiesAffectedEvents(string operation, int failedSave)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var previous = MakeEntity(Guid.NewGuid());
+        var next = MakeEntity(Guid.NewGuid(), isActive: false);
+        next.GateOpeningDate = new LocalDate(2027, 7, 9);
+        var options = new DbContextOptionsBuilder<SettingsDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString()).Options;
+        await using (var seed = new SettingsDbContext(options))
+        {
+            seed.EventSettings.AddRange(previous, next);
+            await seed.SaveChangesAsync(ct);
+        }
+        var failure = new IOException("Persistence acknowledgement failed");
+        var writeOptions = new DbContextOptionsBuilder<SettingsDbContext>(options)
+            .AddInterceptors(new LostSettingsSaveAcknowledgement(failure, failedSave)).Options;
+        var service = new Service(new Repository(new TestDbContextFactory<SettingsDbContext>(writeOptions)),
+            _auditLog, [_listenerOne, _listenerTwo], _clock,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<Service>.Instance);
+        var draft = MakeDto(next.Id, EventSettingsStatus.Inactive) with
+        { GateOpeningDate = next.GateOpeningDate, EventName = "Revised" };
+        Func<Task> write = operation switch
+        {
+            "save" => async () => { await service.SaveEventSettingsAsync(draft, Actor, ct); }
+            ,
+            "timezone" => async () => { await service.SaveTimeZoneAsync("Atlantic/Canary", Actor, ct); }
+            ,
+            "activate" => async () => { await service.ActivateEventSettingsAsync(next.Id, Actor, ct); }
+            ,
+            "seed" => () => service.CreateActiveEventAsync(draft, ct),
+            _ => async () => { await service.DeleteEventAsync(next.Id, ct); }
+        };
+
+        (await write.Should().ThrowAsync<IOException>()).Which.Should().BeSameAs(failure);
+
+        var expectedIds = operation switch
+        {
+            "timezone" or "activate" => new[] { previous.Id, next.Id },
+            "seed" when failedSave == 1 => [previous.Id],
+            "seed" => [previous.Id, next.Id],
+            _ => [next.Id]
+        };
+        foreach (var listener in new[] { _listenerOne, _listenerTwo })
+            listener.ReceivedCalls().Select(call => (Guid)call.GetArguments()[0]!)
+                .Should().BeEquivalentTo(expectedIds);
+        await using var verify = new SettingsDbContext(options);
+        switch (operation)
+        {
+            case "save":
+                (await verify.EventSettings.FindAsync([next.Id], ct))!.EventName.Should().Be("Revised");
+                break;
+            case "timezone":
+                (await verify.Settings.SingleAsync(ct)).Value.Should().Be("Atlantic/Canary");
+                break;
+            case "activate":
+            case "seed":
+                (await verify.EventSettings.FindAsync([previous.Id], ct))!.Status.Should().Be(EventSettingsStatus.Inactive);
+                (await verify.EventSettings.FindAsync([next.Id], ct))!.Status.Should().Be(
+                    string.Equals(operation, "seed", StringComparison.Ordinal) && failedSave == 1
+                        ? EventSettingsStatus.Inactive : EventSettingsStatus.Active);
+                break;
+            case "delete":
+                (await verify.EventSettings.FindAsync([next.Id], ct)).Should().BeNull();
+                break;
+        }
+        _auditLog.ReceivedCalls().Should().BeEmpty();
+    }
+
+    private sealed class LostSettingsSaveAcknowledgement(IOException failure, int failedSave) : SaveChangesInterceptor
+    {
+        private int _saves;
+
+        public override ValueTask<int> SavedChangesAsync(
+            SaveChangesCompletedEventData eventData, int result, CancellationToken cancellationToken = default) =>
+            ++_saves == failedSave ? throw failure : ValueTask.FromResult(result);
+    }
+
+    [HumansTheory]
+    [Xunit.InlineData("save")]
+    [Xunit.InlineData("timezone")]
+    [Xunit.InlineData("activate")]
+    public async Task EventWrite_AuditFailure_StillNotifiesAffectedEvents(string operation)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var previous = MakeEntity(Guid.NewGuid());
+        var next = MakeEntity(Guid.NewGuid(), isActive: false);
+        next.GateOpeningDate = new LocalDate(2027, 7, 9);
+        _repository.GetAllEventSettingsAsync(Arg.Any<CancellationToken>()).Returns([previous, next]);
+        _repository.GetEventSettingsByIdAsync(next.Id, Arg.Any<CancellationToken>()).Returns(next);
+        _repository.SetActiveEventSettingsAsync(next.Id, Now, Arg.Any<CancellationToken>()).Returns([previous, next]);
+        var failure = new IOException("Audit unavailable");
+        _auditLog.LogAsync(Arg.Any<AuditActionDefinition>(), Arg.Any<string>(), Arg.Any<Guid>(), Arg.Any<string>(), Actor)
+            .Returns(Task.FromException(failure));
+        var service = BuildSut();
+        Func<Task> write = operation switch
+        {
+            "save" => async () =>
+            {
+                await service.SaveEventSettingsAsync(
+                MakeDto(next.Id, EventSettingsStatus.Inactive) with { GateOpeningDate = next.GateOpeningDate }, Actor, ct);
+            }
+            ,
+            "timezone" => async () => { await service.SaveTimeZoneAsync("Atlantic/Canary", Actor, ct); }
+            ,
+            _ => async () => { await service.ActivateEventSettingsAsync(next.Id, Actor, ct); }
+        };
+
+        (await write.Should().ThrowAsync<IOException>()).Which.Should().BeSameAs(failure);
+
+        foreach (var listener in new[] { _listenerOne, _listenerTwo })
+        {
+            listener.Received(1).EventSettingsChanged(next.Id);
+            if (!string.Equals(operation, "save", StringComparison.Ordinal))
+                listener.Received(1).EventSettingsChanged(previous.Id);
+        }
+    }
 
     [HumansFact]
     public async Task GetActiveEventSettingsAsync_MapsEveryFieldOntoTheDto()
@@ -72,10 +194,6 @@ public sealed class ServiceTests
         dto.BuildStartOffset.Should().Be(-25);
         dto.EventEndOffset.Should().Be(6);
         dto.StrikeEndOffset.Should().Be(9);
-        dto.FirstCrewStartOffset.Should().Be(-25);
-        dto.SetupWeekStartOffset.Should().Be(-16);
-        dto.PreEventWeekStartOffset.Should().Be(-9);
-        dto.FinishingWeekendStartOffset.Should().Be(-4);
         dto.EarlyEntryCapacity.Should().Equal(new Dictionary<int, int> { [-14] = 50, [-7] = 100 });
         dto.BarriosEarlyEntryAllocation.Should().Equal(new Dictionary<int, int> { [-7] = 20 });
         dto.EarlyEntryClose.Should().Be(Instant.FromUtc(2026, 7, 4, 12, 0));
@@ -158,10 +276,6 @@ public sealed class ServiceTests
             BuildStartOffset: -20,
             EventEndOffset: 5,
             StrikeEndOffset: 8,
-            FirstCrewStartOffset: -20,
-            SetupWeekStartOffset: -14,
-            PreEventWeekStartOffset: -8,
-            FinishingWeekendStartOffset: -3,
             EarlyEntryCapacity: new Dictionary<int, int> { [-12] = 40 },
             BarriosEarlyEntryAllocation: null,
             EarlyEntryClose: null,
@@ -180,10 +294,6 @@ public sealed class ServiceTests
                 && e.BuildStartOffset == -20
                 && e.EventEndOffset == 5
                 && e.StrikeEndOffset == 8
-                && e.FirstCrewStartOffset == -20
-                && e.SetupWeekStartOffset == -14
-                && e.PreEventWeekStartOffset == -8
-                && e.FinishingWeekendStartOffset == -3
                 && e.EarlyEntryCapacity[-12] == 40
                 && e.BarriosEarlyEntryAllocation == null
                 && e.EarlyEntryClose == null
@@ -205,10 +315,6 @@ public sealed class ServiceTests
             BuildStartOffset: -20,
             EventEndOffset: 5,
             StrikeEndOffset: 8,
-            FirstCrewStartOffset: -20,
-            SetupWeekStartOffset: -14,
-            PreEventWeekStartOffset: -8,
-            FinishingWeekendStartOffset: -3,
             EarlyEntryCapacity: new Dictionary<int, int>(),
             BarriosEarlyEntryAllocation: null,
             EarlyEntryClose: null,
@@ -233,10 +339,6 @@ public sealed class ServiceTests
         BuildStartOffset: -25,
         EventEndOffset: 6,
         StrikeEndOffset: 9,
-        FirstCrewStartOffset: -25,
-        SetupWeekStartOffset: -16,
-        PreEventWeekStartOffset: -9,
-        FinishingWeekendStartOffset: -4,
         EarlyEntryCapacity: new Dictionary<int, int>(),
         BarriosEarlyEntryAllocation: null,
         EarlyEntryClose: null,
@@ -255,7 +357,6 @@ public sealed class ServiceTests
         var settings = MakeDto(Guid.NewGuid(), EventSettingsStatus.Inactive) with
         {
             BuildStartOffset = endOverflow ? -25 : int.MinValue,
-            FirstCrewStartOffset = endOverflow ? -25 : int.MinValue,
             StrikeEndOffset = endOverflow ? int.MaxValue : 9,
         };
         var sut = BuildSut();
@@ -312,6 +413,25 @@ public sealed class ServiceTests
         _auditLog.ReceivedCalls().Should().BeEmpty();
         _listenerOne.ReceivedCalls().Should().BeEmpty();
         _listenerTwo.ReceivedCalls().Should().BeEmpty();
+    }
+
+    [HumansTheory]
+    [Xunit.InlineData(0, 0)]
+    [Xunit.InlineData(6, 6)]
+    public async Task SaveEventSettingsAsync_AcceptsGateDayEventsAndNoStrikeDays(int eventEnd, int strikeEnd)
+    {
+        var settings = MakeDto(Guid.NewGuid(), EventSettingsStatus.Inactive) with
+        {
+            EventEndOffset = eventEnd,
+            StrikeEndOffset = strikeEnd,
+        };
+
+        var result = await BuildSut().SaveEventSettingsAsync(settings, Actor, TestContext.Current.CancellationToken);
+
+        result.Succeeded.Should().BeTrue();
+        await _repository.Received(1).UpsertEventSettingsAsync(
+            Arg.Is<EventSettings>(e => e.EventEndOffset == eventEnd && e.StrikeEndOffset == strikeEnd),
+            Arg.Any<Instant>(), Arg.Any<CancellationToken>());
     }
 
     // The EarlyEntryStartOffset invariant: BuildStartOffset ≤ offset < 0.

@@ -37,7 +37,6 @@ namespace Humans.Shifts;
 
 public sealed class Section :
     ISection,
-    ISectionDataMigrations,
     IIssueQueueOwner,
     ISectionRoles,
     ISectionAccessMatrix,
@@ -134,7 +133,7 @@ public sealed class Section :
         services.AddScoped<IAuthorizationHandler, IsAnyTeamManagerOrCoordinatorHandler>();
 
         // Base cannot name these enums, so the section registers them. An unregistered value falls back to
-        // "bg-secondary" silently; ShiftsArchitectureTests pins all nine.
+        // "bg-secondary" silently; ShiftsBadgeRowsTests pins every row.
         EnumBadgeMap.Register(new Dictionary<Enum, string>
         {
             [ShiftPeriod.Build] = "bg-info",
@@ -147,6 +146,15 @@ public sealed class Section :
             [SignupStatus.Bailed] = "bg-secondary",
             [SignupStatus.Cancelled] = "bg-dark",
             [SignupStatus.NoShow] = "bg-danger",
+
+            [RotaPeriod.Build] = "bg-info",
+            [RotaPeriod.Event] = "bg-success",
+            [RotaPeriod.Strike] = "bg-secondary",
+            [RotaPeriod.All] = "bg-primary",
+
+            [ShiftPriority.Normal] = "bg-secondary",
+            [ShiftPriority.Important] = "bg-warning text-dark",
+            [ShiftPriority.Essential] = "bg-danger",
         });
     }
 
@@ -253,10 +261,6 @@ public sealed class Section :
 
         options.AddPolicy(ShiftsPolicies.PrivilegedSignupApprover, policy =>
             policy.RequireRole(RoleNames.Admin, ShiftsRoles.ShiftsNoInfo));
-
-        // Every reveal is audited (ShiftsController.RevealMedical), which is what lets Board in.
-        options.AddPolicy(ShiftsPolicies.MedicalDataViewer, policy =>
-            policy.RequireRole(RoleNames.Admin, RoleNames.Board, ShiftsRoles.ShiftsNoInfo));
     }
 
     IEnumerable<SettingsTab> ISectionSettings.Tabs() =>
@@ -323,28 +327,4 @@ public sealed class Section :
             return false;
         }
     }
-
-    internal const string BuildSubPeriodsKey = "shifts.build-sub-periods";
-
-    IEnumerable<DataMigration> ISectionDataMigrations.Migrations() =>
-    [
-        new(BuildSubPeriodsKey, "Shifts",
-            "Copy each event's build sub-period starts (first crew, set-up week, pre-event week, finishing weekend) from Settings into Shifts' event_settings",
-            "EventCalendarResolver's fallback to Settings' sub-period values; then Settings stops carrying the four offsets",
-            StatusAsync, ApplyAsync),
-    ];
-
-    private static async Task<DataMigrationStatus> StatusAsync(IServiceProvider sp, CancellationToken ct) =>
-        new(["Event", "Name", "First crew", "Set-up week", "Pre-event week", "Finishing weekend"],
-            [.. (await sp.GetRequiredService<IShiftManagement>().GetUncopiedBuildSubPeriodsAsync(ct))
-                .Select(p => (IReadOnlyList<string>)[
-                    p.EventSettingsId.ToString(),
-                    p.EventName,
-                    p.Starts.FirstCrew.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                    p.Starts.SetupWeek.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                    p.Starts.PreEventWeek.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                    p.Starts.FinishingWeekend.ToString(System.Globalization.CultureInfo.InvariantCulture)])]);
-
-    private static Task<int> ApplyAsync(IServiceProvider sp, Guid actorUserId, CancellationToken ct) =>
-        sp.GetRequiredService<IShiftManagement>().CopyBuildSubPeriodsAsync(ct);
 }

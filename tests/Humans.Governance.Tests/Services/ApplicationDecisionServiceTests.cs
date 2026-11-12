@@ -46,6 +46,42 @@ namespace Humans.Governance.Tests.Services;
 
 public sealed class ApplicationDecisionServiceTests : IDisposable
 {
+
+    [HumansTheory]
+    [InlineData(ApplicationMutation.Approve)]
+    [InlineData(ApplicationMutation.Reject)]
+    public async Task CanonicalNoticeRecipients_ApplicationDecision(ApplicationMutation decision)
+    {
+        var source = Guid.NewGuid();
+        var live = Guid.NewGuid();
+        var users = Substitute.For<IUserService>();
+        users.GetUserInfoAsync(source, Arg.Any<CancellationToken>()).Returns(UserInfo.Create(
+            new User { Id = live, BurnerName = "Live", PreferredLanguage = "es" },
+            [new UserEmail { UserId = live, Email = "live@example.org", IsVerified = true, IsPrimary = true }], [], null));
+        var notices = new ApplicationDecisionNotices(users, _emailService, _emailMessages, _notificationService,
+            NullLogger<ApplicationDecisionService>.Instance);
+        var application = new MemberApplication { Id = Guid.NewGuid(), UserId = source, MembershipTier = MembershipTier.Colaborador };
+
+        if (decision == ApplicationMutation.Approve)
+            await notices.SendApprovalAsync(application, TestContext.Current.CancellationToken);
+        else
+            await notices.SendRejectionAsync(application, "Reason", TestContext.Current.CancellationToken);
+
+        var recipients = _notificationService.ReceivedCalls().SelectMany(call => (IReadOnlyList<Guid>)call.GetArguments()[4]!).ToList();
+        recipients.Should().Equal(live);
+        _emailService.ReceivedCalls().Should().ContainSingle().Which.GetArguments()[0]
+            .Should().BeOfType<EmailMessage>().Which.UserId.Should().Be(live);
+    }
+
+    public enum ApplicationMutation
+    {
+        Create,
+        Withdraw,
+        Vote,
+        Approve,
+        Reject
+    }
+
     private const string ValidMotivation = "I want to contribute to the collective and support its members.";
 
     private readonly FakeClock Clock = new(Instant.FromUtc(2026, 3, 1, 12, 0));
@@ -73,7 +109,6 @@ public sealed class ApplicationDecisionServiceTests : IDisposable
     private readonly ISystemTeamSync _syncJob = Substitute.For<ISystemTeamSync>();
     private readonly IHumansMetrics _metrics = Substitute.For<IHumansMetrics>();
     private readonly IRoleAssignmentService _roleAssignmentService = Substitute.For<IRoleAssignmentService>();
-    private readonly IUserEmailService _userEmailService = Substitute.For<IUserEmailService>();
     private readonly IMemoryCache _cache = new MemoryCache(new MemoryCacheOptions());
     private readonly ApplicationDecisionService _service;
 
@@ -90,23 +125,19 @@ public sealed class ApplicationDecisionServiceTests : IDisposable
         _roleAssignmentService.GetActiveUserIdsInRoleAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(Task.FromResult<IReadOnlyList<Guid>>([]));
 
-        _userEmailService.GetNotificationTargetEmailsAsync(
-                Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(Task.FromResult<IReadOnlyDictionary<Guid, string>>(new Dictionary<Guid, string>()));
-
         _service = CreateService();
     }
 
-    private ApplicationDecisionService CreateService(IApplicationRepository? repository = null) => new(
+    private ApplicationDecisionService CreateService(
+        IApplicationRepository? repository = null, IDbContextFactory<GovernanceDbContext>? factory = null) => new(
         repository ?? _repository,
         _userService,
         new MembershipTierService(
-            new MembershipTierRepository(GovernanceDbFactory), repository ?? _repository, _userService, Clock),
+            new ApplicationRepository(factory ?? GovernanceDbFactory), repository ?? _repository, _userService, AuditLog, Clock),
         _roleAssignmentService,
         AuditLog,
         _emailService,
         _emailMessages,
-        _userEmailService,
         _notificationService,
         _syncJob,
         _metrics,
@@ -278,6 +309,131 @@ public sealed class ApplicationDecisionServiceTests : IDisposable
     }
 
     [HumansTheory]
+    [InlineData(ApplicationMutation.Create)]
+    [InlineData(ApplicationMutation.Withdraw)]
+    [InlineData(ApplicationMutation.Vote)]
+    [InlineData(ApplicationMutation.Approve)]
+    [InlineData(ApplicationMutation.Reject)]
+    public async Task ApplicationMutations_CancelAccountLookupBeforeChangingRows(ApplicationMutation action)
+    {
+        using var request = new CancellationTokenSource();
+        var actorId = Guid.NewGuid();
+        var create = action == ApplicationMutation.Create;
+        var app = create ? null : await SeedSubmittedApplicationAsync(actorId);
+        _userService.GetUserInfoAsync(actorId, Arg.Any<CancellationToken>()).Returns(call =>
+        {
+            call.Arg<CancellationToken>().ThrowIfCancellationRequested();
+            return new ValueTask<UserInfo?>(UserInfo.Create(new User { Id = actorId }, [], [], null));
+        });
+        var http = new DefaultHttpContext
+        {
+            RequestAborted = request.Token,
+            User = new ClaimsPrincipal(new ClaimsIdentity([new Claim(ClaimTypes.NameIdentifier, actorId.ToString())], "test"))
+        };
+        var shared = Substitute.For<IStringLocalizer<SharedResource>>();
+        shared[Arg.Any<string>()].Returns(call => new LocalizedString(call.Arg<string>(), call.Arg<string>()));
+        var localizer = Substitute.For<IStringLocalizer<GovernanceResource>>();
+        localizer[Arg.Any<string>()].Returns(call => new LocalizedString(call.Arg<string>(), call.Arg<string>()));
+        var applications = new GovernanceApplicationsController(_service, _userService, shared,
+            NullLogger<GovernanceApplicationsController>.Instance, Clock)
+        {
+            ControllerContext = new ControllerContext { HttpContext = http },
+            TempData = new TempDataDictionary(http, Substitute.For<ITempDataProvider>()),
+            Url = Substitute.For<IUrlHelper>()
+        };
+        var board = new GovernanceBoardVotingController(_userService, _service,
+            NullLogger<GovernanceBoardVotingController>.Instance, localizer)
+        {
+            ControllerContext = new ControllerContext { HttpContext = http },
+            TempData = applications.TempData,
+            Url = applications.Url
+        };
+        await request.CancelAsync();
+        Func<Task<IActionResult>> run = () => action switch
+        {
+            ApplicationMutation.Create => applications.Create(new ApplicationCreateViewModel
+            {
+                ConfirmAccuracy = true,
+                MembershipTier = MembershipTier.Colaborador,
+                Motivation = ValidMotivation
+            }),
+            ApplicationMutation.Withdraw => applications.Withdraw(app!.Id),
+            ApplicationMutation.Vote => board.Vote(app!.Id, VoteChoice.Yay, null),
+            _ => board.Finalize(new BoardVotingFinalizeModel
+            {
+                ApplicationId = app!.Id,
+                Approved = action == ApplicationMutation.Approve,
+                DecisionNote = "Board decision",
+                BoardMeetingDate = "2026-03-01"
+            })
+        };
+        await run.Should().ThrowAsync<OperationCanceledException>();
+
+        await _userService.Received(1).GetUserInfoAsync(actorId, request.Token);
+        await using var stored = await GovernanceDbFactory.CreateDbContextAsync(TestContext.Current.CancellationToken);
+        var rows = await stored.Applications.ToListAsync(TestContext.Current.CancellationToken);
+        if (create) rows.Should().BeEmpty();
+        else rows.Should().ContainSingle().Which.Status.Should().Be(ApplicationStatus.Submitted);
+        (await stored.BoardVotes.CountAsync(TestContext.Current.CancellationToken)).Should().Be(0);
+        AuditLog.ReceivedCalls().Should().BeEmpty();
+        _emailService.ReceivedCalls().Should().BeEmpty();
+        _syncJob.ReceivedCalls().Should().BeEmpty();
+    }
+
+    [HumansTheory]
+    [Xunit.InlineData(AccountScenario.Merged)]
+    [Xunit.InlineData(AccountScenario.Missing)]
+    [Xunit.InlineData(AccountScenario.Cancelled)]
+    public async Task TermExpiryCorrection_ResolvesItsAuditActorBeforeChangingRows(AccountScenario account)
+    {
+        using var request = new CancellationTokenSource();
+        var drifted = await SeedApprovedApplicationAsync(new LocalDate(2029, 12, 31));
+        var cookieId = Guid.NewGuid();
+        var actorId = Guid.NewGuid();
+        _userService.GetUserInfoAsync(cookieId, Arg.Any<CancellationToken>()).Returns(call =>
+        {
+            call.Arg<CancellationToken>().ThrowIfCancellationRequested();
+            return new ValueTask<UserInfo?>(account == AccountScenario.Missing
+                ? null : UserInfo.Create(new User { Id = actorId }, [], [], null));
+        });
+        var http = new DefaultHttpContext
+        {
+            RequestAborted = request.Token,
+            User = new ClaimsPrincipal(new ClaimsIdentity([new Claim(ClaimTypes.NameIdentifier, cookieId.ToString())], "test"))
+        };
+        var controller = new GovernanceApplicationsController(_service, _userService,
+            Substitute.For<Microsoft.Extensions.Localization.IStringLocalizer<Humans.Base.SharedResource>>(),
+            NullLogger<GovernanceApplicationsController>.Instance, Clock)
+        {
+            ControllerContext = new ControllerContext { HttpContext = http },
+            TempData = new TempDataDictionary(http, Substitute.For<ITempDataProvider>()),
+            Url = Substitute.For<IUrlHelper>()
+        };
+        if (account == AccountScenario.Cancelled)
+        {
+            await request.CancelAsync();
+            Func<Task> run = async () => await controller.AdminTermExpiryFix();
+            await run.Should().ThrowAsync<OperationCanceledException>();
+        }
+        else
+        {
+            var result = await controller.AdminTermExpiryFix();
+            if (account == AccountScenario.Merged)
+            {
+                result.Should().BeOfType<RedirectToActionResult>();
+                await AuditLog.Received(1).LogAsync(GovernanceAuditActions.TierTermExpiryCorrected,
+                    AuditEntityTypes.Application, drifted.Id, Arg.Any<string>(), actorId);
+            }
+            else result.Should().BeOfType<UnauthorizedResult>();
+        }
+        if (account != AccountScenario.Merged)
+        {
+            AuditLog.ReceivedCalls().Should().BeEmpty();
+            (await _service.GetTermExpiryDriftAsync(TestContext.Current.CancellationToken)).Should().ContainSingle();
+        }
+    }
+
+    [HumansTheory]
     [InlineData(49, 1000, 2000, 2000, "MotivationLength")]
     [InlineData(50, 1000, 2000, 2000, null)]
     [InlineData(2000, 1000, 2000, 2000, null)]
@@ -305,19 +461,19 @@ public sealed class ApplicationDecisionServiceTests : IDisposable
         (await GovernanceDb.Applications.CountAsync(TestContext.Current.CancellationToken)).Should().Be(expectedSuccess ? 1 : 0);
     }
 
+    public static TheoryData<string, string?, string> InvalidMotivations()
+    {
+        var data = new TheoryData<string, string?, string>();
+        foreach (var culture in CultureCatalog.SupportedCultureCodes)
+        {
+            data.Add(culture, null, "Profile_MotivationRequired");
+            data.Add(culture, "short", "Application_MotivationLength");
+        }
+        return data;
+    }
+
     [HumansTheory]
-    [InlineData("en", null, "Profile_MotivationRequired")]
-    [InlineData("en", "short", "Application_MotivationLength")]
-    [InlineData("es", null, "Profile_MotivationRequired")]
-    [InlineData("es", "short", "Application_MotivationLength")]
-    [InlineData("de", null, "Profile_MotivationRequired")]
-    [InlineData("de", "short", "Application_MotivationLength")]
-    [InlineData("it", null, "Profile_MotivationRequired")]
-    [InlineData("it", "short", "Application_MotivationLength")]
-    [InlineData("fr", null, "Profile_MotivationRequired")]
-    [InlineData("fr", "short", "Application_MotivationLength")]
-    [InlineData("ca", null, "Profile_MotivationRequired")]
-    [InlineData("ca", "short", "Application_MotivationLength")]
+    [MemberData(nameof(InvalidMotivations))]
     public async Task Create_invalid_motivation_reaches_localized_service_validation(string culture, string? motivation, string resourceKey)
     {
         using var cultureScope = new CultureScope(culture);
@@ -489,12 +645,101 @@ public sealed class ApplicationDecisionServiceTests : IDisposable
             reviewerId);
     }
 
-    [HumansFact]
-    public async Task ApproveAsync_GrantsTheTierWithTheApplicationsTerm()
+    [HumansTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ApproveAsync_TierSaveFailurePreservesSubmittedApplicationAndVotes(bool existingTier)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var interceptor = new RejectTierGrantSave();
+        var factory = new TestDbContextFactory<GovernanceDbContext>(new DbContextOptionsBuilder<GovernanceDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString()).AddInterceptors(interceptor).Options);
+        var application = new MemberApplication
+        {
+            Id = Guid.NewGuid(),
+            UserId = Guid.NewGuid(),
+            MembershipTier = MembershipTier.Asociado,
+            Motivation = "Motivation",
+            SubmittedAt = Clock.GetCurrentInstant(),
+            UpdatedAt = Clock.GetCurrentInstant(),
+        };
+        var voterId = Guid.NewGuid();
+        await using (var seed = await factory.CreateDbContextAsync(ct))
+        {
+            seed.Applications.Add(application);
+            seed.BoardVotes.Add(new BoardVote
+            {
+                Id = Guid.NewGuid(),
+                ApplicationId = application.Id,
+                BoardMemberUserId = voterId,
+                Vote = VoteChoice.Yay,
+                VotedAt = Clock.GetCurrentInstant(),
+            });
+            if (existingTier) seed.MembershipTiers.Add(new MembershipTierRecord
+            {
+                UserId = application.UserId,
+                Tier = MembershipTier.Volunteer,
+                GrantedAt = Clock.GetCurrentInstant(),
+            });
+            await seed.SaveChangesAsync(ct);
+        }
+        interceptor.Reject = true;
+        var service = CreateService(new ApplicationRepository(factory), factory);
+        var approve = () => service.ApproveAsync(application.Id, Guid.NewGuid(), null, null, ct);
+
+        await approve.Should().ThrowAsync<InvalidOperationException>().WithMessage("Tier grant save failed");
+        await using var verify = await factory.CreateDbContextAsync(ct);
+        var saved = await verify.Applications.Include(a => a.StateHistory).SingleAsync(ct);
+        saved.Status.Should().Be(ApplicationStatus.Submitted);
+        saved.ResolvedAt.Should().BeNull();
+        saved.TermExpiresAt.Should().BeNull();
+        saved.StateHistory.Should().BeEmpty();
+        (await verify.BoardVotes.SingleAsync(ct)).BoardMemberUserId.Should().Be(voterId);
+        var tier = await verify.MembershipTiers.SingleOrDefaultAsync(ct);
+        if (existingTier)
+        {
+            tier!.Tier.Should().Be(MembershipTier.Volunteer);
+            tier.GrantedByApplicationId.Should().BeNull();
+        }
+        else tier.Should().BeNull();
+        AuditLog.ReceivedCalls().Should().BeEmpty();
+        _syncJob.ReceivedCalls().Should().BeEmpty();
+        _emailService.ReceivedCalls().Should().BeEmpty();
+        _notificationService.ReceivedCalls().Should().BeEmpty();
+    }
+
+    private sealed class RejectTierGrantSave : SaveChangesInterceptor
+    {
+        public bool Reject { get; set; }
+
+        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            if (Reject && eventData.Context?.ChangeTracker.Entries<MembershipTierRecord>()
+                .Any(entry => entry.State is EntityState.Added or EntityState.Modified) == true)
+                throw new InvalidOperationException("Tier grant save failed");
+            return ValueTask.FromResult(result);
+        }
+    }
+
+    [HumansTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ApproveAsync_GrantsTheTierWithTheApplicationsTerm(bool existingTier)
     {
         var userId = Guid.NewGuid();
         var app = await SeedSubmittedApplicationAsync(userId, MembershipTier.Asociado);
         await SeedBoardVoteAsync(app.Id);
+        if (existingTier)
+        {
+            GovernanceDb.MembershipTiers.Add(new MembershipTierRecord
+            {
+                UserId = userId,
+                Tier = MembershipTier.Volunteer,
+                GrantedAt = Clock.GetCurrentInstant() - Duration.FromDays(1),
+            });
+            await SaveAllAsync(TestContext.Current.CancellationToken);
+        }
 
         await _service.ApproveAsync(app.Id, Guid.NewGuid(), null, null, TestContext.Current.CancellationToken);
 
@@ -695,20 +940,19 @@ public sealed class ApplicationDecisionServiceTests : IDisposable
     [InlineData(true, true)]
     [InlineData(false, false)]
     [InlineData(false, true)]
-    public async Task FinalizeAsync_EmailLookupFailureKeepsDecisionSuccessfulAndDispatchesNotice(
-        bool approve, bool addressLookup)
+    public async Task FinalizeAsync_EmailPreparationOrDeliveryFailureKeepsDecisionSuccessfulAndDispatchesNotice(
+        bool approve, bool deliveryFailure)
     {
         var userId = Guid.NewGuid();
         var reviewerId = Guid.NewGuid();
         var app = await SeedSubmittedApplicationAsync(userId);
         await SeedBoardVoteAsync(app.Id);
-        if (addressLookup)
+        if (deliveryFailure)
         {
-            var user = new User { Id = userId, BurnerName = "Applicant", PreferredLanguage = "en" };
+            var user = new User { Id = userId, BurnerName = "Applicant", PreferredLanguage = "en", Email = "applicant@example.com" };
             _userService.GetUserInfoAsync(userId, Arg.Any<CancellationToken>()).Returns(user.ToUserInfo());
-            _userEmailService.GetNotificationTargetEmailsAsync(
-                    Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-                .Returns(Task.FromException<IReadOnlyDictionary<Guid, string>>(new IOException("address lookup unavailable")));
+            _emailService.SendAsync(Arg.Any<EmailMessage>())
+                .Returns(Task.FromException(new IOException("email delivery unavailable")));
         }
         else
         {
@@ -747,9 +991,8 @@ public sealed class ApplicationDecisionServiceTests : IDisposable
         var app = await SeedSubmittedApplicationAsync(userId);
         await SeedBoardVoteAsync(app.Id);
         _userService.GetUserInfoAsync(userId, Arg.Any<CancellationToken>())
-            .Returns(new User { Id = userId, BurnerName = "Applicant", PreferredLanguage = "es" }.ToUserInfo());
-        _userEmailService.GetNotificationTargetEmailsAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(Task.FromResult<IReadOnlyDictionary<Guid, string>>(new Dictionary<Guid, string> { [userId] = "applicant@example.com" }));
+            .Returns(new User { Id = userId, BurnerName = "Applicant", PreferredLanguage = "es", Email = "applicant@example.com" }.ToUserInfo());
+
         if (emailFailure)
             _emailService.SendAsync(Arg.Any<EmailMessage>())
                 .Returns(Task.FromException(new IOException("Email delivery unavailable")));
@@ -762,10 +1005,16 @@ public sealed class ApplicationDecisionServiceTests : IDisposable
         var args = _notificationService.ReceivedCalls().Single().GetArguments();
         args[0].Should().Be(approve ? GovernanceNotificationSources.ApplicationApproved : GovernanceNotificationSources.ApplicationRejected);
         ((IReadOnlyList<Guid>)args[4]!).Should().ContainSingle().Which.Should().Be(userId);
-        args[3].Should().Be(approve ? "Tu solicitud de Colaborador ha sido aprobada" : "Tu solicitud de Colaborador no ha sido aprobada");
-        args[5].Should().Be(approve ? "¡Enhorabuena! Tu solicitud de Colaborador ha sido aprobada." : "Tu solicitud de Colaborador no ha sido aprobada.");
+        var resources = new System.Resources.ResourceManager(typeof(GovernanceResource));
+        string Notice(string key, CultureInfo culture) =>
+            string.Format(culture, resources.GetString(key, culture)!, MembershipTier.Colaborador);
+        var recipientCulture = CultureInfo.GetCultureInfo("es");
+        var titleKey = approve ? "Governance_Notification_ApplicationApproved" : "Governance_Notification_ApplicationRejected";
+        args[3].Should().Be(Notice(titleKey, recipientCulture))
+            .And.NotBe(Notice(titleKey, CultureInfo.InvariantCulture));
+        args[5].Should().Be(Notice(titleKey + "Body", recipientCulture));
         args[6].Should().Be("/Governance/Applications");
-        args[7].Should().Be("Ver solicitud");
+        args[7].Should().Be(resources.GetString("Governance_Notification_ViewApplication", recipientCulture));
         await _userService.Received(1).GetUserInfoAsync(userId, Arg.Any<CancellationToken>());
     }
 
@@ -794,11 +1043,6 @@ public sealed class ApplicationDecisionServiceTests : IDisposable
             PreferredLanguage = language
         };
         _userService.GetUserInfoAsync(userId, Arg.Any<CancellationToken>()).Returns(user.ToUserInfo());
-        _userEmailService.GetNotificationTargetEmailsAsync(
-                Arg.Is<IReadOnlyCollection<Guid>>(ids => ids.Contains(userId)),
-                Arg.Any<CancellationToken>())
-            .Returns(Task.FromResult<IReadOnlyDictionary<Guid, string>>(
-                new Dictionary<Guid, string> { [userId] = "alice@test.com" }));
 
         var result = approve
             ? await _service.ApproveAsync(app.Id, Guid.NewGuid(), null, null, TestContext.Current.CancellationToken)
@@ -831,12 +1075,15 @@ public sealed class ApplicationDecisionServiceTests : IDisposable
             Email = null,
             PreferredLanguage = "en"
         };
+        user.UserEmails.Add(new UserEmail
+        {
+            Id = Guid.NewGuid(),
+            UserId = userId,
+            Email = "bob.notify@test.com",
+            IsVerified = true,
+            IsPrimary = true
+        });
         _userService.GetUserInfoAsync(userId, Arg.Any<CancellationToken>()).Returns(user.ToUserInfo());
-        _userEmailService.GetNotificationTargetEmailsAsync(
-                Arg.Is<IReadOnlyCollection<Guid>>(ids => ids.Contains(userId)),
-                Arg.Any<CancellationToken>())
-            .Returns(Task.FromResult<IReadOnlyDictionary<Guid, string>>(
-                new Dictionary<Guid, string> { [userId] = "bob.notify@test.com" }));
 
         await _service.ApproveAsync(app.Id, Guid.NewGuid(), null, null, TestContext.Current.CancellationToken);
 
@@ -867,7 +1114,7 @@ public sealed class ApplicationDecisionServiceTests : IDisposable
             PreferredLanguage = "en"
         };
         _userService.GetUserInfoAsync(userId, Arg.Any<CancellationToken>())
-            .Returns(UserInfo.Create(user, [], [], [], null, []));
+            .Returns(UserInfo.Create(user, [], [], null));
 
         await _service.ApproveAsync(app.Id, Guid.NewGuid(), null, null, TestContext.Current.CancellationToken);
 
@@ -1406,26 +1653,10 @@ public sealed class ApplicationDecisionServiceTests : IDisposable
     }
 
     [HumansFact]
-    public async Task GetUserApplicationDetailAsync_ReturnsStitchedUserDetailDto()
+    public async Task GetUserApplicationDetailAsync_ReturnsReviewerAndHistoryActorIds()
     {
         var userId = Guid.NewGuid();
         var reviewerId = Guid.NewGuid();
-        var reviewer = new User
-        {
-            Id = reviewerId,
-            DisplayName = "Reviewer",
-            // UserInfo.BurnerName reads User.BurnerName, so it is seeded there.
-            BurnerName = "Reviewer",
-            UserName = "r@t.com",
-            Email = "r@t.com"
-        };
-        var users = new Dictionary<Guid, User> { [reviewerId] = reviewer };
-        _userService.GetUserInfosAsync(
-            Arg.Is<IReadOnlyCollection<Guid>>(ids => ids.Contains(reviewerId)),
-            Arg.Any<CancellationToken>())
-            .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(
-                new Dictionary<Guid, UserInfo> { [reviewerId] = reviewer.ToUserInfo() }));
-
         var app = await SeedSubmittedApplicationAsync(userId);
         app.Approve(reviewerId, "Good", Clock);
         await SaveAllAsync(TestContext.Current.CancellationToken);
@@ -1433,9 +1664,11 @@ public sealed class ApplicationDecisionServiceTests : IDisposable
         var result = await _service.GetUserApplicationDetailAsync(app.Id, userId, TestContext.Current.CancellationToken);
 
         result.Should().NotBeNull();
-        result.ReviewerName.Should().Be("Reviewer");
+        result.ReviewedByUserId.Should().Be(reviewerId);
         result.History.Should().NotBeEmpty();
-        result.History[0].ChangedByDisplayName.Should().Be("Reviewer");
+        result.History[0].ChangedByUserId.Should().Be(reviewerId);
+        await _userService.DidNotReceive().GetUserInfosAsync(
+            Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>());
     }
 
     [HumansFact]
@@ -1456,19 +1689,65 @@ public sealed class ApplicationDecisionServiceTests : IDisposable
         result.Should().BeNull();
     }
 
-    [HumansFact]
-    public async Task GetUserApplicationDetailAsync_IncludesStateHistory()
+    [HumansTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ApplicationDetails_order_state_history_newest_first(bool admin)
     {
         var userId = Guid.NewGuid();
         var app = await SeedSubmittedApplicationAsync(userId);
         app.Withdraw(Clock);
+        var now = Clock.GetCurrentInstant();
+        app.StateHistory.Add(new ApplicationStateHistory
+        {
+            ApplicationId = app.Id,
+            Status = ApplicationStatus.Submitted,
+            ChangedAt = now - Duration.FromDays(2),
+            ChangedByUserId = userId,
+            Notes = "Oldest",
+        });
+        app.StateHistory.Add(new ApplicationStateHistory
+        {
+            ApplicationId = app.Id,
+            Status = ApplicationStatus.Submitted,
+            ChangedAt = now - Duration.FromDays(1),
+            ChangedByUserId = userId,
+            Notes = "Middle",
+        });
         await SaveAllAsync(TestContext.Current.CancellationToken);
 
         var result = await _service.GetUserApplicationDetailAsync(app.Id, userId, TestContext.Current.CancellationToken);
 
         result.Should().NotBeNull();
-        result.History.Should().HaveCount(1);
-        result.History[0].Status.Should().Be(ApplicationStatus.Withdrawn);
+        result.History.Should().HaveCount(3);
+        result.History.Should().ContainSingle(row => row.Status == ApplicationStatus.Withdrawn);
+        result.History.Where(row => row.Status == ApplicationStatus.Submitted)
+            .Select(row => (row.ChangedAt, row.Notes)).Should().BeEquivalentTo(new[]
+            {
+                (now - Duration.FromDays(2), "Oldest"), (now - Duration.FromDays(1), "Middle"),
+            });
+        _userService.GetUserInfoAsync(userId, Arg.Any<CancellationToken>())
+            .Returns(new ValueTask<UserInfo?>(new User { Id = userId }.ToUserInfo()));
+        var controller = new GovernanceApplicationsController(_service, _userService,
+            Substitute.For<IStringLocalizer<SharedResource>>(), NullLogger<GovernanceApplicationsController>.Instance, Clock)
+        {
+            ControllerContext = new ControllerContext
+            {
+                HttpContext = new DefaultHttpContext
+                {
+                    User = new ClaimsPrincipal(new ClaimsIdentity([
+                        new Claim(ClaimTypes.NameIdentifier, userId.ToString())], "Test")),
+                },
+            },
+        };
+        var page = (admin ? await controller.AdminDetail(app.Id) : await controller.Details(app.Id))
+            .Should().BeOfType<ViewResult>().Which;
+        var history = admin
+            ? page.Model.Should().BeOfType<AdminApplicationDetailViewModel>().Which.History
+            : page.Model.Should().BeOfType<ApplicationDetailViewModel>().Which.History;
+        history.Select(row => row.ChangedAt).Should().Equal(
+            now.ToDateTimeUtc(), (now - Duration.FromDays(1)).ToDateTimeUtc(), (now - Duration.FromDays(2)).ToDateTimeUtc());
+        history.Select(row => row.Notes).Should().Equal(null, "Middle", "Oldest");
     }
 
     [HumansTheory]
@@ -1551,7 +1830,7 @@ public sealed class ApplicationDecisionServiceTests : IDisposable
         var (items, _) = await _service.GetFilteredApplicationsAsync(null, null, 1, 10, TestContext.Current.CancellationToken);
 
         items.Should().HaveCount(1);
-        items[0].UserDisplayName.Should().Be("Applicant");
+        items[0].UserId.Should().Be(userId);
         items[0].UserEmail.Should().Be("a@t.com");
     }
 
@@ -1570,26 +1849,8 @@ public sealed class ApplicationDecisionServiceTests : IDisposable
             Email = "a@t.com",
             ProfilePictureUrl = "https://example.com/pic.png"
         };
-        var reviewer = new User
-        {
-            Id = reviewerId,
-            DisplayName = "Admin",
-            // UserInfo.BurnerName reads User.BurnerName, so it is seeded there.
-            BurnerName = "Admin",
-            UserName = "r@t.com",
-            Email = "r@t.com"
-        };
         _userService.GetUserInfoAsync(applicantId, Arg.Any<CancellationToken>())
             .Returns(applicant.ToUserInfo());
-        _userService.GetUserInfosAsync(
-            Arg.Any<IReadOnlyCollection<Guid>>(),
-            Arg.Any<CancellationToken>())
-            .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(
-                new Dictionary<Guid, UserInfo>
-                {
-                    [applicantId] = applicant.ToUserInfo(),
-                    [reviewerId] = reviewer.ToUserInfo()
-                }));
 
         var app = await SeedSubmittedApplicationAsync(applicantId);
         app.Approve(reviewerId, "Looks good", Clock);
@@ -1599,10 +1860,8 @@ public sealed class ApplicationDecisionServiceTests : IDisposable
 
         result.Should().NotBeNull();
         result.UserId.Should().Be(applicantId);
-        result.UserDisplayName.Should().Be("Applicant");
         result.UserEmail.Should().Be("a@t.com");
-        result.UserProfilePictureUrl.Should().Be("https://example.com/pic.png");
-        result.ReviewerName.Should().Be("Admin");
+        result.ReviewedByUserId.Should().Be(reviewerId);
         result.History.Should().NotBeEmpty();
     }
 
@@ -1642,9 +1901,70 @@ public sealed class ApplicationDecisionServiceTests : IDisposable
     }
 
     [HumansFact]
-    public async Task FixTermExpiryDriftAsync_RewritesExpiryAndAuditsEachRow()
+    public async Task FixTermExpiryDriftAsync_TierSaveFailurePreservesBothExpiriesForRetry()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var interceptor = new RejectTierGrantSave();
+        var factory = new TestDbContextFactory<GovernanceDbContext>(new DbContextOptionsBuilder<GovernanceDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString()).AddInterceptors(interceptor).Options);
+        var oldExpiry = new LocalDate(2029, 12, 31);
+        var application = new MemberApplication
+        {
+            Id = Guid.NewGuid(),
+            UserId = Guid.NewGuid(),
+            MembershipTier = MembershipTier.Asociado,
+            Motivation = "Motivation",
+            SubmittedAt = Clock.GetCurrentInstant(),
+            UpdatedAt = Clock.GetCurrentInstant(),
+        };
+        application.Approve(Guid.NewGuid(), null, Clock);
+        application.TermExpiresAt = oldExpiry;
+        await using (var seed = await factory.CreateDbContextAsync(ct))
+        {
+            seed.Applications.Add(application);
+            seed.MembershipTiers.Add(new MembershipTierRecord
+            {
+                UserId = application.UserId,
+                Tier = application.MembershipTier,
+                GrantedAt = Clock.GetCurrentInstant(),
+                ExpiresAt = oldExpiry,
+                GrantedByApplicationId = application.Id,
+            });
+            await seed.SaveChangesAsync(ct);
+        }
+        interceptor.Reject = true;
+        var service = CreateService(new ApplicationRepository(factory), factory);
+        var correct = () => service.FixTermExpiryDriftAsync(Guid.NewGuid(), ct);
+
+        await correct.Should().ThrowAsync<InvalidOperationException>().WithMessage("Tier grant save failed");
+        await using var verify = await factory.CreateDbContextAsync(ct);
+        (await verify.Applications.SingleAsync(ct)).TermExpiresAt.Should().Be(oldExpiry);
+        (await verify.MembershipTiers.SingleAsync(ct)).ExpiresAt.Should().Be(oldExpiry);
+        (await service.GetTermExpiryDriftAsync(ct)).Should().ContainSingle().Which.ApplicationId.Should().Be(application.Id);
+        AuditLog.ReceivedCalls().Should().BeEmpty();
+    }
+
+    [HumansTheory]
+    [InlineData(null)]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task FixTermExpiryDriftAsync_RewritesExpiryAndAuditsEachRow(bool? grantingApplication)
     {
         var drifted = await SeedApprovedApplicationAsync(new LocalDate(2029, 12, 31));
+        var grantId = grantingApplication == true ? drifted.Id : Guid.NewGuid();
+        var grantedAt = Clock.GetCurrentInstant() - Duration.FromDays(1);
+        if (grantingApplication is not null)
+        {
+            GovernanceDb.MembershipTiers.Add(new MembershipTierRecord
+            {
+                UserId = drifted.UserId,
+                Tier = MembershipTier.Asociado,
+                GrantedAt = grantedAt,
+                ExpiresAt = drifted.TermExpiresAt,
+                GrantedByApplicationId = grantId,
+            });
+            await SaveAllAsync(TestContext.Current.CancellationToken);
+        }
         var adminId = Guid.NewGuid();
 
         var count = await _service.FixTermExpiryDriftAsync(adminId, TestContext.Current.CancellationToken);
@@ -1653,6 +1973,15 @@ public sealed class ApplicationDecisionServiceTests : IDisposable
         ClearAllTrackers();
         var updated = await GovernanceDb.Applications.FirstAsync(a => a.Id == drifted.Id, TestContext.Current.CancellationToken);
         updated.TermExpiresAt.Should().Be(new LocalDate(2027, 12, 31));
+        var tier = await GovernanceDb.MembershipTiers.SingleOrDefaultAsync(TestContext.Current.CancellationToken);
+        if (grantingApplication is null) tier.Should().BeNull();
+        else
+        {
+            tier!.ExpiresAt.Should().Be(grantingApplication.Value ? new LocalDate(2027, 12, 31) : new LocalDate(2029, 12, 31));
+            tier.Tier.Should().Be(MembershipTier.Asociado);
+            tier.GrantedAt.Should().Be(grantedAt);
+            tier.GrantedByApplicationId.Should().Be(grantId);
+        }
         await AuditLog.Received(1).LogAsync(
             GovernanceAuditActions.TierTermExpiryCorrected, AuditEntityTypes.Application, drifted.Id,
             Arg.Any<string>(), adminId);

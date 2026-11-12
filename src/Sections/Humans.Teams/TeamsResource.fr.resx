@@ -43,7 +43,6 @@
     <data name="Teams_MyTeams_Title" xml:space="preserve">
     <value>Mes équipes</value>
   </data>
-  <data name="Teams_BreadcrumbNavigation" xml:space="preserve"><value>Fil d’Ariane</value></data>
   <data name="Teams_JoinTeam_Title" xml:space="preserve">
     <value>Rejoindre {0}</value>
     <comment>{0} = team name</comment>
@@ -388,7 +387,7 @@
     <value>Gérer les rôles</value>
   </data>
   <data name="Teams_TeamDetail_SubTeams" xml:space="preserve">
-    <value>Sub-teams</value>
+    <value>Sous-équipes</value>
   </data>
   <data name="Teams_PublicDirectory" xml:space="preserve">
     <value>Équipes</value>
@@ -404,33 +403,6 @@
   </data>
   <data name="Teams_EditTeamPage_Saved" xml:space="preserve">
     <value>Page de l'équipe mise à jour.</value>
-  </data>
-  <data name="Teams_Birthdays_Title" xml:space="preserve">
-    <value>Calendrier des anniversaires</value>
-  </data>
-  <data name="Teams_Birthdays_Count" xml:space="preserve">
-    <value>{0} anniversaires en {1}</value>
-  </data>
-  <data name="Teams_Birthdays_Count_One" xml:space="preserve">
-    <value>{0} anniversaire en {1}</value>
-  </data>
-  <data name="Teams_Birthdays_None" xml:space="preserve">
-    <value>Aucun anniversaire en {0}.</value>
-  </data>
-  <data name="Teams_Birthdays_Privacy" xml:space="preserve">
-    <value>Seuls les humans ayant renseigné leur anniversaire sont affichés.</value>
-  </data>
-  <data name="Teams_Map_Title" xml:space="preserve">
-    <value>Carte des Humans</value>
-  </data>
-  <data name="Teams_Map_Count" xml:space="preserve">
-    <value>{0} humans avec localisation</value>
-  </data>
-  <data name="Teams_Map_None" xml:space="preserve">
-    <value>Aucun human n'a encore renseigné sa localisation.</value>
-  </data>
-  <data name="Teams_Map_Privacy" xml:space="preserve">
-    <value>Seuls les humans ayant renseigné leur localisation sont affichés. La localisation est approximative et basée sur la ville.</value>
   </data>
   <data name="Teams_TeamAdmin_AddMember" xml:space="preserve">
     <value>Ajouter un membre</value>
@@ -546,4 +518,11 @@
     <value>Votre message a été envoyé à {0}.</value>
   </data>
   <data name="Teams_SendMessage_OptedOut" xml:space="preserve"><value>Cette personne a choisi de ne pas recevoir de messages.</value></data>
+  <data name="Teams_Notification_JoinRequestSubmitted" xml:space="preserve"><value>Nouvelle demande pour rejoindre {0}</value></data>
+  <data name="Teams_Notification_MemberJoined" xml:space="preserve"><value>{0} a rejoint {1}</value></data>
+  <data name="Teams_Notification_JoinRequestSubmittedBody" xml:space="preserve"><value>{0} a demandé à rejoindre {1}.</value></data>
+  <data name="Teams_Notification_MemberJoinedBody" xml:space="preserve"><value>{0} a rejoint {1}.</value></data>
+  <data name="Teams_Notification_ReviewRequest" xml:space="preserve"><value>Examiner la demande</value></data>
+  <data name="Teams_Notification_ViewMembers" xml:space="preserve"><value>Voir les membres</value></data>
+  <data name="Teams_Notification_Someone" xml:space="preserve"><value>Quelqu’un</value></data>
 </root>

@@ -1,4 +1,3 @@
-using Humans.Consent.Contracts;
 using Humans.Governance.Contracts;
 using Humans.GoogleIntegration.Contracts;
 using AwesomeAssertions;
@@ -40,11 +39,8 @@ public class SurveyServiceTests
     private readonly IUserService _userService = Substitute.For<IUserService>();
     private readonly IGovernanceService _governance = Substitute.For<IGovernanceService>();
     private readonly Dictionary<Guid, MembershipTier> _tiers = [];
-    private readonly IConsentService _consent = Substitute.For<IConsentService>();
-    private readonly HashSet<Guid> _approved = [];
     private readonly ITicketService _ticketService = Substitute.For<ITicketService>();
     private readonly IShiftView _shiftView = Substitute.For<IShiftView>();
-    private readonly IUserEmailService _userEmailService = Substitute.For<IUserEmailService>();
     private readonly IEmailService _emailService = Substitute.For<IEmailService>();
     // SurveysEmails is sealed with no interface, so the assertions below read the
     // EmailMessage it built off IEmailService.SendAsync rather than mocking the builder.
@@ -59,32 +55,32 @@ public class SurveyServiceTests
             .Returns(call => _tiers.GetValueOrDefault(call.Arg<Guid>(), MembershipTier.Volunteer));
         _governance.GetMembershipTiersAsync(Arg.Any<CancellationToken>())
             .Returns(_ => new Dictionary<Guid, MembershipTier>(_tiers));
-        _consent.GetConsentReviewAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>())
-            .Returns(call => Review(call.Arg<Guid>()));
-        _consent.GetConsentReviewsAsync(Arg.Any<CancellationToken>())
-            .Returns(_ => _approved.ToDictionary(id => id, Review));
         _repo.GetInvitationsAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>())
             .Returns(Array.Empty<SurveyInvitation>());
         _repo.GetInvitationsForUserAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>())
             .Returns(Array.Empty<SurveyInvitation>());
     }
 
-    private SurveyService CreateService(ILogger<SurveyService>? logger = null, ISurveyRepository? repository = null) => new(
-        repository ?? _repo, _audit, _clock, logger ?? NullLogger<SurveyService>.Instance,
-        _teamService, _userService, _governance, _consent, _ticketService, _shiftView,
-        _userEmailService, _emailService, _emailMessages, _tokenProvider, _translation, _fileStorage);
+    private SurveyService CreateService(ILogger<SurveyService>? logger = null, ISurveyRepository? repository = null)
+    {
+        var ownerRepo = repository ?? _repo;
+        var ownerLogger = logger ?? NullLogger<SurveyService>.Instance;
+        var audience = CreateAudience(ownerLogger);
+        return new SurveyService(ownerRepo, _audit, _clock, ownerLogger, _userService, audience,
+            CreateInvitationDelivery(ownerRepo, audience), _tokenProvider, _translation, _fileStorage);
+    }
 
-    /// <summary>The Consent Coordinator review: cleared for ids in <see cref="_approved"/>.</summary>
-    private ConsentReviewInfo Review(Guid id) => _approved.Contains(id)
-        ? ConsentReviewInfo.None(id) with { Status = ConsentCheckStatus.Cleared, IsApproved = true }
-        : ConsentReviewInfo.None(id);
+    private SurveyAudience CreateAudience(ILogger? logger = null) =>
+        new(_teamService, _userService, _governance, _ticketService, _shiftView, logger ?? NullLogger.Instance);
 
-    private SurveyReminderSender CreateReminderSender() => new(
-        _repo, _audit, _clock, _userService, _userEmailService, _emailService,
-        _emailMessages, _tokenProvider, NullLogger<SurveyReminderSender>.Instance);
+    private SurveyInvitationDelivery CreateInvitationDelivery(ISurveyRepository repository, SurveyAudience audience) =>
+        new(repository, _audit, _clock, _userService, _emailService,
+            _emailMessages, _tokenProvider, audience, NullLogger<SurveyInvitationDelivery>.Instance);
 
-    /// <summary>A Board/Admin viewer: may edit any survey, so ownership never shadows what a test is pinning.</summary>
-    private static SurveyViewer Board(Guid userId) => new(userId, IsBoardOrAdmin: true);
+    private SurveyInvitationDelivery CreateReminderSender() => CreateInvitationDelivery(_repo, CreateAudience());
+
+    /// <summary>A Surveys Admin viewer: may edit any survey, so ownership never shadows what a test is pinning.</summary>
+    private static SurveyViewer SurveysAdmin(Guid userId) => new(userId, SeesEverySurvey: true, ManagesEverySurvey: true);
 
     private static LocalizedText L(string en) => new(new Dictionary<string, string>(StringComparer.Ordinal) { ["en"] = en });
 
@@ -220,6 +216,85 @@ public class SurveyServiceTests
         await _repo.DidNotReceive().AddAsync(Arg.Any<Survey>(), Arg.Any<CancellationToken>());
     }
 
+    public enum InvitationDeliveryFailure { EnqueueAcknowledgement, StatusMarker }
+
+    [HumansTheory]
+    [InlineData(InvitationDeliveryFailure.EnqueueAcknowledgement)]
+    [InlineData(InvitationDeliveryFailure.StatusMarker)]
+    public async Task SendInvitesAsync_retry_reuses_delivery_without_suppressing_reminder(InvitationDeliveryFailure failureStage)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var teamId = Guid.NewGuid();
+        var userId = Guid.NewGuid();
+        var survey = SurveyWith(SurveyStatus.Open, SurveyAudienceType.Team, teamId);
+        var invitation = new SurveyInvitation
+        {
+            Id = Guid.NewGuid(),
+            SurveyId = survey.Id,
+            UserId = userId,
+            CreatedAt = _clock.GetCurrentInstant()
+        };
+        _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(survey);
+        _repo.GetInvitationsAsync(survey.Id, Arg.Any<CancellationToken>()).Returns([invitation]);
+        _teamService.GetTeamAsync(teamId, Arg.Any<CancellationToken>()).Returns(TeamWith(teamId, userId));
+        _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(new Dictionary<Guid, UserInfo>
+            {
+                [userId] = UserInfoWithName(userId, string.Empty, string.Empty) with { IdentityEmailColumn = "human@example.org" }
+            }));
+        _tokenProvider.Create(invitation.Id).Returns("token");
+        var deliveries = new Dictionary<Guid, EmailMessage>();
+        var attempts = new List<EmailMessage>();
+        var failed = false;
+        _emailService.SendAsync(Arg.Any<EmailMessage>(), Arg.Any<CancellationToken>()).Returns(call =>
+        {
+            var message = call.Arg<EmailMessage>();
+            attempts.Add(message);
+            // Email's persisted-enqueue contract: only an explicit delivery id is idempotent.
+            deliveries.TryAdd(message.DeliveryId ?? Guid.NewGuid(), message);
+            if (!failed && failureStage == InvitationDeliveryFailure.EnqueueAcknowledgement)
+            {
+                failed = true;
+                throw new IOException("Enqueue acknowledgement lost");
+            }
+            return Task.CompletedTask;
+        });
+        _repo.UpdateInvitationStatusAsync(invitation.Id, Arg.Any<EmailOutboxStatus>(), Arg.Any<Instant>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                var status = call.Arg<EmailOutboxStatus>();
+                if (!failed && status == EmailOutboxStatus.Queued && failureStage == InvitationDeliveryFailure.StatusMarker)
+                {
+                    failed = true;
+                    throw new IOException("Invitation status save failed");
+                }
+                if (status == EmailOutboxStatus.Queued) invitation.SentAt = call.Arg<Instant>();
+                invitation.LatestEmailStatus = status;
+                return Task.CompletedTask;
+            });
+        var service = CreateService();
+
+        (await service.SendInvitesAsync(survey.Id, Guid.NewGuid(), ct)).Failed.Should().Be(1);
+        invitation.SentAt.Should().BeNull();
+        (await service.SendInvitesAsync(survey.Id, Guid.NewGuid(), ct)).EmailsQueued.Should().Be(1);
+
+        attempts.Should().HaveCount(2);
+        attempts[0].DeliveryId.Should().NotBeNull();
+        attempts[1].DeliveryId.Should().Be(attempts[0].DeliveryId);
+        attempts[0].DeliveryId.Should().NotBe(invitation.Id);
+        deliveries.Should().ContainSingle();
+        invitation.SentAt.Should().NotBeNull();
+        (await service.SendInvitesAsync(survey.Id, Guid.NewGuid(), ct)).InvitationsCreated.Should().Be(0);
+        attempts.Should().HaveCount(2);
+
+        invitation.SentAt = _clock.GetCurrentInstant() - Duration.FromDays(8);
+        _repo.GetInvitationsDueForReminderAsync(Arg.Any<Instant>(), Arg.Any<CancellationToken>()).Returns([invitation]);
+        (await CreateReminderSender().SendDueRemindersAsync(ct)).Should().Be(1);
+
+        deliveries.Should().HaveCount(2);
+        deliveries[invitation.Id].TemplateName.Should().Be("survey_reminder");
+    }
+
     [HumansTheory]
     [InlineData(SurveyQuestionType.SingleChoice, false, 100)]
     [InlineData(SurveyQuestionType.SingleChoice, false, 101)]
@@ -246,7 +321,7 @@ public class SurveyServiceTests
         var service = CreateService();
 
         var result = editing
-            ? await service.UpdateAsync(survey.Id, Input(question), new SurveyViewer(actor, false), TestContext.Current.CancellationToken)
+            ? await service.UpdateAsync(survey.Id, Input(question), new SurveyViewer(actor, false, false), TestContext.Current.CancellationToken)
             : await service.CreateAsync(Input(question), actor, TestContext.Current.CancellationToken);
 
         if (length > 100)
@@ -297,7 +372,7 @@ public class SurveyServiceTests
         var service = CreateService();
 
         var result = editing
-            ? await service.UpdateAsync(survey.Id, input, new SurveyViewer(actor, false), TestContext.Current.CancellationToken)
+            ? await service.UpdateAsync(survey.Id, input, new SurveyViewer(actor, false, false), TestContext.Current.CancellationToken)
             : await service.CreateAsync(input, actor, TestContext.Current.CancellationToken);
 
         result.Succeeded.Should().BeFalse();
@@ -412,7 +487,7 @@ public class SurveyServiceTests
         var service = CreateService();
 
         Func<Task> save = editing
-            ? async () => { await service.UpdateAsync(surveyId, Input(information), Board(Guid.NewGuid()), TestContext.Current.CancellationToken); }
+            ? async () => { await service.UpdateAsync(surveyId, Input(information), SurveysAdmin(Guid.NewGuid()), TestContext.Current.CancellationToken); }
         : async () => { await service.CreateAsync(Input(information), Guid.NewGuid(), TestContext.Current.CancellationToken); };
 
         (await save.Should().ThrowAsync<IOException>()).Which.Should().BeSameAs(failure);
@@ -524,7 +599,7 @@ public class SurveyServiceTests
             InformationImages: []);
 
         await CreateService().UpdateAsync(
-            survey.Id, Input(updated), Board(Guid.NewGuid()), TestContext.Current.CancellationToken);
+            survey.Id, Input(updated), SurveysAdmin(Guid.NewGuid()), TestContext.Current.CancellationToken);
 
         await _repo.Received(1).UpdateAsync(Arg.Any<Survey>(), Arg.Any<CancellationToken>());
         await _fileStorage.DidNotReceive().DeleteAsync(
@@ -596,7 +671,7 @@ public class SurveyServiceTests
         var service = CreateService();
 
         var result = editing
-            ? await service.UpdateAsync(survey.Id, Input(question), Board(Guid.NewGuid()), TestContext.Current.CancellationToken)
+            ? await service.UpdateAsync(survey.Id, Input(question), SurveysAdmin(Guid.NewGuid()), TestContext.Current.CancellationToken)
             : await service.CreateAsync(Input(question), Guid.NewGuid(), TestContext.Current.CancellationToken);
 
         result.Succeeded.Should().BeFalse();
@@ -843,7 +918,7 @@ public class SurveyServiceTests
         _repo.GetByIdAsync(id, Arg.Any<CancellationToken>()).Returns(Task.FromResult<Survey?>(existing));
 
         var act = async () => await CreateService().UpdateAsync(
-            id, Input(), new SurveyViewer(Guid.NewGuid(), IsBoardOrAdmin: false),
+            id, Input(), new SurveyViewer(Guid.NewGuid(), SeesEverySurvey: false, ManagesEverySurvey: false),
             TestContext.Current.CancellationToken);
 
         var result = await act();
@@ -863,7 +938,7 @@ public class SurveyServiceTests
         _repo.GetByIdAsync(id, Arg.Any<CancellationToken>()).Returns(Task.FromResult<Survey?>(existing));
 
         await CreateService().UpdateAsync(
-            id, Input(), new SurveyViewer(author, IsBoardOrAdmin: false),
+            id, Input(), new SurveyViewer(author, SeesEverySurvey: false, ManagesEverySurvey: false),
             TestContext.Current.CancellationToken);
 
         await _repo.Received(1).UpdateAsync(Arg.Any<Survey>(), Arg.Any<CancellationToken>());
@@ -882,7 +957,7 @@ public class SurveyServiceTests
             "en", true, null, null, null, null, null, "town-hall",
             [Q("How was it?", SurveyQuestionType.ShortText, page: 1, order: 1)]);
 
-        await CreateService().UpdateAsync(id, input, Board(actor));
+        await CreateService().UpdateAsync(id, input, SurveysAdmin(actor));
 
         await _audit.Received(1).LogAsync(
             SurveysAuditActions.SurveyUpdated, "Survey", id,
@@ -922,7 +997,7 @@ public class SurveyServiceTests
             L("Rate it"), LocalizedText.Empty, false, 1, 5,
             L("Poor"), L("Great"), null, []));
 
-        await CreateService().UpdateAsync(id, input, Board(Guid.NewGuid()));
+        await CreateService().UpdateAsync(id, input, SurveysAdmin(Guid.NewGuid()));
 
         await _audit.Received(1).LogAsync(
             SurveysAuditActions.SurveyUpdated, "Survey", id,
@@ -958,7 +1033,7 @@ public class SurveyServiceTests
             columns: [Opt("morning", "Morning", 1)],
             rows: [new GridRowInput("monday", L("Monday"))]));
 
-        await CreateService().UpdateAsync(id, input, Board(Guid.NewGuid()));
+        await CreateService().UpdateAsync(id, input, SurveysAdmin(Guid.NewGuid()));
 
         await _audit.Received(1).LogAsync(
             SurveysAuditActions.SurveyUpdated, "Survey", id,
@@ -972,7 +1047,7 @@ public class SurveyServiceTests
         _repo.GetByIdAsync(id, Arg.Any<CancellationToken>())
             .Returns(Task.FromResult<Survey?>(ExistingSurveyMatchingInput(id)));
 
-        await CreateService().UpdateAsync(id, Input(), Board(Guid.NewGuid()));
+        await CreateService().UpdateAsync(id, Input(), SurveysAdmin(Guid.NewGuid()));
 
         await _audit.Received(1).LogAsync(
             SurveysAuditActions.SurveyUpdated, "Survey", id, "Updated survey", Arg.Any<Guid>());
@@ -1003,7 +1078,7 @@ public class SurveyServiceTests
     {
         var survey = SurveyWith(SurveyStatus.Draft, null, null);
         _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(survey);
-        var act = async () => await CreateService().UpdateAsync(survey.Id, InputWithSlug(slug), Board(Guid.NewGuid()), TestContext.Current.CancellationToken);
+        var act = async () => await CreateService().UpdateAsync(survey.Id, InputWithSlug(slug), SurveysAdmin(Guid.NewGuid()), TestContext.Current.CancellationToken);
 
         var result = await act();
         result.Succeeded.Should().BeFalse();
@@ -1034,7 +1109,7 @@ public class SurveyServiceTests
         var input = Input(information) with { PublicSlug = tooLong ? new string('a', 81) : " Admin " };
         var service = CreateService();
         var result = existing
-            ? await service.UpdateAsync(survey.Id, input, Board(Guid.NewGuid()), ct)
+            ? await service.UpdateAsync(survey.Id, input, SurveysAdmin(Guid.NewGuid()), ct)
             : await service.CreateAsync(input, Guid.NewGuid(), ct);
 
         result.Succeeded.Should().BeFalse();
@@ -1086,7 +1161,7 @@ public class SurveyServiceTests
     {
         var act = async () => await CreateService().UpdateAsync(
             Guid.NewGuid(), InputWithAudience(SurveyAudienceType.LoggedInSince),
-            Board(Guid.NewGuid()), TestContext.Current.CancellationToken);
+            SurveysAdmin(Guid.NewGuid()), TestContext.Current.CancellationToken);
 
         var result = await act();
         result.Succeeded.Should().BeFalse();
@@ -1130,7 +1205,7 @@ public class SurveyServiceTests
             "en", false, null, null, null, null, null, null,
             new List<QuestionInput> { q1, q2 });
 
-        var act = async () => await CreateService().UpdateAsync(survey.Id, input, Board(Guid.NewGuid()), TestContext.Current.CancellationToken);
+        var act = async () => await CreateService().UpdateAsync(survey.Id, input, SurveysAdmin(Guid.NewGuid()), TestContext.Current.CancellationToken);
 
         var result = await act();
         result.Succeeded.Should().BeFalse();
@@ -1198,7 +1273,7 @@ public class SurveyServiceTests
         StubTranslationAsMarker();
 
         // es is missing prompt+label (2); de is missing title+prompt+label (3).
-        var filled = await CreateService().PreFillTranslationsAsync(survey.Id, ["en", "es", "de"], Board(Guid.NewGuid()), TestContext.Current.CancellationToken);
+        var filled = await CreateService().PreFillTranslationsAsync(survey.Id, ["en", "es", "de"], SurveysAdmin(Guid.NewGuid()), TestContext.Current.CancellationToken);
 
         filled.Should().Be(5);
         captured.Should().NotBeNull();
@@ -1249,7 +1324,7 @@ public class SurveyServiceTests
         StubTranslationAsMarker();
 
         var filled = await CreateService().PreFillTranslationsAsync(
-            survey.Id, ["en", "es"], Board(Guid.NewGuid()), TestContext.Current.CancellationToken);
+            survey.Id, ["en", "es"], SurveysAdmin(Guid.NewGuid()), TestContext.Current.CancellationToken);
 
         filled.Should().Be(4); // survey title + question prompt + column label + row label
         captured!.Questions.Single().GridRows!.Single().Label.Values["es"].Should().Be("es:Monday");
@@ -1262,7 +1337,7 @@ public class SurveyServiceTests
         _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(survey);
 
         // Only target is the source culture itself → nothing to fill.
-        var filled = await CreateService().PreFillTranslationsAsync(survey.Id, ["en"], Board(Guid.NewGuid()), TestContext.Current.CancellationToken);
+        var filled = await CreateService().PreFillTranslationsAsync(survey.Id, ["en"], SurveysAdmin(Guid.NewGuid()), TestContext.Current.CancellationToken);
 
         filled.Should().Be(0);
         await _repo.DidNotReceive().UpdateAsync(Arg.Any<Survey>(), Arg.Any<CancellationToken>());
@@ -1283,7 +1358,7 @@ public class SurveyServiceTests
         StubTranslationAsMarker();
 
         var filled = await CreateService().PreFillTranslationsAsync(
-            survey.Id, ["en", "fr"], Board(Guid.NewGuid()), TestContext.Current.CancellationToken);
+            survey.Id, ["en", "fr"], SurveysAdmin(Guid.NewGuid()), TestContext.Current.CancellationToken);
 
         filled.Should().Be(3); // title + invitation subject + invitation message
         captured!.InvitationEmailSubject.Values["fr"].Should().Be("fr:Choose a date");
@@ -1307,15 +1382,49 @@ public class SurveyServiceTests
             CreatedByUserId = createdByUserId ?? Guid.Empty,
         };
 
+    [HumansTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Active_audiences_use_account_state_instead_of_consent_review(bool shiftParticipants)
+    {
+        var active = UserWithLastLogin(Guid.NewGuid(), null);
+        var inactive = Enum.GetValues<UserState>()
+            .Where(state => state != UserState.Active)
+            .Select(state => UserWithLastLogin(Guid.NewGuid(), null, state)).ToList();
+        inactive.Add(active with { Id = Guid.NewGuid(), IsFake = true });
+        _userService.GetAllUserInfosAsync(Arg.Any<CancellationToken>())
+            .Returns(new List<UserInfo> { active }.Concat(inactive).ToList());
+        var requestedShiftIds = new List<Guid>();
+        _shiftView.GetUsersAsync(Arg.Any<IEnumerable<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                var ids = call.Arg<IEnumerable<Guid>>().ToList();
+                requestedShiftIds.AddRange(ids);
+                return ids.ToDictionary(id => id, id => new ShiftUserSummary(id, [],
+                [new ShiftSignupSummary(Guid.NewGuid(), Guid.NewGuid(), null, SignupStatus.Confirmed,
+                    Guid.NewGuid(), "Rota", null, null, Guid.NewGuid(), Guid.NewGuid(),
+                    new LocalDate(2026, 7, 1), ShiftPeriod.Event, false,
+                    new LocalTime(10, 0), new LocalTime(12, 0), 2, null,
+                    Instant.FromUtc(2026, 7, 1, 10, 0), Instant.FromUtc(2026, 7, 1, 12, 0))]));
+            });
+        var survey = SurveyWith(SurveyStatus.Draft,
+            shiftParticipants ? SurveyAudienceType.ShiftParticipants : SurveyAudienceType.AllActiveMembers, null);
+        _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(survey);
+
+        var count = await CreateService().PreviewAudienceCountAsync(survey.Id, TestContext.Current.CancellationToken);
+
+        count.Should().Be(1);
+        if (shiftParticipants) requestedShiftIds.Should().Equal(active.Id);
+    }
+
     private static UserInfo UserWithLastLogin(Guid id, Instant? lastLogin, UserState state = UserState.Active) =>
         UserInfo.Create(
             new User { Id = id, PreferredLanguage = "en", LastLoginAt = lastLogin, State = state },
-            [], [], [], null, []);
+            [], [], null);
 
     private UserInfo Asociado(Guid id, MembershipTier tier = MembershipTier.Asociado)
     {
         _tiers[id] = tier;
-        _approved.Add(id);
         var profile = UserFixtures.Profile(
             burnerName: "Voter",
             firstName: "Eligible",
@@ -1337,10 +1446,8 @@ public class SurveyServiceTests
             MergedAt: null,
             IdentityEmailColumn: null,
             UserEmails: [],
-            EventParticipations: [],
             ExternalLogins: [],
-            Profile: profile,
-            CommunicationPreferences: [])
+            Profile: profile)
         {
             State = UserState.Active,
         };
@@ -1363,8 +1470,9 @@ public class SurveyServiceTests
         _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(survey);
         _teamService.GetTeamAsync(teamId, Arg.Any<CancellationToken>())
             .Returns(TeamWith(teamId, alreadyInvited, newA, newB));
-        _repo.GetInvitedUserIdsAsync(survey.Id, Arg.Any<CancellationToken>())
-            .Returns(new HashSet<Guid> { alreadyInvited });
+        _repo.GetInvitationsAsync(survey.Id, Arg.Any<CancellationToken>())
+            .Returns([new SurveyInvitation { Id = Guid.NewGuid(), SurveyId = survey.Id,
+                UserId = alreadyInvited, SentAt = _clock.GetCurrentInstant() }]);
         _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<Guid, UserInfo>());
 
@@ -1384,8 +1492,9 @@ public class SurveyServiceTests
         _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(survey);
         _teamService.GetTeamAsync(teamId, Arg.Any<CancellationToken>())
             .Returns(TeamWith(teamId, survivor, newA));
-        _repo.GetInvitedUserIdsAsync(survey.Id, Arg.Any<CancellationToken>())
-            .Returns(new HashSet<Guid> { archived });
+        _repo.GetInvitationsAsync(survey.Id, Arg.Any<CancellationToken>())
+            .Returns([new SurveyInvitation { Id = Guid.NewGuid(), SurveyId = survey.Id,
+                UserId = archived, SentAt = _clock.GetCurrentInstant() }]);
         _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<Guid, UserInfo> { [archived] = Asociado(survivor) });
 
@@ -1422,8 +1531,6 @@ public class SurveyServiceTests
             UserWithLastLogin(Guid.NewGuid(), cutoff + Duration.FromDays(30)), // after → included
             UserWithLastLogin(Guid.NewGuid(), null),                           // never logged in → excluded
         });
-        _repo.GetInvitedUserIdsAsync(survey.Id, Arg.Any<CancellationToken>())
-            .Returns(new HashSet<Guid>());
 
         var count = await CreateService().PreviewAudienceCountAsync(survey.Id, TestContext.Current.CancellationToken);
 
@@ -1446,8 +1553,6 @@ public class SurveyServiceTests
             UserWithLastLogin(Guid.NewGuid(), recentLogin, UserState.Suspended),      // status wall → excluded
             UserWithLastLogin(Guid.NewGuid(), recentLogin, UserState.AdminSuspended), // status wall → excluded
         });
-        _repo.GetInvitedUserIdsAsync(survey.Id, Arg.Any<CancellationToken>())
-            .Returns(new HashSet<Guid>());
 
         var count = await CreateService().PreviewAudienceCountAsync(survey.Id, TestContext.Current.CancellationToken);
 
@@ -1474,23 +1579,16 @@ public class SurveyServiceTests
         Guid recent = Guid.NewGuid(), stale = Guid.NewGuid(), never = Guid.NewGuid();
         var survey = SurveyWith(SurveyStatus.Open, SurveyAudienceType.LoggedInSince, null, cutoff);
         _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(survey);
-        _repo.GetInvitedUserIdsAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(new HashSet<Guid>());
         _userService.GetAllUserInfosAsync(Arg.Any<CancellationToken>()).Returns(new List<UserInfo>
         {
             UserWithLastLogin(recent, cutoff + Duration.FromDays(3)),
             UserWithLastLogin(stale, cutoff - Duration.FromDays(3)),
             UserWithLastLogin(never, null),
         });
-        _userEmailService.GetNotificationTargetEmailsAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<Guid, string>
-            {
-                [recent] = "recent@example.org",
-                [stale] = "stale@example.org",
-                [never] = "never@example.org",
-            });
+
         _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
             .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(
-                new Dictionary<Guid, UserInfo>()));
+                new Dictionary<Guid, UserInfo> { [recent] = UserInfoWithName(recent, string.Empty, string.Empty) with { IdentityEmailColumn = "recent@example.org" }, [stale] = UserInfoWithName(stale, string.Empty, string.Empty) with { IdentityEmailColumn = "stale@example.org" }, [never] = UserInfoWithName(never, string.Empty, string.Empty) with { IdentityEmailColumn = "never@example.org" } }));
 
         var result = await CreateService().SendInvitesAsync(survey.Id, Guid.NewGuid(), TestContext.Current.CancellationToken);
 
@@ -1507,21 +1605,24 @@ public class SurveyServiceTests
     public async Task SendInvitesAsync_creates_invitations_only_for_net_new_recipients()
     {
         var teamId = Guid.NewGuid();
-        Guid a = Guid.NewGuid(), b = Guid.NewGuid(), c = Guid.NewGuid();
+        Guid a = Guid.NewGuid(), b = Guid.NewGuid(), c = Guid.NewGuid(), blank = Guid.NewGuid();
         var survey = SurveyWith(SurveyStatus.Open, SurveyAudienceType.Team, teamId);
         _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(survey);
-        _teamService.GetTeamAsync(teamId, Arg.Any<CancellationToken>()).Returns(TeamWith(teamId, a, b, c));
-        _repo.GetInvitedUserIdsAsync(survey.Id, Arg.Any<CancellationToken>())
-            .Returns(new HashSet<Guid> { a });
-        _userEmailService.GetNotificationTargetEmailsAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<Guid, string>
-            {
-                [b] = "b@example.org",
-                [c] = "c@example.org",
-            });
+        _teamService.GetTeamAsync(teamId, Arg.Any<CancellationToken>()).Returns(TeamWith(teamId, a, b, c, blank));
+        _repo.GetInvitationsAsync(survey.Id, Arg.Any<CancellationToken>())
+            .Returns([new SurveyInvitation { Id = Guid.NewGuid(), SurveyId = survey.Id,
+                UserId = a, SentAt = _clock.GetCurrentInstant() }]);
+
+        var users = new Dictionary<Guid, UserInfo>
+        {
+            [b] = UserInfoWithName(b, string.Empty, string.Empty) with { IdentityEmailColumn = "b@example.org" },
+            [c] = UserInfoWithName(c, string.Empty, string.Empty) with { IdentityEmailColumn = "c@example.org" },
+            [blank] = UserInfoWithName(blank, string.Empty, string.Empty) with { IdentityEmailColumn = " \t " }
+        };
         _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(
-                new Dictionary<Guid, UserInfo>()));
+            .Returns(call => new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(
+                users.Where(kv => call.Arg<IReadOnlyCollection<Guid>>().Contains(kv.Key))
+                    .ToDictionary(kv => kv.Key, kv => kv.Value)));
 
         var result = await CreateService().SendInvitesAsync(survey.Id, Guid.NewGuid(), TestContext.Current.CancellationToken);
 
@@ -1552,17 +1653,13 @@ public class SurveyServiceTests
         _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(survey);
         _teamService.GetTeamAsync(teamId, Arg.Any<CancellationToken>())
             .Returns(TeamWith(teamId, userId));
-        _repo.GetInvitedUserIdsAsync(survey.Id, Arg.Any<CancellationToken>())
-            .Returns(new HashSet<Guid>());
         _repo.GetInvitationsAsync(survey.Id, Arg.Any<CancellationToken>())
             .Returns([participation]);
-        _userEmailService.GetNotificationTargetEmailsAsync(
-                Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<Guid, string> { [userId] = "human@example.org" });
+
         _userService.GetUserInfosAsync(
                 Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
             .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(
-                new Dictionary<Guid, UserInfo>()));
+                new Dictionary<Guid, UserInfo> { [userId] = UserInfoWithName(userId, string.Empty, string.Empty) with { IdentityEmailColumn = "human@example.org" } }));
 
         var result = await CreateService().SendInvitesAsync(
             survey.Id, Guid.NewGuid(), TestContext.Current.CancellationToken);
@@ -1578,33 +1675,47 @@ public class SurveyServiceTests
             Arg.Any<EmailMessage>(), Arg.Any<CancellationToken>());
     }
 
-    [HumansFact]
-    public async Task SendInvitesAsync_skips_a_completed_public_participant()
+    [HumansTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SendInvitesAsync_skips_a_completed_public_participant_including_after_merge(bool merged)
     {
         var teamId = Guid.NewGuid();
         var userId = Guid.NewGuid();
+        var storedUserId = merged ? Guid.NewGuid() : userId;
         var survey = SurveyWith(SurveyStatus.Open, SurveyAudienceType.Team, teamId);
         var participation = new SurveyInvitation
         {
             Id = Guid.NewGuid(),
             SurveyId = survey.Id,
-            UserId = userId,
+            UserId = storedUserId,
             SentAt = null,
             Completed = true,
         };
         _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(survey);
         _teamService.GetTeamAsync(teamId, Arg.Any<CancellationToken>())
             .Returns(TeamWith(teamId, userId));
-        _repo.GetInvitedUserIdsAsync(survey.Id, Arg.Any<CancellationToken>())
-            .Returns(new HashSet<Guid>());
         _repo.GetInvitationsAsync(survey.Id, Arg.Any<CancellationToken>())
             .Returns([participation]);
 
-        var result = await CreateService().SendInvitesAsync(
+        var user = UserInfoWithName(userId, "Completed", "Human") with { IdentityEmailColumn = "completed@example.org" };
+        var users = new Dictionary<Guid, UserInfo> { [userId] = user };
+        users[storedUserId] = user;
+        _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(call => new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(
+                users.Where(pair => call.Arg<IReadOnlyCollection<Guid>>().Contains(pair.Key))
+                    .ToDictionary(pair => pair.Key, pair => pair.Value)));
+        var service = CreateService();
+        (await service.PreviewAudienceCountAsync(survey.Id, TestContext.Current.CancellationToken)).Should().Be(0);
+
+        var result = await service.SendInvitesAsync(
             survey.Id, Guid.NewGuid(), TestContext.Current.CancellationToken);
 
         result.InvitationsCreated.Should().Be(0);
         result.EmailsQueued.Should().Be(0);
+        await _repo.DidNotReceive().AddInvitationAndSaveAsync(Arg.Any<SurveyInvitation>(), Arg.Any<CancellationToken>());
+        participation.SentAt.Should().BeNull();
+        participation.Completed.Should().BeTrue();
         await _repo.DidNotReceive().UpdateInvitationStatusAsync(
             Arg.Any<Guid>(), Arg.Any<EmailOutboxStatus>(), Arg.Any<Instant>(),
             Arg.Any<CancellationToken>());
@@ -1636,17 +1747,13 @@ public class SurveyServiceTests
         _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(survey);
         _teamService.GetTeamAsync(teamId, Arg.Any<CancellationToken>())
             .Returns(TeamWith(teamId, userId));
-        _repo.GetInvitedUserIdsAsync(survey.Id, Arg.Any<CancellationToken>())
-            .Returns(new HashSet<Guid>());
-        _userEmailService.GetNotificationTargetEmailsAsync(
-                Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<Guid, string> { [userId] = "human@example.org" });
+
         _userService.GetUserInfosAsync(
                 Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
             .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(
                 new Dictionary<Guid, UserInfo>
                 {
-                    [userId] = UserInfoWithName(userId, "Étincelle", "fr"),
+                    [userId] = UserInfoWithName(userId, "Étincelle", "fr") with { IdentityEmailColumn = "human@example.org" },
                 }));
 
         await CreateService().SendInvitesAsync(
@@ -1683,17 +1790,13 @@ public class SurveyServiceTests
         _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(survey);
         _teamService.GetTeamAsync(teamId, Arg.Any<CancellationToken>())
             .Returns(TeamWith(teamId, userId));
-        _repo.GetInvitedUserIdsAsync(survey.Id, Arg.Any<CancellationToken>())
-            .Returns(new HashSet<Guid>());
-        _userEmailService.GetNotificationTargetEmailsAsync(
-                Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<Guid, string> { [userId] = "human@example.org" });
+
         _userService.GetUserInfosAsync(
                 Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
             .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(
                 new Dictionary<Guid, UserInfo>
                 {
-                    [userId] = UserInfoWithName(userId, "Étincelle", "fr"),
+                    [userId] = UserInfoWithName(userId, "Étincelle", "fr") with { IdentityEmailColumn = "human@example.org" },
                 }));
 
         await CreateService().SendInvitesAsync(
@@ -1736,23 +1839,21 @@ public class SurveyServiceTests
             });
         await db.SaveChangesAsync(ct);
         _teamService.GetTeamAsync(teamId, Arg.Any<CancellationToken>()).Returns(TeamWith(teamId, userId));
-        _userEmailService.GetNotificationTargetEmailsAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<Guid, string> { [userId] = "human@example.org" });
+
         _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(new Dictionary<Guid, UserInfo>()));
+            .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(new Dictionary<Guid, UserInfo> { [userId] = UserInfoWithName(userId, string.Empty, string.Empty) with { IdentityEmailColumn = "human@example.org" } }));
         var fail = true;
         _tokenProvider.Create(Arg.Any<Guid>()).Returns(_ => preparationFails && fail
             ? throw new System.Security.Cryptography.CryptographicException("key unavailable") : "token");
         _emailService.SendAsync(Arg.Any<EmailMessage>(), Arg.Any<CancellationToken>())
             .Returns(async _ =>
             {
-                (await repo.GetInvitedUserIdsAsync(survey.Id, ct)).Should().NotContain(userId,
+                (await repo.GetInvitationsAsync(survey.Id, ct)).Where(invitation => invitation.SentAt is not null)
+                    .Select(invitation => invitation.UserId).Should().NotContain(userId,
                     "the invitation is unsent until the outbox accepts it");
                 if (fail) throw new InvalidOperationException("outbox unavailable");
             });
-        var service = new SurveyService(repo, _audit, _clock, NullLogger<SurveyService>.Instance,
-            _teamService, _userService, _governance, _consent, _ticketService, _shiftView, _userEmailService,
-            _emailService, _emailMessages, _tokenProvider, _translation, _fileStorage);
+        var service = CreateService(repository: repo);
 
         var first = await service.SendInvitesAsync(survey.Id, Guid.NewGuid(), ct);
         first.Failed.Should().Be(1);
@@ -1782,17 +1883,10 @@ public class SurveyServiceTests
         var survey = SurveyWith(SurveyStatus.Open, SurveyAudienceType.Team, teamId);
         _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(survey);
         _teamService.GetTeamAsync(teamId, Arg.Any<CancellationToken>()).Returns(TeamWith(teamId, b, c));
-        _repo.GetInvitedUserIdsAsync(survey.Id, Arg.Any<CancellationToken>())
-            .Returns(new HashSet<Guid>());
-        _userEmailService.GetNotificationTargetEmailsAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<Guid, string>
-            {
-                [b] = "b@example.org",
-                [c] = "c@example.org",
-            });
+
         _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
             .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(
-                new Dictionary<Guid, UserInfo>()));
+                new Dictionary<Guid, UserInfo> { [b] = UserInfoWithName(b, string.Empty, string.Empty) with { IdentityEmailColumn = "b@example.org" }, [c] = UserInfoWithName(c, string.Empty, string.Empty) with { IdentityEmailColumn = "c@example.org" } }));
         var calls = 0;
         if (preparationFails)
             _tokenProvider.Create(Arg.Any<Guid>()).Returns(_ => calls++ == 0
@@ -1822,11 +1916,9 @@ public class SurveyServiceTests
         var survey = SurveyWith(SurveyStatus.Open, SurveyAudienceType.Team, teamId);
         _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(survey);
         _teamService.GetTeamAsync(teamId, Arg.Any<CancellationToken>()).Returns(TeamWith(teamId, first, second));
-        _repo.GetInvitedUserIdsAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(new HashSet<Guid>());
-        _userEmailService.GetNotificationTargetEmailsAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<Guid, string> { [first] = "first@example.org", [second] = "second@example.org" });
+
         _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(new Dictionary<Guid, UserInfo>()));
+            .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(new Dictionary<Guid, UserInfo> { [first] = UserInfoWithName(first, string.Empty, string.Empty) with { IdentityEmailColumn = "first@example.org" }, [second] = UserInfoWithName(second, string.Empty, string.Empty) with { IdentityEmailColumn = "second@example.org" } }));
         using var request = new CancellationTokenSource();
         _repo.AddInvitationAndSaveAsync(Arg.Any<SurveyInvitation>(), Arg.Any<CancellationToken>())
             .Returns(async call =>
@@ -1869,11 +1961,9 @@ public class SurveyServiceTests
         var survey = SurveyWith(SurveyStatus.Open, SurveyAudienceType.Team, teamId);
         _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(survey);
         _teamService.GetTeamAsync(teamId, Arg.Any<CancellationToken>()).Returns(TeamWith(teamId, userId));
-        _repo.GetInvitedUserIdsAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(new HashSet<Guid>());
-        _userEmailService.GetNotificationTargetEmailsAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<Guid, string> { [userId] = "u@example.org" });
+
         _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(new Dictionary<Guid, UserInfo>()));
+            .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(new Dictionary<Guid, UserInfo> { [userId] = UserInfoWithName(userId, string.Empty, string.Empty) with { IdentityEmailColumn = "u@example.org" } }));
         using var aborted = new CancellationTokenSource();
         await aborted.CancelAsync();
 
@@ -1942,11 +2032,10 @@ public class SurveyServiceTests
         _repo.GetInvitationsDueForReminderAsync(Arg.Any<Instant>(), Arg.Any<CancellationToken>())
             .Returns(new List<SurveyInvitation> { inv });
         _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(survey);
-        _userEmailService.GetNotificationTargetEmailsAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<Guid, string> { [userId] = "u@example.org" });
+
         _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
             .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(
-                new Dictionary<Guid, UserInfo> { [userId] = UserInfoWithName(userId, "Sparkle") }));
+                new Dictionary<Guid, UserInfo> { [userId] = UserInfoWithName(userId, "Sparkle") with { IdentityEmailColumn = "u@example.org" } }));
 
         var count = await CreateReminderSender().SendDueRemindersAsync(TestContext.Current.CancellationToken);
 
@@ -1992,13 +2081,12 @@ public class SurveyServiceTests
         _repo.GetInvitationsDueForReminderAsync(Arg.Any<Instant>(), Arg.Any<CancellationToken>())
             .Returns(invitations);
         _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(survey);
-        _userEmailService.GetNotificationTargetEmailsAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<Guid, string> { [firstUser] = "first@example.org", [secondUser] = "second@example.org" });
+
         _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
             .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(new Dictionary<Guid, UserInfo>
             {
-                [firstUser] = UserInfoWithName(firstUser, "First") with { PreferredLanguage = preferredCulture! },
-                [secondUser] = UserInfoWithName(secondUser, "Second") with { PreferredLanguage = "de" }
+                [firstUser] = UserInfoWithName(firstUser, "First") with { PreferredLanguage = preferredCulture!, IdentityEmailColumn = "first@example.org" },
+                [secondUser] = UserInfoWithName(secondUser, "Second") with { PreferredLanguage = "de", IdentityEmailColumn = "second@example.org" }
             }));
 
         (await CreateReminderSender().SendDueRemindersAsync(TestContext.Current.CancellationToken)).Should().Be(2);
@@ -2035,11 +2123,10 @@ public class SurveyServiceTests
         _repo.GetInvitationsDueForReminderAsync(Arg.Any<Instant>(), Arg.Any<CancellationToken>())
             .Returns(new List<SurveyInvitation> { inv });
         _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(survey);
-        _userEmailService.GetNotificationTargetEmailsAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<Guid, string> { [userId] = "u@example.org" });
+
         _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
             .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(
-                new Dictionary<Guid, UserInfo> { [userId] = UserInfoWithName(userId, "Sparkle") }));
+                new Dictionary<Guid, UserInfo> { [userId] = UserInfoWithName(userId, "Sparkle") with { IdentityEmailColumn = "u@example.org" } }));
 
         var count = await CreateReminderSender().SendDueRemindersAsync(TestContext.Current.CancellationToken);
 
@@ -2067,11 +2154,10 @@ public class SurveyServiceTests
         _repo.GetInvitationsDueForReminderAsync(Arg.Any<Instant>(), Arg.Any<CancellationToken>())
             .Returns(new List<SurveyInvitation> { inv });
         _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(survey);
-        _userEmailService.GetNotificationTargetEmailsAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<Guid, string> { [userId] = "u@example.org" });
+
         _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
             .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(
-                new Dictionary<Guid, UserInfo> { [userId] = UserInfoWithName(userId, "Sparkle") }));
+                new Dictionary<Guid, UserInfo> { [userId] = UserInfoWithName(userId, "Sparkle") with { IdentityEmailColumn = "u@example.org" } }));
 
         var count = await CreateReminderSender().SendDueRemindersAsync(TestContext.Current.CancellationToken);
 
@@ -2092,8 +2178,12 @@ public class SurveyServiceTests
         await _repo.DidNotReceive().SetReminderSentAsync(Arg.Any<Guid>(), Arg.Any<Instant>(), Arg.Any<CancellationToken>());
     }
 
-    [HumansFact]
-    public async Task SendDueRemindersAsync_skips_invitee_with_no_resolvable_email()
+    [HumansTheory]
+    [InlineData(false, null)]
+    [InlineData(true, null)]
+    [InlineData(true, "")]
+    [InlineData(true, " \t ")]
+    public async Task SendDueRemindersAsync_skips_invitee_with_no_resolvable_email(bool userExists, string? email)
     {
         var survey = SurveyWith(SurveyStatus.Open, SurveyAudienceType.Team, Guid.NewGuid());
         var userId = Guid.NewGuid();
@@ -2108,10 +2198,11 @@ public class SurveyServiceTests
         _repo.GetInvitationsDueForReminderAsync(Arg.Any<Instant>(), Arg.Any<CancellationToken>())
             .Returns(new List<SurveyInvitation> { inv });
         _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(survey);
-        _userEmailService.GetNotificationTargetEmailsAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<Guid, string>());
+
         _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(new Dictionary<Guid, UserInfo>()));
+            .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(userExists
+                ? new Dictionary<Guid, UserInfo> { [userId] = UserInfoWithName(userId, "Tester") with { IdentityEmailColumn = email } }
+                : new Dictionary<Guid, UserInfo>()));
 
         var count = await CreateReminderSender().SendDueRemindersAsync(TestContext.Current.CancellationToken);
 
@@ -2120,10 +2211,14 @@ public class SurveyServiceTests
         await _repo.DidNotReceive().SetReminderSentAsync(Arg.Any<Guid>(), Arg.Any<Instant>(), Arg.Any<CancellationToken>());
     }
 
+    public enum ReminderFailureStage { Metadata, Preparation, Enqueue, Stamp }
+
     [HumansTheory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task SendDueRemindersAsync_continues_sweep_after_one_preparation_or_send_failure(bool preparationFails)
+    [InlineData(ReminderFailureStage.Metadata)]
+    [InlineData(ReminderFailureStage.Preparation)]
+    [InlineData(ReminderFailureStage.Enqueue)]
+    [InlineData(ReminderFailureStage.Stamp)]
+    public async Task SendDueRemindersAsync_continues_then_fails_and_retries_with_stable_delivery_ids(ReminderFailureStage failureStage)
     {
         var now = _clock.GetCurrentInstant();
         var survey = SurveyWith(SurveyStatus.Open, SurveyAudienceType.Team, Guid.NewGuid());
@@ -2147,32 +2242,48 @@ public class SurveyServiceTests
         _repo.GetInvitationsDueForReminderAsync(Arg.Any<Instant>(), Arg.Any<CancellationToken>())
             .Returns(new List<SurveyInvitation> { invA, invB });
         _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(survey);
-        _userEmailService.GetNotificationTargetEmailsAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<Guid, string>
-            {
-                [userA] = "a@example.org",
-                [userB] = "b@example.org",
-            });
+
         _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(new Dictionary<Guid, UserInfo>()));
-        if (preparationFails)
-            _tokenProvider.Create(invA.Id).Returns(_ =>
-                throw new System.Security.Cryptography.CryptographicException("key unavailable"));
-        else
+            .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(new Dictionary<Guid, UserInfo> { [userA] = UserInfoWithName(userA, string.Empty, string.Empty) with { IdentityEmailColumn = "a@example.org" }, [userB] = UserInfoWithName(userB, string.Empty, string.Empty) with { IdentityEmailColumn = "b@example.org" } }));
+        var failure = new InvalidOperationException("Reminder handoff failed");
+        var recovered = false;
+        if (failureStage == ReminderFailureStage.Metadata)
+            _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>())
+                .Returns(_ => Task.FromException<Survey?>(failure), _ => Task.FromResult<Survey?>(survey));
+        else if (failureStage == ReminderFailureStage.Preparation)
+            _tokenProvider.Create(invA.Id).Returns(_ => recovered ? "recovered-token" : throw failure);
+        else if (failureStage == ReminderFailureStage.Enqueue)
             _emailService.SendAsync(Arg.Any<EmailMessage>(), Arg.Any<CancellationToken>())
-                .Returns(
-                    _ => Task.FromException(new InvalidOperationException("smtp down")),
-                    _ => Task.CompletedTask);
+                .Returns(_ => Task.FromException(failure), _ => Task.CompletedTask);
+        else
+            _repo.SetReminderSentAsync(invA.Id, Arg.Any<Instant>(), Arg.Any<CancellationToken>())
+                .Returns(_ => Task.FromException(failure), _ => Task.CompletedTask);
 
-        var count = await CreateReminderSender().SendDueRemindersAsync(TestContext.Current.CancellationToken);
+        var action = () => CreateReminderSender().SendDueRemindersAsync(TestContext.Current.CancellationToken);
 
-        count.Should().Be(1);
-        await _emailService.Received(preparationFails ? 1 : 2).SendAsync(Arg.Any<EmailMessage>(), Arg.Any<CancellationToken>());
+        var error = await action.Should().ThrowAsync<AggregateException>();
+        error.Which.InnerExceptions.Should().ContainSingle().Which.Should().BeSameAs(failure);
+        await _emailService.Received(failureStage is ReminderFailureStage.Metadata or ReminderFailureStage.Preparation ? 1 : 2)
+            .SendAsync(Arg.Any<EmailMessage>(), Arg.Any<CancellationToken>());
         // A stays unstamped (retried next run); B is stamped.
-        await _repo.DidNotReceive().SetReminderSentAsync(invA.Id, Arg.Any<Instant>(), Arg.Any<CancellationToken>());
+        if (failureStage != ReminderFailureStage.Stamp)
+            await _repo.DidNotReceive().SetReminderSentAsync(invA.Id, Arg.Any<Instant>(), Arg.Any<CancellationToken>());
         await _repo.Received(1).SetReminderSentAsync(invB.Id, now, Arg.Any<CancellationToken>());
         await _audit.Received(1).LogAsync(
-            SurveysAuditActions.SurveyReminderSent, "Survey", Guid.Empty, Arg.Any<string>(), "SurveyService");
+            SurveysAuditActions.SurveyReminderSent, "Survey", Guid.Empty,
+            Arg.Is<string>(description => description.Contains("1 failed")), "SurveyService");
+
+        recovered = true;
+        _repo.GetInvitationsDueForReminderAsync(Arg.Any<Instant>(), Arg.Any<CancellationToken>())
+            .Returns(new List<SurveyInvitation> { invA });
+
+        (await action()).Should().Be(1);
+        await _emailService.Received(failureStage is ReminderFailureStage.Metadata or ReminderFailureStage.Preparation ? 1 : 2).SendAsync(
+            Arg.Is<EmailMessage>(message => message.RecipientEmail == "a@example.org" && message.DeliveryId == invA.Id),
+            Arg.Any<CancellationToken>());
+        await _emailService.Received(1).SendAsync(
+            Arg.Is<EmailMessage>(message => message.RecipientEmail == "b@example.org" && message.DeliveryId == invB.Id),
+            Arg.Any<CancellationToken>());
     }
 
     [HumansFact]
@@ -2250,7 +2361,7 @@ public class SurveyServiceTests
     private static UserInfo UserInfoWithName(Guid id, string burnerName, string culture = "en") => new(
         id, burnerName, false, culture, null, Instant.MinValue, null, null, null, null,
         null, null, null, null, null,
-        [], [], [], null, []);
+        [], [], null);
 
     private static SurveyInvitation InvitationFor(Guid surveyId, Guid userId) => new()
     {
@@ -2571,6 +2682,8 @@ public class SurveyServiceTests
             surveyId, userId, ResponseAnonymity.Identified, "en",
             TestContext.Current.CancellationToken);
 
+        await _repo.Received(1).GetDraftResponseAsync(
+            surveyId, userId, TestContext.Current.CancellationToken);
         result.Should().NotBeNull();
         result.ParticipationId.Should().Be(participation.Id);
         result.DraftResponseId.Should().Be(capturedDraft!.Id);
@@ -2647,6 +2760,84 @@ public class SurveyServiceTests
             Arg.Any<SurveyResponse>(), Arg.Any<CancellationToken>());
     }
 
+    [HumansTheory]
+    [InlineData(ResponseAnonymity.Identified, false)]
+    [InlineData(ResponseAnonymity.Identified, true)]
+    [InlineData(ResponseAnonymity.CompletionTracked, false)]
+    [InlineData(ResponseAnonymity.CompletionTracked, true)]
+    public async Task StartPublicTrackedResponseAsync_checks_completed_merged_accounts(ResponseAnonymity anonymity, bool completed)
+    {
+        var surveyId = Guid.NewGuid();
+        var survivor = Guid.NewGuid();
+        var archived = Guid.NewGuid();
+        _userService.GetUserInfoAsync(survivor, Arg.Any<CancellationToken>())
+            .Returns(Asociado(survivor) with { MergedUserIds = [archived] });
+        _repo.GetInvitationsAsync(surveyId, Arg.Any<CancellationToken>()).Returns([
+            new SurveyInvitation { Id = Guid.NewGuid(), SurveyId = surveyId, UserId = archived, Completed = completed }
+        ]);
+        _repo.GetOrCreateParticipationAsync(surveyId, survivor, Arg.Any<Instant>(), Arg.Any<CancellationToken>())
+            .Returns(new SurveyInvitation { Id = Guid.NewGuid(), SurveyId = surveyId, UserId = survivor });
+
+        var started = await CreateService().StartPublicTrackedResponseAsync(
+            surveyId, survivor, anonymity, "en", TestContext.Current.CancellationToken);
+
+        if (completed)
+        {
+            started.Should().BeNull();
+            await _repo.DidNotReceive().GetOrCreateParticipationAsync(
+                Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<Instant>(), Arg.Any<CancellationToken>());
+            await _repo.DidNotReceive().AddResponseAsync(Arg.Any<SurveyResponse>(), Arg.Any<CancellationToken>());
+        }
+        else
+        {
+            started.Should().NotBeNull();
+            await _repo.Received(1).GetOrCreateParticipationAsync(
+                surveyId, survivor, Arg.Any<Instant>(), Arg.Any<CancellationToken>());
+        }
+    }
+
+    [HumansTheory]
+    [InlineData(ResponseAnonymity.Identified, false)]
+    [InlineData(ResponseAnonymity.Identified, true)]
+    [InlineData(ResponseAnonymity.CompletionTracked, false)]
+    [InlineData(ResponseAnonymity.CompletionTracked, true)]
+    [InlineData(ResponseAnonymity.Anonymous, false)]
+    public async Task AdvanceWizardAsync_completion_follows_the_merge_chain_at_finalization(
+        ResponseAnonymity anonymity, bool completedAfterPreparation)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var survey = SurveyForSubmit(out var questionId, out _);
+        survey.IsAsociadoVote = anonymity == ResponseAnonymity.CompletionTracked;
+        var survivor = Guid.NewGuid();
+        var archived = Guid.NewGuid();
+        _userService.GetUserInfoAsync(survivor, Arg.Any<CancellationToken>())
+            .Returns(Asociado(survivor) with { MergedUserIds = [archived] });
+        var reads = 0;
+        _repo.GetInvitationsAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(_ =>
+            (IReadOnlyList<SurveyInvitation>)[new SurveyInvitation
+            {
+                Id = Guid.NewGuid(), SurveyId = survey.Id, UserId = archived,
+                Completed = !completedAfterPreparation || ++reads > 1
+            }]);
+        var submission = new SurveySubmission(survey.Id, Guid.NewGuid(), survivor,
+            anonymity == ResponseAnonymity.Identified ? Guid.NewGuid() : null,
+            anonymity, SurveyInputMethod.UserSpecificLink, "en", [Ans(questionId, "yes")]);
+
+        var outcome = await CreateService().AdvanceWizardAsync(
+            WizardState(survey, submission), 1, back: false, submission.Answers, ct);
+
+        outcome.Outcome.Should().Be(SurveyWizardOutcome.Submitted);
+        await _repo.DidNotReceive().FinalizeIdentifiedResponseAsync(
+            Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<IReadOnlyList<SurveyAnswer>>(), Arg.Any<Instant>(),
+            Arg.Any<SurveyInputMethod>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
+        await _repo.DidNotReceive().FinalizeCompletionTrackedResponseAsync(
+            Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<SurveyResponse>(), Arg.Any<CancellationToken>());
+        if (anonymity == ResponseAnonymity.Anonymous)
+            await _repo.Received(1).AddResponseWithAnswersAndSaveAsync(Arg.Any<SurveyResponse>(), ct);
+        else
+            await _repo.DidNotReceive().AddResponseWithAnswersAndSaveAsync(Arg.Any<SurveyResponse>(), Arg.Any<CancellationToken>());
+    }
+
     [HumansFact]
     public async Task StartPublicTrackedResponseAsync_identified_restores_existing_draft_answers()
     {
@@ -2688,6 +2879,8 @@ public class SurveyServiceTests
             surveyId, userId, ResponseAnonymity.Identified, "en",
             TestContext.Current.CancellationToken);
 
+        await _repo.Received(1).GetDraftResponseAsync(
+            surveyId, userId, TestContext.Current.CancellationToken);
         result.Should().NotBeNull();
         result.DraftResponseId.Should().Be(draft.Id);
         result.DraftAnswers.Should().ContainSingle()
@@ -4079,8 +4272,6 @@ public class SurveyServiceTests
         _repo.GetByIdAsync(surveyId, Arg.Any<CancellationToken>()).Returns(survey);
         _repo.GetResponsesForResultsAsync(surveyId, Arg.Any<CancellationToken>())
             .Returns(Array.Empty<SurveyResponse>());
-        _repo.GetInvitedCountsBySurveyAsync(Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<Guid, int>());
 
         var results = await CreateService().GetResultsAsync(
             surveyId, TestContext.Current.CancellationToken);
@@ -4103,7 +4294,7 @@ public class SurveyServiceTests
         survey.Questions = new List<SurveyQuestion>
         {
             ChoiceQuestion(choiceId, surveyId, SurveyQuestionType.SingleChoice, 1,
-                ("yes", "Yes", 1), ("no", "No", 2), ("maybe", "Maybe", 3)),
+                ("maybe", "Maybe", 3), ("yes", "Yes", 1), ("no", "No", 2)),
             RatingQuestion(ratingId, surveyId, 2, 1, 5),
             TextQuestion(textId, surveyId, 3),
         };
@@ -4124,8 +4315,6 @@ public class SurveyServiceTests
         };
         _repo.GetResponsesForResultsAsync(surveyId, Arg.Any<CancellationToken>())
             .Returns(responses);
-        _repo.GetInvitedCountsBySurveyAsync(Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<Guid, int> { [surveyId] = 4 });
         _repo.GetInvitationsAsync(surveyId, Arg.Any<CancellationToken>())
             .Returns(new List<SurveyInvitation>
             {
@@ -4150,8 +4339,11 @@ public class SurveyServiceTests
         result.ResponseRate.Should().BeApproximately(2d / 4d, 0.0001);
 
         var choice = result.Questions.Single(q => q.QuestionId == choiceId);
+        result.Questions.Select(question => (question.QuestionId, question.PageNumber, question.Order))
+            .Should().BeEquivalentTo(new[] { (choiceId, 1, 1), (ratingId, 1, 2), (textId, 1, 3) });
         choice.OptionCounts.Should().HaveCount(3);
-        choice.OptionCounts.Select(o => o.Value).Should().ContainInOrder("yes", "no", "maybe");
+        choice.OptionCounts.Select(o => (o.Value, o.Order)).Should().BeEquivalentTo(
+            new[] { ("yes", 1), ("no", 2), ("maybe", 3) });
         choice.OptionCounts.Single(o => string.Equals(o.Value, "yes", StringComparison.Ordinal)).Count.Should().Be(2);
         choice.OptionCounts.Single(o => string.Equals(o.Value, "no", StringComparison.Ordinal)).Count.Should().Be(1);
         var maybe = choice.OptionCounts.Single(o => string.Equals(o.Value, "maybe", StringComparison.Ordinal));
@@ -4169,6 +4361,41 @@ public class SurveyServiceTests
 
         var text = result.Questions.Single(q => q.QuestionId == textId);
         text.FreeTextAnswers.Should().BeEquivalentTo(new[] { "great", "ok" });
+    }
+
+    [HumansTheory]
+    [InlineData(null, null, null, 1, 5)]
+    [InlineData(null, null, 3, 1, 5)]
+    [InlineData(2, null, 3, 2, 5)]
+    [InlineData(null, 4, 3, 1, 4)]
+    public async Task GetResultsAsync_uses_respondent_defaults_for_omitted_rating_bounds(
+        int? min, int? max, int? answer, int expectedMin, int expectedMax)
+    {
+        var survey = SurveyWith(SurveyStatus.Closed, null, null);
+        var questionId = Guid.NewGuid();
+        var question = RatingQuestion(questionId, survey.Id, 1, 1, 5);
+        question.RatingMin = min;
+        question.RatingMax = max;
+        survey.Questions = [question];
+        _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(survey);
+        _repo.GetResponsesForResultsAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(
+            answer is { } value
+                ? new List<SurveyResponse>
+                {
+                    SubmittedResponse(survey.Id, ResponseAnonymity.Anonymous, SurveyInputMethod.Slug,
+                        _clock.GetCurrentInstant(), null, RatingAnswer(questionId, value))
+                }
+                : new List<SurveyResponse>());
+
+        var result = await CreateService().GetResultsAsync(survey.Id, TestContext.Current.CancellationToken);
+
+        var rating = result!.Questions.Should().ContainSingle().Which;
+        rating.RatingDistribution.Select(bucket => bucket.Value)
+            .Should().Equal(Enumerable.Range(expectedMin, expectedMax - expectedMin + 1));
+        rating.RatingDistribution.Select(bucket => bucket.Count)
+            .Should().Equal(Enumerable.Range(expectedMin, expectedMax - expectedMin + 1)
+                .Select(value => answer == value ? 1 : 0));
+        rating.RatingAverage.Should().Be(answer);
     }
 
     [HumansTheory]
@@ -4215,8 +4442,6 @@ public class SurveyServiceTests
                     surveyId, ResponseAnonymity.Anonymous, SurveyInputMethod.Slug, now, null,
                     GridAnswer(gridId, ("monday", ["morning"]))),
             ]);
-        _repo.GetInvitedCountsBySurveyAsync(Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<Guid, int>());
         _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
             .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(new Dictionary<Guid, UserInfo>()));
 
@@ -4259,8 +4484,6 @@ public class SurveyServiceTests
         };
         _repo.GetResponsesForResultsAsync(surveyId, Arg.Any<CancellationToken>())
             .Returns(responses);
-        _repo.GetInvitedCountsBySurveyAsync(Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<Guid, int>());
         _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
             .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(new Dictionary<Guid, UserInfo>()));
 
@@ -4298,8 +4521,6 @@ public class SurveyServiceTests
         };
         _repo.GetResponsesForResultsAsync(surveyId, Arg.Any<CancellationToken>())
             .Returns(responses);
-        _repo.GetInvitedCountsBySurveyAsync(Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<Guid, int>());
         _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
             .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(
                 new Dictionary<Guid, UserInfo> { [identifiedUser] = UserInfoWithName(identifiedUser, "Sparkle") }));
@@ -4334,41 +4555,13 @@ public class SurveyServiceTests
         anonymous.Results.IdentifiedRespondents.Should().ContainSingle();
         var detail = anonymous.Results.IdentifiedRespondents[0];
         detail.UserId.Should().Be(identifiedUser);
-        detail.Name.Should().Be("Sparkle");
         detail.Answers.Should().ContainSingle();
         detail.Answers[0].QuestionId.Should().Be(choiceId);
         detail.Answers[0].SelectedLabels.Should().ContainInOrder("Yes");
     }
 
     [HumansFact]
-    public async Task GetResultsAsync_identified_respondent_name_falls_back_to_user_id_when_unresolved()
-    {
-        var surveyId = Guid.NewGuid();
-        var survey = SurveyWith(SurveyStatus.Closed, null, null);
-        typeof(Survey).GetProperty(nameof(Survey.Id))!.SetValue(survey, surveyId);
-        survey.Questions = new List<SurveyQuestion>();
-        _repo.GetByIdAsync(surveyId, Arg.Any<CancellationToken>()).Returns(survey);
-
-        var user = Guid.NewGuid();
-        _repo.GetResponsesForResultsAsync(surveyId, Arg.Any<CancellationToken>())
-            .Returns(new List<SurveyResponse>
-            {
-                SubmittedResponse(surveyId, ResponseAnonymity.Identified, SurveyInputMethod.UserSpecificLink,
-                    _clock.GetCurrentInstant(), user),
-            });
-        _repo.GetInvitedCountsBySurveyAsync(Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<Guid, int>());
-        _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(new Dictionary<Guid, UserInfo>()));
-
-        var result = await CreateService().GetResultsAsync(surveyId, TestContext.Current.CancellationToken);
-
-        result!.IdentifiedRespondents.Should().ContainSingle();
-        result.IdentifiedRespondents[0].Name.Should().Be(user.ToString());
-    }
-
-    [HumansFact]
-    public async Task GetResultsAsync_orders_identified_respondents_by_submission_time()
+    public async Task GetResultsAsync_preserves_identified_respondent_metadata()
     {
         var surveyId = Guid.NewGuid();
         var survey = SurveyWith(SurveyStatus.Closed, null, null);
@@ -4379,32 +4572,21 @@ public class SurveyServiceTests
         var now = _clock.GetCurrentInstant();
         var earlierUser = Guid.NewGuid();
         var laterUser = Guid.NewGuid();
+        var laterResponse = SubmittedResponse(surveyId, ResponseAnonymity.Identified,
+            SurveyInputMethod.UserSpecificLink, now, laterUser);
+        var earlierResponse = SubmittedResponse(surveyId, ResponseAnonymity.Identified,
+            SurveyInputMethod.UserSpecificLink, now - Duration.FromMinutes(5), earlierUser);
         _repo.GetResponsesForResultsAsync(surveyId, Arg.Any<CancellationToken>())
-            .Returns(new List<SurveyResponse>
-            {
-                SubmittedResponse(
-                    surveyId, ResponseAnonymity.Identified, SurveyInputMethod.UserSpecificLink,
-                    now, laterUser),
-                SubmittedResponse(
-                    surveyId, ResponseAnonymity.Identified, SurveyInputMethod.UserSpecificLink,
-                    now - Duration.FromMinutes(5), earlierUser),
-            });
-        _repo.GetInvitedCountsBySurveyAsync(Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<Guid, int>());
-        _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(
-                new Dictionary<Guid, UserInfo>
-                {
-                    [earlierUser] = UserInfoWithName(earlierUser, "Earlier"),
-                    [laterUser] = UserInfoWithName(laterUser, "Later"),
-                }));
+            .Returns(new List<SurveyResponse> { laterResponse, earlierResponse });
 
         var result = await CreateService().GetResultsAsync(surveyId, TestContext.Current.CancellationToken);
 
-        result!.IdentifiedRespondents.Select(respondent => respondent.Name)
-            .Should().ContainInOrder("Earlier", "Later");
-        result.IdentifiedRespondents.Select(respondent => respondent.SubmittedAt)
-            .Should().BeInAscendingOrder();
+        result!.IdentifiedRespondents.Select(respondent =>
+                (respondent.ResponseId, respondent.UserId, respondent.SubmittedAt))
+            .Should().BeEquivalentTo([
+                (earlierResponse.Id, earlierUser, earlierResponse.SubmittedAt),
+                (laterResponse.Id, laterUser, laterResponse.SubmittedAt),
+            ]);
     }
 
     [HumansFact]
@@ -4427,9 +4609,15 @@ public class SurveyServiceTests
         };
         _repo.GetResponsesForResultsAsync(surveyId, Arg.Any<CancellationToken>())
             .Returns(responses);
-        _repo.GetStartedInvitationCountAsync(surveyId, Arg.Any<CancellationToken>()).Returns(7);
-        _repo.GetInvitedCountsBySurveyAsync(Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<Guid, int> { [surveyId] = 10 });
+        _repo.GetInvitationsAsync(surveyId, Arg.Any<CancellationToken>())
+            .Returns(Enumerable.Range(0, 10).Select(index => new SurveyInvitation
+            {
+                Id = Guid.NewGuid(),
+                SurveyId = surveyId,
+                UserId = Guid.NewGuid(),
+                SentAt = _clock.GetCurrentInstant(),
+                Started = index < 7,
+            }).ToList());
         _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
             .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(new Dictionary<Guid, UserInfo>()));
 
@@ -4704,8 +4892,10 @@ public class SurveyServiceTests
         await _repo.DidNotReceive().GetResponsesForResultsAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>());
     }
 
-    [HumansFact]
-    public async Task ContributeForUserAsync_returns_survey_responses_slice_with_title_and_answers()
+    [HumansTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ContributeForUserAsync_returns_survey_responses_slice_with_title_and_answers(bool missingDefinition)
     {
         var userId = Guid.NewGuid();
         var surveyId = Guid.NewGuid();
@@ -4723,7 +4913,7 @@ public class SurveyServiceTests
             TextQuestion(textId, surveyId, 3),
             GridQuestion(gridId, surveyId),
         };
-        _repo.GetByIdAsync(surveyId, Arg.Any<CancellationToken>()).Returns(survey);
+        _repo.GetByIdAsync(surveyId, Arg.Any<CancellationToken>()).Returns(missingDefinition ? null : survey);
 
         var response = SubmittedResponse(surveyId, ResponseAnonymity.Identified, SurveyInputMethod.UserSpecificLink,
             _clock.GetCurrentInstant(), userId,
@@ -4741,8 +4931,20 @@ public class SurveyServiceTests
 
         // The payload serialises the user's response (title + answers). Round-trip through JSON to assert shape.
         var json = System.Text.Json.JsonSerializer.Serialize(slice.Data);
-        json.Should().Contain("Summer Feedback");
-        json.Should().Contain("Yes");        // resolved choice label
+        if (missingDefinition)
+        {
+            using var document = System.Text.Json.JsonDocument.Parse(json);
+            var row = document.RootElement[0];
+            row.GetProperty("Survey").GetString().Should().Be(surveyId.ToString());
+            var choice = row.GetProperty("Answers")[0];
+            choice.GetProperty("Question").GetString().Should().BeEmpty();
+            choice.GetProperty("SelectedLabels")[0].GetString().Should().Be("yes");
+        }
+        else
+        {
+            json.Should().Contain("Summer Feedback");
+            json.Should().Contain("Yes");
+        }
         json.Should().Contain("loved it");   // free-text value
         json.Should().Contain("4");          // rating value
         json.Should().Contain("removed-row");
@@ -4999,7 +5201,7 @@ public class SurveyServiceTests
         var act = async () => await CreateService().UpdateAsync(
             survey.Id,
             Input() with { IsAsociadoVote = false },
-            Board(Guid.NewGuid()),
+            SurveysAdmin(Guid.NewGuid()),
             TestContext.Current.CancellationToken);
 
         var result = await act();
@@ -5029,9 +5231,15 @@ public class SurveyServiceTests
         _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(survey);
         _repo.GetResponsesForResultsAsync(survey.Id, Arg.Any<CancellationToken>())
             .Returns([response]);
-        _repo.GetInvitedCountsBySurveyAsync(Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<Guid, int> { [survey.Id] = 4 });
-        _repo.GetStartedInvitationCountAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(2);
+        _repo.GetInvitationsAsync(survey.Id, Arg.Any<CancellationToken>())
+            .Returns(Enumerable.Range(0, 4).Select(index => new SurveyInvitation
+            {
+                Id = Guid.NewGuid(),
+                SurveyId = survey.Id,
+                UserId = Guid.NewGuid(),
+                SentAt = _clock.GetCurrentInstant(),
+                Started = index < 2,
+            }).ToList());
 
         var service = CreateService();
         var scoped = await service.GetScopedResultsAsync(
@@ -5081,8 +5289,6 @@ public class SurveyServiceTests
         responses[1].SubmittedAt = now - Duration.FromDays(1);
         _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(survey);
         _repo.GetResponsesForResultsAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(responses);
-        _repo.GetInvitedCountsBySurveyAsync(Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<Guid, int>());
 
         var scoped = await CreateService().GetScopedResultsAsync(
             survey.Id, SurveyResultsScope.Combined, TestContext.Current.CancellationToken);
@@ -5117,7 +5323,7 @@ public class SurveyServiceTests
             options: [Opt("b", "B", 1), Opt("a", "A", 2), Opt("c", "C", 3)]);
 
         var act = async () => await CreateService().UpdateAsync(
-            survey.Id, Input(changed), Board(Guid.NewGuid()), TestContext.Current.CancellationToken);
+            survey.Id, Input(changed), SurveysAdmin(Guid.NewGuid()), TestContext.Current.CancellationToken);
 
         var result = await act();
         result.Succeeded.Should().BeFalse();
@@ -5144,7 +5350,7 @@ public class SurveyServiceTests
         var actor = Guid.NewGuid();
 
         var result = await CreateService().SetRankedAvailabilityAsync(
-            survey.Id, questionId, ["c", "unknown"], Board(actor), TestContext.Current.CancellationToken);
+            survey.Id, questionId, ["c", "unknown"], SurveysAdmin(actor), TestContext.Current.CancellationToken);
 
         result.Succeeded.Should().BeTrue();
         result.SurveyId.Should().Be(survey.Id);
@@ -5176,7 +5382,7 @@ public class SurveyServiceTests
 
         var result = await CreateService().SetRankedAvailabilityAsync(
             survey.Id, string.Equals(target, "missing-question", StringComparison.Ordinal) ? Guid.NewGuid() : questionId,
-            ["b"], Board(Guid.NewGuid()), TestContext.Current.CancellationToken);
+            ["b"], SurveysAdmin(Guid.NewGuid()), TestContext.Current.CancellationToken);
 
         result.Succeeded.Should().BeFalse();
         result.Error!.DiagnosticMessage.Should().Be(reason);
@@ -5220,8 +5426,6 @@ public class SurveyServiceTests
         _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(survey);
         _repo.GetResponsesForResultsAsync(survey.Id, Arg.Any<CancellationToken>())
             .Returns(responses);
-        _repo.GetInvitedCountsBySurveyAsync(Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<Guid, int>());
         _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<Guid, UserInfo>());
 
@@ -5316,15 +5520,13 @@ public class SurveyServiceTests
         _repo.When(x => x.ApproveAsync(survey.Id, Arg.Any<Instant>(), Arg.Any<CancellationToken>()))
             .Do(_ => survey.Status = SurveyStatus.Open); // mirrors the real repo persisting before the send re-reads
         _teamService.GetTeamAsync(teamId, Arg.Any<CancellationToken>()).Returns(TeamWith(teamId, recipient));
-        _repo.GetInvitedUserIdsAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(new HashSet<Guid>());
-        _userEmailService.GetNotificationTargetEmailsAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<Guid, string> { [recipient] = "recipient@example.org" });
+
         _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(new Dictionary<Guid, UserInfo>()));
+            .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(new Dictionary<Guid, UserInfo> { [recipient] = UserInfoWithName(recipient, string.Empty, string.Empty) with { IdentityEmailColumn = "recipient@example.org" } }));
 
         var boardUserId = Guid.NewGuid();
         var result = await CreateService().ApproveAndSendAsync(
-            survey.Id, new SurveyViewer(boardUserId, IsBoardOrAdmin: true), TestContext.Current.CancellationToken);
+            survey.Id, new SurveyViewer(boardUserId, SeesEverySurvey: true, ManagesEverySurvey: true), TestContext.Current.CancellationToken);
 
         result.Succeeded.Should().BeTrue();
         result.Send!.InvitationsCreated.Should().Be(1);
@@ -5333,21 +5535,21 @@ public class SurveyServiceTests
         await _repo.Received(1).AddInvitationAndSaveAsync(
             Arg.Is<SurveyInvitation>(i => i.UserId == recipient), Arg.Any<CancellationToken>());
         await _audit.Received(1).LogAsync(
-            SurveysAuditActions.SurveyApproved, "Survey", survey.Id, Arg.Any<string>(), boardUserId, authorId, AuditEntityTypes.User);
+            SurveysAuditActions.SurveyApproved, "Survey", survey.Id, Arg.Any<string>(), boardUserId, authorId, AuditSubjectTypes.User);
         await _audit.Received(1).LogAsync(SurveysAuditActions.SurveyInvitesSent, "Survey", survey.Id, Arg.Any<string>(), boardUserId);
     }
 
     [HumansFact]
-    public async Task ApproveAndSendAsync_returns_refusal_for_a_non_boardOrAdmin_viewer()
+    public async Task ApproveAndSendAsync_returns_refusal_for_a_viewer_who_does_not_manage_surveys()
     {
         var survey = SurveyWith(SurveyStatus.PendingApproval, null, null);
         _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(survey);
 
         var result = await CreateService().ApproveAndSendAsync(
-            survey.Id, new SurveyViewer(Guid.NewGuid(), IsBoardOrAdmin: false), TestContext.Current.CancellationToken);
+            survey.Id, new SurveyViewer(Guid.NewGuid(), SeesEverySurvey: false, ManagesEverySurvey: false), TestContext.Current.CancellationToken);
 
         result.Succeeded.Should().BeFalse();
-        result.Refusal.Should().Be("Only Board/Admin may approve a survey.");
+        result.Refusal.Should().Be("Only Surveys Admin or Admin may approve a survey.");
         await _repo.DidNotReceive().ApproveAsync(Arg.Any<Guid>(), Arg.Any<Instant>(), Arg.Any<CancellationToken>());
     }
 
@@ -5361,7 +5563,7 @@ public class SurveyServiceTests
         _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(survey);
 
         var result = await CreateService().ApproveAndSendAsync(
-            survey.Id, new SurveyViewer(Guid.NewGuid(), IsBoardOrAdmin: true), TestContext.Current.CancellationToken);
+            survey.Id, new SurveyViewer(Guid.NewGuid(), SeesEverySurvey: true, ManagesEverySurvey: true), TestContext.Current.CancellationToken);
 
         result.Succeeded.Should().BeFalse();
         result.Refusal.Should().Be("Only a survey pending approval can be approved.");
@@ -5378,7 +5580,7 @@ public class SurveyServiceTests
         _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(survey);
 
         var result = await CreateService().ApproveAndSendAsync(
-            survey.Id, new SurveyViewer(Guid.NewGuid(), IsBoardOrAdmin: true), TestContext.Current.CancellationToken);
+            survey.Id, new SurveyViewer(Guid.NewGuid(), SeesEverySurvey: true, ManagesEverySurvey: true), TestContext.Current.CancellationToken);
 
         result.Succeeded.Should().BeFalse();
         result.Refusal.Should().Be("Survey has no audience to invite.");
@@ -5398,7 +5600,7 @@ public class SurveyServiceTests
         _teamService.GetTeamAsync(teamId, Arg.Any<CancellationToken>()).Returns((TeamInfo?)null);
 
         var result = await CreateService().ApproveAndSendAsync(
-            survey.Id, new SurveyViewer(Guid.NewGuid(), IsBoardOrAdmin: true), TestContext.Current.CancellationToken);
+            survey.Id, new SurveyViewer(Guid.NewGuid(), SeesEverySurvey: true, ManagesEverySurvey: true), TestContext.Current.CancellationToken);
 
         result.Succeeded.Should().BeFalse();
         result.Refusal.Should().Be("This survey's audience resolves to nobody to invite.");
@@ -5415,13 +5617,13 @@ public class SurveyServiceTests
 
         var boardUserId = Guid.NewGuid();
         var result = await CreateService().RejectAsync(
-            survey.Id, new SurveyViewer(boardUserId, IsBoardOrAdmin: true), "  Please clarify Q3.  ",
+            survey.Id, new SurveyViewer(boardUserId, SeesEverySurvey: true, ManagesEverySurvey: true), "  Please clarify Q3.  ",
             TestContext.Current.CancellationToken);
 
         result.Succeeded.Should().BeTrue();
         await _repo.Received(1).RejectAsync(survey.Id, "Please clarify Q3.", _clock.GetCurrentInstant(), Arg.Any<CancellationToken>());
         await _audit.Received(1).LogAsync(
-            SurveysAuditActions.SurveyRejected, "Survey", survey.Id, Arg.Any<string>(), boardUserId, authorId, AuditEntityTypes.User);
+            SurveysAuditActions.SurveyRejected, "Survey", survey.Id, Arg.Any<string>(), boardUserId, authorId, AuditSubjectTypes.User);
     }
 
     [HumansFact]
@@ -5431,7 +5633,7 @@ public class SurveyServiceTests
         _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(survey);
 
         var result = await CreateService().RejectAsync(
-            survey.Id, new SurveyViewer(Guid.NewGuid(), IsBoardOrAdmin: true), new string('x', 4001),
+            survey.Id, new SurveyViewer(Guid.NewGuid(), SeesEverySurvey: true, ManagesEverySurvey: true), new string('x', 4001),
             TestContext.Current.CancellationToken);
 
         result.Succeeded.Should().BeFalse();
@@ -5448,7 +5650,7 @@ public class SurveyServiceTests
         var note = new string('x', 4000);
 
         var result = await CreateService().RejectAsync(
-            survey.Id, new SurveyViewer(Guid.NewGuid(), IsBoardOrAdmin: true), "  " + note + "  ",
+            survey.Id, new SurveyViewer(Guid.NewGuid(), SeesEverySurvey: true, ManagesEverySurvey: true), "  " + note + "  ",
             TestContext.Current.CancellationToken);
 
         result.Succeeded.Should().BeTrue();
@@ -5456,17 +5658,17 @@ public class SurveyServiceTests
     }
 
     [HumansFact]
-    public async Task RejectAsync_returns_refusal_for_a_non_boardOrAdmin_viewer()
+    public async Task RejectAsync_returns_refusal_for_a_viewer_who_does_not_manage_surveys()
     {
         var survey = SurveyWith(SurveyStatus.PendingApproval, null, null);
         _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(survey);
 
         var result = await CreateService().RejectAsync(
-            survey.Id, new SurveyViewer(Guid.NewGuid(), IsBoardOrAdmin: false), "note",
+            survey.Id, new SurveyViewer(Guid.NewGuid(), SeesEverySurvey: false, ManagesEverySurvey: false), "note",
             TestContext.Current.CancellationToken);
 
         result.Succeeded.Should().BeFalse();
-        result.Refusal.Should().Be("Only Board/Admin may reject a survey.");
+        result.Refusal.Should().Be("Only Surveys Admin or Admin may reject a survey.");
         await _repo.DidNotReceive().RejectAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<Instant>(), Arg.Any<CancellationToken>());
     }
 
@@ -5480,7 +5682,7 @@ public class SurveyServiceTests
         _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(survey);
 
         var result = await CreateService().RejectAsync(
-            survey.Id, new SurveyViewer(Guid.NewGuid(), IsBoardOrAdmin: true), note!,
+            survey.Id, new SurveyViewer(Guid.NewGuid(), SeesEverySurvey: true, ManagesEverySurvey: true), note!,
             TestContext.Current.CancellationToken);
 
         result.Succeeded.Should().BeFalse();
@@ -5498,7 +5700,7 @@ public class SurveyServiceTests
         _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(survey);
 
         var result = await CreateService().RejectAsync(
-            survey.Id, new SurveyViewer(Guid.NewGuid(), IsBoardOrAdmin: true), "note",
+            survey.Id, new SurveyViewer(Guid.NewGuid(), SeesEverySurvey: true, ManagesEverySurvey: true), "note",
             TestContext.Current.CancellationToken);
 
         result.Succeeded.Should().BeFalse();
@@ -5545,7 +5747,7 @@ public class SurveyServiceTests
         _repo.GetResponseCountsBySurveyAsync(Arg.Any<CancellationToken>()).Returns(new Dictionary<Guid, int>());
 
         var result = await CreateService().GetAdminSummariesAsync(
-            new SurveyViewer(authorId, IsBoardOrAdmin: false), TestContext.Current.CancellationToken);
+            new SurveyViewer(authorId, SeesEverySurvey: false, ManagesEverySurvey: false), TestContext.Current.CancellationToken);
 
         result.Should().ContainSingle(s => s.Id == mine.Id);
         result.Should().NotContain(s => s.Id == someoneElses.Id);
@@ -5561,14 +5763,14 @@ public class SurveyServiceTests
         _repo.GetResponseCountsBySurveyAsync(Arg.Any<CancellationToken>()).Returns(new Dictionary<Guid, int>());
 
         var result = await CreateService().GetAdminSummariesAsync(
-            new SurveyViewer(Guid.NewGuid(), IsBoardOrAdmin: true), TestContext.Current.CancellationToken);
+            new SurveyViewer(Guid.NewGuid(), SeesEverySurvey: true, ManagesEverySurvey: true), TestContext.Current.CancellationToken);
 
         result.Should().Contain(s => s.Id == mine.Id);
         result.Should().Contain(s => s.Id == someoneElses.Id);
     }
 
     [HumansFact]
-    public async Task GetPendingApprovalQueueAsync_returns_only_pending_surveys_oldest_first_with_author_names()
+    public async Task GetPendingApprovalQueueAsync_returns_only_pending_surveys_with_author_names_and_timestamps()
     {
         var authorA = Guid.NewGuid();
         var authorB = Guid.NewGuid();
@@ -5585,9 +5787,11 @@ public class SurveyServiceTests
 
         var result = await CreateService().GetPendingApprovalQueueAsync(TestContext.Current.CancellationToken);
 
-        result.Select(r => r.Id).Should().Equal(older.Id, newer.Id);
+        result.Select(r => r.Id).Should().BeEquivalentTo([older.Id, newer.Id]);
         result.Should().NotContain(r => r.Id == draft.Id);
         result.Single(r => r.Id == older.Id).CreatedByName.Should().Be(authorAInfo.BurnerName);
+        result.Single(r => r.Id == older.Id).SubmittedAt.Should().Be(older.SubmittedAt);
+        result.Single(r => r.Id == newer.Id).SubmittedAt.Should().Be(newer.SubmittedAt);
     }
 
     [HumansFact]
@@ -5595,12 +5799,10 @@ public class SurveyServiceTests
     {
         var userId = Guid.NewGuid();
         var asociado = Asociado(userId);
-        _approved.Remove(userId);
         _userService.GetUserInfoAsync(userId, Arg.Any<CancellationToken>()).Returns(asociado);
         _userService.GetAllUserInfosAsync(Arg.Any<CancellationToken>()).Returns(new List<UserInfo> { asociado });
         var survey = SurveyWith(SurveyStatus.Draft, SurveyAudienceType.Asociados, null);
         _repo.GetByIdAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(survey);
-        _repo.GetInvitedUserIdsAsync(survey.Id, Arg.Any<CancellationToken>()).Returns(new HashSet<Guid>());
         var service = CreateService();
 
         (await service.IsEligibleAsociadoAsync(userId, TestContext.Current.CancellationToken))

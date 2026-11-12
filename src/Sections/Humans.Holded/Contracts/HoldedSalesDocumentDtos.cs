@@ -13,8 +13,8 @@ public enum HoldedSalesDocumentKind
 }
 
 /// <summary>
-/// <see cref="AccountId"/> is the chart-of-accounts <b>id</b> (24-hex), not the 8-digit number: resolve it through
-/// <see cref="IHoldedClient.ListAccountingAccountsAsync"/>.
+/// <see cref="AccountId"/> is the chart-of-accounts <b>id</b> (24-hex), not the 8-digit number: callers set
+/// <see cref="AccountNum"/> and the Holded section resolves the id.
 /// </summary>
 public sealed record HoldedSalesDocumentLineInput
 {
@@ -27,6 +27,9 @@ public sealed record HoldedSalesDocumentLineInput
     public IReadOnlyList<string> Taxes { get; init; } = [];
     /// <summary>Null falls back to Holded's default income account.</summary>
     public string? AccountId { get; init; }
+    /// <summary>The ledger account number; <see cref="IHoldedWrite.IssueSalesDocumentAsync"/> resolves it to
+    /// <see cref="AccountId"/>.</summary>
+    public int? AccountNum { get; init; }
 }
 
 public sealed record HoldedSalesDocumentInput
@@ -52,10 +55,16 @@ public sealed record HoldedSalesDocumentDto
     public required decimal Subtotal { get; init; }
     public required decimal Tax { get; init; }
     public required decimal Total { get; init; }
-    public string? Status { get; init; }
-    /// <summary>A draft books no revenue and has no number until <see cref="IHoldedClient.ApproveSalesDocumentAsync"/>.
+    /// <summary>A draft books no revenue and has no number until <see cref="IHoldedWrite.ApproveSalesDocumentAsync"/>.
     /// Null when Holded doesn't report the field.</summary>
     public bool? IsDraft { get; init; }
+    /// <summary>The document's lines as Holded holds them, in its order. Empty when Holded reports none, or when one
+    /// of them has no readable units, price or tax (logged).</summary>
+    public required IReadOnlyList<HoldedSalesDocumentLineDto> Lines { get; init; }
     /// <summary>The verbatim response body, kept for the audited payload on <c>store_invoices</c>.</summary>
     public required string RawJson { get; init; }
 }
+
+/// <summary>One line of an issued sales document. <paramref name="Price"/> is the VAT-exclusive unit price;
+/// <paramref name="TaxPercent"/> is the line's primary tax rate (21 for 21%).</summary>
+public sealed record HoldedSalesDocumentLineDto(string Name, decimal Units, decimal Price, decimal TaxPercent);

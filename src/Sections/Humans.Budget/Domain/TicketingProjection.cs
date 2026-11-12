@@ -42,7 +42,8 @@ internal sealed class TicketingProjection
     internal IEnumerable<(LocalDate Start, LocalDate End, int Tickets, decimal Revenue,
         decimal StripeFees, decimal TicketTailorFees)> CalculateWeeks(LocalDate today)
     {
-        if (StartDate is null || EventDate is null || AverageTicketPrice == 0 || today > EventDate.Value)
+        if (StartDate is null || EventDate is null || StartDate.Value > EventDate.Value
+            || AverageTicketPrice == 0 || today > EventDate.Value)
             yield break;
 
         var currentMonday = today.PlusDays(1 - (int)today.DayOfWeek);
@@ -53,11 +54,11 @@ internal sealed class TicketingProjection
 
         while (weekStart <= EventDate.Value)
         {
-            var weekEnd = weekStart.PlusDays(6);
-            if (weekEnd > EventDate.Value) weekEnd = EventDate.Value;
-
-            var days = Period.Between(weekStart, weekEnd.PlusDays(1), PeriodUnits.Days).Days;
-            var tickets = (int)Math.Round(DailySalesRate * days);
+            var weekDays = Math.Min(7, Period.Between(weekStart, EventDate.Value, PeriodUnits.Days).Days + 1);
+            var weekEnd = weekStart.PlusDays(weekDays - 1);
+            var salesStart = weekStart < StartDate.Value ? StartDate.Value : weekStart;
+            var salesDays = Period.Between(salesStart, weekEnd, PeriodUnits.Days).Days + 1;
+            var tickets = (int)Math.Round(DailySalesRate * salesDays);
             if (isFirstWeek && weekStart <= StartDate.Value)
                 tickets += InitialSalesCount;
             isFirstWeek = false;
@@ -68,6 +69,7 @@ internal sealed class TicketingProjection
                 revenue * StripeFeePercent / 100m + tickets * StripeFeeFixed,
                 revenue * TicketTailorFeePercent / 100m);
 
+            if (weekEnd == EventDate.Value) yield break;
             weekStart = weekEnd.PlusDays(1);
         }
     }

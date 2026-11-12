@@ -20,7 +20,7 @@ namespace Humans.Agent.Services;
 
 internal sealed class AgentService : IAgentService, IAgentConversationRetention
 {
-    internal const string AgentConversations = "AgentConversations";
+    internal const string AgentConversations = AgentConversationReader.AgentConversations;
 
     // Keep turns for one user serialized through final usage billing, across request scopes.
     private static readonly ConcurrentDictionary<Guid, TrackedLock> TurnLocks = new();
@@ -38,7 +38,7 @@ internal sealed class AgentService : IAgentService, IAgentConversationRetention
     private readonly AnthropicOptions _anthropicOptions;
     private readonly IClock _clock;
     private readonly ILogger<AgentService> _logger;
-    private readonly IUserService _users;
+    private readonly AgentConversationReader conversationReader;
 
     public AgentService(
         IAgentSettingsService settings,
@@ -60,7 +60,8 @@ internal sealed class AgentService : IAgentService, IAgentConversationRetention
         _repo = repo; _retentionRuns = retentionRuns; _snapshots = snapshots; _preload = preload;
         _assembler = assembler; _tools = tools; _client = client;
         _anthropicOptions = anthropicOptions.Value;
-        _clock = clock; _logger = logger; _users = users;
+        _clock = clock; _logger = logger;
+        conversationReader = new AgentConversationReader(repo, snapshots, assembler, users, settings, preload, client, logger);
     }
 
     public async Task<int> PurgeExpiredConversationsAsync(CancellationToken cancellationToken)
@@ -102,9 +103,7 @@ internal sealed class AgentService : IAgentService, IAgentConversationRetention
         var today = nowZoned.Date;
         var hour = nowZoned.Hour;
         var usage = _rateLimit.Get(request.UserId, today, hour);
-        if (usage.MessagesToday >= settings.DailyMessageCap ||
-            usage.TokensToday >= settings.DailyTokenCap ||
-            usage.MessagesThisHour >= settings.HourlyMessageCap)
+        if (usage.IsAtLimit(settings))
         {
             // Invariant 6 (Agent.md): every refused turn writes an AgentMessage with RefusalReason.
             await PersistRefusalAsync(request, existing, "rate_limited", cancellationToken);
@@ -125,12 +124,7 @@ internal sealed class AgentService : IAgentService, IAgentConversationRetention
             ?? await _repo.CreateConversationAsync(request.UserId, request.Locale, cancellationToken);
 
         // Replay user/assistant text turns only — tool-call internals are dropped (model re-derives via fetch_section_guide).
-        var priorTurns = conversation.Messages
-            .Where(m => (m.Role == AgentRole.User || m.Role == AgentRole.Assistant)
-                        && !string.IsNullOrEmpty(m.Content))
-            .OrderBy(m => m.CreatedAt)
-            .TakeLast(HistoryReplayLimit)
-            .ToList();
+        var priorTurns = conversation.GetReplayableMessages();
 
         await _repo.AppendMessageAsync(new AgentMessage
         {
@@ -146,12 +140,11 @@ internal sealed class AgentService : IAgentService, IAgentConversationRetention
         // `yield` inside its implicit try/finally, so the enumerator is driven by hand. turnUsage is shared with
         // RunTurnAsync so a turn that breaks partway is still billed.
         var turnUsage = new TurnUsage();
-        var turn = RunTurnAsync(request, conversation, settings, priorTurns, today, hour, turnUsage, cancellationToken);
+        var turn = RunTurnAsync(request, conversation, settings, priorTurns, turnUsage, cancellationToken);
         await using var enumerator = turn.GetAsyncEnumerator(cancellationToken);
         // False until the assistant message for this turn is on disk — written either by
         // RunTurnAsync itself (it yields its finalizer only after AppendMessageAsync) or by
-        // the finally below. While it's false the persisted user message still owes the user
-        // a reply, and the turn is still unbilled.
+        // the finally below. While it's false the persisted user message still owes the user a reply.
         var assistantPersisted = false;
         Exception? turnFailure = null;
         try
@@ -196,9 +189,7 @@ internal sealed class AgentService : IAgentService, IAgentConversationRetention
                     yield break;
                 }
 
-                // RunTurnAsync yields its finalizer last, after AppendMessageAsync and its own
-                // _rateLimit.Record — seeing one means the turn is fully persisted and billed,
-                // so a disconnect while writing that very frame must not double up on either.
+                // The finalizer follows persistence, so disconnecting while writing it must not add an error trace.
                 if (current!.Finalizer is not null)
                     assistantPersisted = true;
                 yield return current;
@@ -208,19 +199,21 @@ internal sealed class AgentService : IAgentService, IAgentConversationRetention
         {
             // Also reached by disposal: AgentController awaits WriteSse outside this method, so a browser that
             // disconnects mid-write disposes the iterator at a `yield return` and resumes here, not in the catch.
-            if (!assistantPersisted)
+            try
             {
-                if (turnFailure is null)
-                    _logger.LogWarning(
-                        "Agent turn abandoned mid-stream (likely client disconnect) for conversation {ConversationId}",
-                        conversation.Id);
-                // CancellationToken.None: the turn may be failing BECAUSE cancellationToken
-                // fired (client disconnect), and the whole point is to still leave a trace.
-                await AppendFailureMessageAsync(conversation.Id, "error", settings.Model, turnUsage, CancellationToken.None);
-                // Bill it. The provider already charged us for whatever the turn consumed
-                // before it broke, so leaving those tokens out understates admin spend and the
-                // DailyTokenCap; and a turn that fails deterministically must still cost a
-                // message, or a repeatable backend error becomes an unmetered send loop.
+                if (!assistantPersisted)
+                {
+                    if (turnFailure is null)
+                        _logger.LogWarning(
+                            "Agent turn abandoned mid-stream (likely client disconnect) for conversation {ConversationId}",
+                            conversation.Id);
+                    // A disconnect must not cancel the attempt to leave a trace.
+                    await AppendFailureMessageAsync(conversation.Id, "error", settings.Model, turnUsage, CancellationToken.None);
+                }
+            }
+            finally
+            {
+                // Provider usage counts even when the transcript cannot be saved. Record once, before releasing the turn lock.
                 _rateLimit.Record(request.UserId, today, hour,
                     messagesDelta: 1, tokensDelta: turnUsage.InputTokensIncludingCacheWrites + turnUsage.OutputTokens);
             }
@@ -256,8 +249,6 @@ internal sealed class AgentService : IAgentService, IAgentConversationRetention
         AgentConversation conversation,
         AgentSettingsDto settings,
         List<AgentMessage> priorTurns,
-        LocalDate today,
-        int hour,
         TurnUsage usage,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
@@ -455,12 +446,10 @@ internal sealed class AgentService : IAgentService, IAgentConversationRetention
             Model = settings.Model,
             DurationMs = durationMs,
             FetchedDocs = fetchedDocs.ToArray(),
+            RefusalReason = string.Equals(finalFinalizer?.StopReason, "error", StringComparison.Ordinal) ? "error" : null,
             HandedOffToFeedbackId = null
         };
         await _repo.AppendMessageAsync(message, cancellationToken);
-
-        var totalTokens = message.PromptTokens + message.OutputTokens;
-        _rateLimit.Record(request.UserId, today, hour, messagesDelta: 1, tokensDelta: totalTokens);
 
         var fallbackFinalizer = finalFinalizer ?? new AgentTurnFinalizer(0, 0, 0, 0, _settings.Current.Model, "unknown");
         // Stamp the conversation id so the client can reuse it on the next send, and
@@ -476,9 +465,6 @@ internal sealed class AgentService : IAgentService, IAgentConversationRetention
         });
     }
 
-    /// <summary>How many prior user/assistant turns to replay (bounded for context budget).</summary>
-    private const int HistoryReplayLimit = 20;
-
     /// <summary>A turn also emits tool-call JSON, and a tighter cap truncated it mid-JSON often enough to
     /// matter.</summary>
     private const int MaxOutputTokensPerIteration = 4096;
@@ -493,168 +479,32 @@ internal sealed class AgentService : IAgentService, IAgentConversationRetention
         return ReplyResources.GetString(resourceKey, culture)!;
     }
 
-    public async Task<IReadOnlyList<AgentConversationListSnapshot>> GetHistoryAsync(
-        Guid userId, int take, CancellationToken ct)
-    {
-        var conversations = await _repo.ListConversationsForUserAsync(userId, take, ct);
-        return conversations.Select(ToListSnapshot).ToList();
-    }
+    public Task<IReadOnlyList<AgentConversationListSnapshot>> GetHistoryAsync(Guid userId, int take, CancellationToken ct) =>
+        conversationReader.GetHistoryAsync(userId, take, ct);
 
-    public async Task<AgentConversationTranscriptSnapshot?> GetConversationForUserAsync(
-        Guid userId, Guid conversationId, CancellationToken ct)
-    {
-        var conv = await _repo.GetConversationByIdAsync(conversationId, ct);
-        return conv is not null && conv.UserId == userId ? ToTranscriptSnapshot(conv) : null;
-    }
+    public Task<AgentConversationTranscriptSnapshot?> GetConversationForUserAsync(Guid userId, Guid conversationId, CancellationToken ct) =>
+        conversationReader.GetConversationForUserAsync(userId, conversationId, ct);
 
-    public async Task<AgentMyConversationView?> GetMyConversationAsync(
-        Guid userId, Guid conversationId, CancellationToken ct)
-    {
-        var conv = await _repo.GetConversationByIdAsync(conversationId, ct);
-        // Ownership mismatch returns null like "not found" (Agent.md invariant 7) — no existence leak.
-        if (conv is null || conv.UserId != userId) return null;
+    public Task<AgentMyConversationView?> GetMyConversationAsync(Guid userId, Guid conversationId, CancellationToken ct) =>
+        conversationReader.GetMyConversationAsync(userId, conversationId, ct);
 
-        // Tail regenerated from current snapshot; may differ from historical turn view (Agent.md open question).
-        var snapshot = await _snapshots.LoadAsync(userId, ct);
-        var tail = _assembler.BuildUserContextTail(snapshot);
-        return new AgentMyConversationView(ToTranscriptSnapshot(conv), tail);
-    }
+    public Task<IReadOnlyList<AgentConversationListSnapshot>> ListAllConversationsForAdminAsync(
+        bool refusalsOnly, Guid? userId, int take, int skip, CancellationToken ct) =>
+        conversationReader.ListAllConversationsForAdminAsync(refusalsOnly, userId, take, skip, ct);
 
-    public async Task<IReadOnlyList<AgentConversationListSnapshot>> ListAllConversationsForAdminAsync(
-        bool refusalsOnly, Guid? userId, int take, int skip,
-        CancellationToken ct)
-    {
-        var conversations = await _repo.ListAllConversationsAsync(refusalsOnly, userId, take, skip, ct);
-        return conversations.Select(ToListSnapshot).ToList();
-    }
+    public Task<IReadOnlyList<AgentConversationTranscriptSnapshot>> ListAllConversationsForAdminWithMessagesAsync(
+        bool refusalsOnly, bool handoffsOnly, Guid? userId, int take, int skip, CancellationToken ct) =>
+        conversationReader.ListAllConversationsForAdminWithMessagesAsync(refusalsOnly, handoffsOnly, userId, take, skip, ct);
 
-    public async Task<IReadOnlyList<AgentConversationTranscriptSnapshot>> ListAllConversationsForAdminWithMessagesAsync(
-        bool refusalsOnly, bool handoffsOnly, Guid? userId, int take, int skip,
-        CancellationToken ct)
-    {
-        var conversations = await _repo.ListAllConversationsWithMessagesAsync(
-            refusalsOnly, handoffsOnly, userId, take, skip, ct);
-        return conversations.Select(ToTranscriptSnapshot).ToList();
-    }
+    public Task<AgentConversationTranscriptSnapshot?> GetConversationForAdminAsync(Guid id, CancellationToken ct) =>
+        conversationReader.GetConversationForAdminAsync(id, ct);
 
-    private static AgentConversationTranscriptSnapshot ToTranscriptSnapshot(AgentConversation conversation) =>
-        new(
-            conversation.Id,
-            conversation.UserId,
-            conversation.Locale,
-            conversation.StartedAt,
-            conversation.LastMessageAt,
-            conversation.MessageCount,
-            conversation.Messages
-                .Select(message => new AgentMessageSnapshot(
-                    message.Id,
-                    message.ConversationId,
-                    message.Role,
-                    message.Content,
-                    message.CreatedAt,
-                    message.PromptTokens,
-                    message.OutputTokens,
-                    message.CachedTokens,
-                    message.Model,
-                    message.DurationMs,
-                    message.FetchedDocs,
-                    message.RefusalReason,
-                    message.HandedOffToFeedbackId))
-                .ToList());
+    public Task<AgentPromptPreview?> GetPromptPreviewForAdminAsync(
+        Guid conversationId, CancellationToken ct) =>
+        conversationReader.GetPromptPreviewForAdminAsync(conversationId, ct);
 
-    private static AgentConversationListSnapshot ToListSnapshot(AgentConversation conversation) =>
-        new(
-            conversation.Id,
-            conversation.UserId,
-            conversation.Locale,
-            conversation.StartedAt,
-            conversation.LastMessageAt,
-            conversation.MessageCount);
-
-    public async Task<AgentConversationTranscriptSnapshot?> GetConversationForAdminAsync(Guid id, CancellationToken ct)
-    {
-        var conversation = await _repo.GetConversationByIdAsync(id, ct);
-        return conversation is null ? null : ToTranscriptSnapshot(conversation);
-    }
-
-    public async Task<AgentPromptPreview?> GetPromptPreviewForAdminAsync(
-        Guid conversationId, CancellationToken ct)
-    {
-        var conversation = await _repo.GetConversationByIdAsync(conversationId, ct);
-        if (conversation is null) return null;
-
-        var settings = _settings.Current;
-        var snapshot = await _snapshots.LoadAsync(conversation.UserId, ct);
-        var preloadText = await _preload.BuildAsync(settings.PreloadConfig, ct);
-        var systemPrompt = _assembler.BuildSystemPrompt(preloadText);
-        var tail = _assembler.BuildUserContextTail(snapshot);
-        var toolDefs = _assembler.BuildToolDefinitions();
-
-        // Mirror AskAsync's history replay rules so the preview matches what
-        // would actually be sent on the next turn.
-        var replayed = conversation.Messages
-            .Where(m => (m.Role == AgentRole.User || m.Role == AgentRole.Assistant)
-                        && !string.IsNullOrEmpty(m.Content))
-            .OrderBy(m => m.CreatedAt)
-            .TakeLast(HistoryReplayLimit)
-            .Select(m => new AgentPromptHistoryTurn(
-                Role: m.Role == AgentRole.User ? "user" : "assistant",
-                Text: m.Content))
-            .ToList();
-
-        var tools = toolDefs
-            .Select(t => new AgentPromptToolDefinition(t.Name, t.Description, t.JsonSchema))
-            .ToList();
-
-        // Measure the system prompt with the real tokenizer (count_tokens). This is a diagnostic
-        // nicety — a failed/rate-limited count renders as null; request cancellation propagates.
-        int? systemPromptTokens = null;
-        try
-        {
-            systemPromptTokens = await _client.CountTokensAsync(settings.Model, systemPrompt, ct);
-        }
-        catch (Exception ex) when (!ct.IsCancellationRequested)
-        {
-            // Expected/transient (rate limit, network) — log the reason at Warning, drop the
-            // stack trace per memory/code/always-log-problems.md.
-            _logger.LogWarning(
-                "count_tokens failed for prompt preview; rendering without a token count: {Reason}", ex.Message);
-        }
-
-        return new AgentPromptPreview(
-            Model: settings.Model,
-            SystemPrompt: systemPrompt,
-            UserContextTail: tail,
-            Tools: tools,
-            ReplayedHistory: replayed,
-            SystemPromptTokens: systemPromptTokens);
-    }
-
-    public async Task<IReadOnlyList<UserDataSlice>> ContributeForUserAsync(Guid userId, CancellationToken ct)
-    {
-        var info = await _users.GetUserInfoAsync(userId, ct);
-        var conversations = new List<AgentConversation>();
-        foreach (var id in info?.AllUserIds ?? [userId])
-            conversations.AddRange(await _repo.ListConversationsForUserWithMessagesAsync(id, ct));
-        var shaped = conversations.OrderBy(c => c.StartedAt).Select(c => new
-        {
-            c.Id,
-            StartedAt = c.StartedAt.ToIso8601(),
-            LastMessageAt = c.LastMessageAt.ToIso8601(),
-            c.Locale,
-            c.MessageCount,
-            Messages = c.Messages.Select(m => new
-            {
-                m.Role,
-                m.Content,
-                CreatedAt = m.CreatedAt.ToIso8601(),
-                m.Model,
-                m.RefusalReason,
-                m.HandedOffToFeedbackId
-            }).ToList()
-        }).ToList();
-        return [new UserDataSlice(AgentConversations, shaped)];
-    }
+    public Task<IReadOnlyList<UserDataSlice>> ContributeForUserAsync(Guid userId, CancellationToken ct) =>
+        conversationReader.ContributeForUserAsync(userId, ct);
 
     private static readonly IReadOnlyDictionary<string, string?> Erasure =
         new Dictionary<string, string?>(StringComparer.Ordinal)

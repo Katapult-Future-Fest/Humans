@@ -1,5 +1,5 @@
-using System.Globalization;
-using CsvHelper.Configuration;
+using Humans.Base.Extensions;
+using CsvHelper;
 using Humans.Base.Csv;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Localization;
@@ -109,11 +109,7 @@ public sealed class BulkEventCsvParserTests
                 nameof(BulkEventCsvRecord.StartTime), nameof(BulkEventCsvRecord.DurationMinutes), nameof(BulkEventCsvRecord.IsRecurring),
                 nameof(BulkEventCsvRecord.PriorityRank), nameof(BulkEventCsvRecord.Description), $"Notes \"quoted\" {new string(other, 25)}");
             csv.WriteRow("Yoga", "Workshop", "2026-07-08", "09:30", "60", "false", "1", "Description", "working note");
-        }, config =>
-        {
-            config.Delimiter = delimiter;
-            config.InjectionOptions = InjectionOptions.None;
-        });
+        }, config => config with { Separator = delimiter[0], Injection = CsvInjection.None });
         using var stream = new MemoryStream(bytes);
         using var reader = new StreamReader(stream);
         var text = (comments ? "# Comma-rich notes, for, the, template, and, extra, columns\n\n" : "") + reader.ReadToEnd();
@@ -270,31 +266,17 @@ public sealed class BulkEventCsvParserTests
         error.Args.Should().Equal(2);
     }
 
-    [HumansTheory]
-    [InlineData("en", "Row 2: DurationMinutes is not an integer.")]
-    [InlineData("es", "Fila 2: DurationMinutes no es un número entero.")]
-    [InlineData("de", "Zeile 2: DurationMinutes ist keine ganze Zahl.")]
-    [InlineData("it", "Riga 2: DurationMinutes non è un numero intero.")]
-    [InlineData("fr", "Ligne 2 : DurationMinutes n’est pas un nombre entier.")]
-    [InlineData("ca", "Fila 2: DurationMinutes no és un nombre enter.")]
-    public void Parse_NonIntegerDuration_KeyRendersInUploaderCultureWithFileRow(string culture, string expectedError)
+    [HumansFact]
+    public void Parse_NonIntegerDuration_KeyRendersWithFileRow()
     {
-        var originalCulture = CultureInfo.CurrentUICulture;
-        try
-        {
-            CultureInfo.CurrentUICulture = CultureInfo.GetCultureInfo(culture);
-            var csv = $"{Header}\n,Camp,,Title,Desc,Workshop,2026-07-08,09:30,sixty,,,false,,1\n";
+        using var culture = new CultureScope("en");
+        var csv = $"{Header}\n,Camp,,Title,Desc,Workshop,2026-07-08,09:30,sixty,,,false,,1\n";
 
-            var result = BulkEventCsvParser.Parse(csv);
-            var error = result.Errors.Should().ContainSingle().Which;
-            error.Key.Should().Be("Events_Upload_RowDurationNotInteger");
-            error.Args.Should().Equal(2);
-            _localizer[error.Key, error.Args].Value.Should().Be(expectedError);
-        }
-        finally
-        {
-            CultureInfo.CurrentUICulture = originalCulture;
-        }
+        var result = BulkEventCsvParser.Parse(csv);
+        var error = result.Errors.Should().ContainSingle().Which;
+        error.Key.Should().Be("Events_Upload_RowDurationNotInteger");
+        error.Args.Should().Equal(2);
+        _localizer[error.Key, error.Args].Value.Should().Be("Row 2: DurationMinutes is not an integer.");
     }
 }
 

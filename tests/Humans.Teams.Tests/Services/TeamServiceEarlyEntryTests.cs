@@ -34,6 +34,7 @@ public sealed class TeamServiceEarlyEntryTests
     private readonly TeamService _service;
     private readonly ISystemTeamSync _systemTeamSync = Substitute.For<ISystemTeamSync>();
     private readonly IRoleAssignmentService _roles = Substitute.For<IRoleAssignmentService>();
+    private readonly IUserService _users = Substitute.For<IUserService>();
 
     public TeamServiceEarlyEntryTests()
     {
@@ -47,7 +48,7 @@ public sealed class TeamServiceEarlyEntryTests
                 .With<IGoogleSyncOutboxService>()
                 .With<IGoogleIntegrationService>()
                 .With<ITeamResourceService>()
-                .With<IUserService>()
+                .With(_users)
                 .With(_systemTeamSync)
                 .With(_roles)
                 .Build(),
@@ -156,22 +157,28 @@ public sealed class TeamServiceEarlyEntryTests
         row.ProjectName.Should().Be("Lanterns");
     }
 
-    [HumansFact]
-    public async Task AddEarlyEntryGrantAsync_TeamEnabled_AddsAndAudits()
+    [HumansTheory]
+    [Xunit.InlineData(false)]
+    [Xunit.InlineData(true)]
+    public async Task AddEarlyEntryGrantAsync_TeamEnabled_AddsAndAuditsForResolvedPerson(bool mergedAlias)
     {
         var teamId = Guid.NewGuid();
         var userId = Guid.NewGuid();
+        var resolvedId = mergedAlias ? Guid.NewGuid() : userId;
+        _users.GetUserInfoAsync(userId, Arg.Any<CancellationToken>())
+            .Returns(UserInfo.Create(new User { Id = resolvedId }, [], [], null));
         var actor = Guid.NewGuid();
         var date = new LocalDate(2026, 7, 6);
         _repo.GetByIdAsync(teamId, Arg.Any<CancellationToken>())
             .Returns(new Team { Id = teamId, Name = "Art", Slug = "art", EarlyEntryEnabled = true });
 
-        await _service.AddEarlyEntryGrantAsync(teamId, userId, date, "  Trimmed Project  ", actor, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.AddEarlyEntryGrantAsync(teamId, userId, date, "  Trimmed Project  ", actor, Xunit.TestContext.Current.CancellationToken);
+        result.Succeeded.Should().BeTrue();
 
         await _repo.Received(1).AddEarlyEntryGrantAsync(
             Arg.Is<TeamEarlyEntryGrant>(g =>
                 g.TeamId == teamId &&
-                g.UserId == userId &&
+                g.UserId == resolvedId &&
                 g.EntryDate == date &&
                 g.ProjectName == "Trimmed Project" &&
                 g.CreatedByUserId == actor &&
@@ -179,46 +186,78 @@ public sealed class TeamServiceEarlyEntryTests
             Arg.Any<CancellationToken>());
         await _audit.Received(1).LogAsync(
             TeamsAuditActions.EarlyEntryGranted, nameof(TeamEarlyEntryGrant), Arg.Any<Guid>(),
-            Arg.Any<string>(), actor, Arg.Any<Guid?>(), Arg.Any<string?>());
+            Arg.Is<string>(description => description.Contains(resolvedId.ToString(), StringComparison.Ordinal)), actor, Arg.Any<Guid?>(), Arg.Any<string?>());
+    }
+
+    [HumansTheory]
+    [Xunit.InlineData("missing")]
+    [Xunit.InlineData("deleted")]
+    [Xunit.InlineData("merged")]
+    [Xunit.InlineData("erased")]
+    public async Task AddEarlyEntryGrantAsync_UnavailablePerson_DoesNotWriteOrAudit(string unavailable)
+    {
+        var teamId = Guid.NewGuid();
+        var userId = Guid.NewGuid();
+        _repo.GetByIdAsync(teamId, Arg.Any<CancellationToken>())
+            .Returns(new Team { Id = teamId, EarlyEntryEnabled = true });
+        UserInfo? person = unavailable switch
+        {
+            "deleted" => UserInfo.Create(new User { Id = userId, State = UserState.Deleted }, [], [], null),
+            "merged" => UserInfo.Create(new User { Id = userId, State = UserState.Merged }, [], [], null),
+            "erased" => UserInfo.Create(new User { Id = userId }, [], [], null) with { IsGdprAnonymized = true },
+            _ => null
+        };
+        _users.GetUserInfoAsync(userId, Arg.Any<CancellationToken>()).Returns(person);
+
+        var result = await _service.AddEarlyEntryGrantAsync(teamId, userId, new LocalDate(2026, 7, 6),
+            "Project", Guid.NewGuid(), Xunit.TestContext.Current.CancellationToken);
+
+        result.Succeeded.Should().BeFalse();
+        result.Refusal.Should().Contain("Cannot add a missing, deleted or merged account");
+        await _repo.DidNotReceive().AddEarlyEntryGrantAsync(Arg.Any<TeamEarlyEntryGrant>(), Arg.Any<CancellationToken>());
+        _audit.ReceivedCalls().Should().BeEmpty();
     }
 
     [HumansFact]
-    public async Task AddEarlyEntryGrantAsync_TeamNotEnabled_ThrowsAndDoesNotAdd()
+    public async Task AddEarlyEntryGrantAsync_TeamNotEnabled_ReturnsRefusalAndDoesNotAdd()
     {
         var teamId = Guid.NewGuid();
         _repo.GetByIdAsync(teamId, Arg.Any<CancellationToken>())
             .Returns(new Team { Id = teamId, Name = "No EE", Slug = "no-ee", EarlyEntryEnabled = false });
 
-        var act = () => _service.AddEarlyEntryGrantAsync(
+        var result = await _service.AddEarlyEntryGrantAsync(
             teamId, Guid.NewGuid(), new LocalDate(2026, 7, 6), "x", Guid.NewGuid(), Xunit.TestContext.Current.CancellationToken);
 
-        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*not enabled*");
+        result.Succeeded.Should().BeFalse();
+        result.Refusal.Should().Contain("not enabled");
         await _repo.DidNotReceive().AddEarlyEntryGrantAsync(Arg.Any<TeamEarlyEntryGrant>(), Arg.Any<CancellationToken>());
     }
 
     [HumansFact]
-    public async Task AddEarlyEntryGrantAsync_EmptyUserId_Throws()
+    public async Task AddEarlyEntryGrantAsync_EmptyUserId_ReturnsRefusal()
     {
         var teamId = Guid.NewGuid();
         _repo.GetByIdAsync(teamId, Arg.Any<CancellationToken>())
             .Returns(new Team { Id = teamId, Name = "Art", Slug = "art", EarlyEntryEnabled = true });
 
-        var act = () => _service.AddEarlyEntryGrantAsync(
+        var result = await _service.AddEarlyEntryGrantAsync(
             teamId, Guid.Empty, new LocalDate(2026, 7, 6), "x", Guid.NewGuid(), Xunit.TestContext.Current.CancellationToken);
 
-        await act.Should().ThrowAsync<ArgumentException>();
+        result.Succeeded.Should().BeFalse();
+        result.Refusal.Should().Contain("non-empty GUID");
         await _repo.DidNotReceive().AddEarlyEntryGrantAsync(Arg.Any<TeamEarlyEntryGrant>(), Arg.Any<CancellationToken>());
     }
 
     [HumansFact]
-    public async Task AddEarlyEntryGrantAsync_TeamMissing_Throws()
+    public async Task AddEarlyEntryGrantAsync_TeamMissing_ReturnsRefusal()
     {
         _repo.GetByIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns((Team?)null);
 
-        var act = () => _service.AddEarlyEntryGrantAsync(
+        var result = await _service.AddEarlyEntryGrantAsync(
             Guid.NewGuid(), Guid.NewGuid(), new LocalDate(2026, 7, 6), "x", Guid.NewGuid(), Xunit.TestContext.Current.CancellationToken);
 
-        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*not found*");
+        result.Succeeded.Should().BeFalse();
+        result.Refusal.Should().Contain("not found");
     }
 
     [HumansFact]
@@ -230,7 +269,8 @@ public sealed class TeamServiceEarlyEntryTests
         var grant = Grant(teamId, userId, "Old");
         _repo.FindEarlyEntryGrantForMutationAsync(grant.Id, Arg.Any<CancellationToken>()).Returns(grant);
 
-        await _service.EditEarlyEntryGrantAsync(teamId, grant.Id, new LocalDate(2026, 7, 8), "  New Name ", actor, Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.EditEarlyEntryGrantAsync(teamId, grant.Id, new LocalDate(2026, 7, 8), "  New Name ", actor, Xunit.TestContext.Current.CancellationToken);
+        result.Succeeded.Should().BeTrue();
 
         grant.EntryDate.Should().Be(new LocalDate(2026, 7, 8));
         grant.ProjectName.Should().Be("New Name");
@@ -242,15 +282,16 @@ public sealed class TeamServiceEarlyEntryTests
     }
 
     [HumansFact]
-    public async Task EditEarlyEntryGrantAsync_MissingGrant_Throws()
+    public async Task EditEarlyEntryGrantAsync_MissingGrant_ReturnsRefusal()
     {
         _repo.FindEarlyEntryGrantForMutationAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>())
             .Returns((TeamEarlyEntryGrant?)null);
 
-        var act = () => _service.EditEarlyEntryGrantAsync(
+        var result = await _service.EditEarlyEntryGrantAsync(
             Guid.NewGuid(), Guid.NewGuid(), new LocalDate(2026, 7, 8), "x", Guid.NewGuid(), Xunit.TestContext.Current.CancellationToken);
 
-        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*not found*");
+        result.Succeeded.Should().BeFalse();
+        result.Refusal.Should().Contain("not found");
     }
 
     [HumansFact]
@@ -259,10 +300,11 @@ public sealed class TeamServiceEarlyEntryTests
         var grant = Grant(Guid.NewGuid(), Guid.NewGuid(), "Old");
         _repo.FindEarlyEntryGrantForMutationAsync(grant.Id, Arg.Any<CancellationToken>()).Returns(grant);
 
-        var act = () => _service.EditEarlyEntryGrantAsync(
+        var result = await _service.EditEarlyEntryGrantAsync(
             Guid.NewGuid(), grant.Id, new LocalDate(2026, 7, 8), "x", Guid.NewGuid(), Xunit.TestContext.Current.CancellationToken);
 
-        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*not found*");
+        result.Succeeded.Should().BeFalse();
+        result.Refusal.Should().Contain("not found");
         await _repo.DidNotReceive().UpdateEarlyEntryGrantAsync(Arg.Any<TeamEarlyEntryGrant>(), Arg.Any<CancellationToken>());
         await _audit.DidNotReceive().LogAsync(
             Arg.Any<AuditActionDefinition>(), Arg.Any<string>(), Arg.Any<Guid>(),

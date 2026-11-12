@@ -15,7 +15,6 @@ internal sealed class GoogleSyncLogService(
     IGoogleSyncLogRepository repo,
     ITeamResourceManagement teamResourceService,
     IUserService userService,
-    IUserEmailService userEmailService,
     IServiceProvider serviceProvider,
     IClock clock,
     ILogger<GoogleSyncLogService> logger)
@@ -47,8 +46,8 @@ internal sealed class GoogleSyncLogService(
             Role = role,
             Source = source,
             Success = success,
-            ErrorMessage = errorMessage is null ? null : BoundLogText(errorMessage),
-            Description = BoundLogText($"{jobName}: {description}"),
+            ErrorMessage = errorMessage is null ? null : StoredGoogleText.Bound(errorMessage, 4000),
+            Description = StoredGoogleText.Bound($"{jobName}: {description}", 4000),
             JobName = jobName,
             OccurredAt = clock.GetCurrentInstant()
         };
@@ -67,15 +66,6 @@ internal sealed class GoogleSyncLogService(
         logger.LogInformation(
             "Google sync: {Action} {Role} for {Email} on resource {ResourceId} ({Source}, Success={Success})",
             action, role, userEmail, resourceId, source, success);
-    }
-
-    private static string BoundLogText(string text)
-    {
-        if (text.Length <= 4000) return text;
-        var length = 4000;
-        if (char.IsHighSurrogate(text[length - 1]) && char.IsLowSurrogate(text[length]))
-            length--;
-        return text[..length];
     }
 
     public async Task<IReadOnlyList<GoogleSyncLogView>> GetForResourceAsync(
@@ -141,13 +131,19 @@ internal sealed class GoogleSyncLogService(
     public IReadOnlyDictionary<string, string?> ErasureDeclaration => Erasure;
 
     /// <summary>
-    /// GDPR Article 17. Suspends the Workspace account first (the processor holds their mail), because that needs the
-    /// address Users is about to drop; then drops every sync-log row naming them.
+    /// GDPR Article 17. Suspends every verified Workspace mailbox first (the processor holds their mail), because that
+    /// needs the addresses Users is about to drop; then drops every sync-log row naming them.
     /// </summary>
     public async Task EraseForUserAsync(Guid userId, CancellationToken ct)
     {
-        var workspaceEmail = await userEmailService.GetNobodiesTeamEmailAsync(userId, ct);
-        if (workspaceEmail is not null)
+        // Raw: an archived id must never resolve forward to a living survivor's mailboxes.
+        var info = await userService.GetRawUserInfoAsync(userId, ct);
+        var workspaceEmails = info?.UserEmails
+            .Where(email => email.IsVerified
+                && email.Email.EndsWith(WorkspaceIdentityService.NobodiesTeamSuffix, StringComparison.OrdinalIgnoreCase))
+            .Select(email => email.Email)
+            .Distinct(StringComparer.OrdinalIgnoreCase) ?? [];
+        foreach (var workspaceEmail in workspaceEmails)
         {
             // Resolved here, not injected: GoogleAdminService -> IGoogleSyncManagement -> IGoogleSyncLogService
             // closes a constructor cycle back onto this class.
@@ -164,7 +160,7 @@ internal sealed class GoogleSyncLogService(
                     workspaceEmail, userId, result.ErrorMessage);
 
                 // Abort rather than continue: the Users contributor runs last and drops
-                // the address, so a swallowed failure here is unretryable — the mailbox
+                // the addresses, so a swallowed failure here is unretryable — the mailbox
                 // stays live at the processor with nothing left to resolve it from.
                 throw new InvalidOperationException(
                     $"GDPR erasure could not suspend Workspace account {workspaceEmail}: {result.ErrorMessage}");

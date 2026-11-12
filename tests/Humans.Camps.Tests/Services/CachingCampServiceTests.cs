@@ -34,6 +34,7 @@ public sealed class CachingCampServiceTests : CampsTestHarness
     private readonly ICampRoleService _roleInner = Substitute.For<ICampRoleService>();
     private readonly ISettingsService _settingsService;
     private readonly CachingCampService _service;
+    private List<int> _openSeasons = [];
 
     public CachingCampServiceTests()
     {
@@ -96,7 +97,7 @@ public sealed class CachingCampServiceTests : CampsTestHarness
         {
             var settings = await repo.GetSettingsReadOnlyAsync(ct);
             var publicYear = settings?.PublicYear ?? Clock.GetCurrentInstant().InUtc().Year;
-            var openYears = settings?.OpenSeasons ?? [];
+            var openYears = _openSeasons;
             return new CampSettingsInfo(publicYear, openYears)
             {
                 Events = [.. openYears.Append(publicYear).Distinct().OrderDescending()
@@ -236,7 +237,7 @@ public sealed class CachingCampServiceTests : CampsTestHarness
         third.HasEarlyEntry = true;
         await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        await _service.ReorderImagesAsync(camp.Id, [], TestContext.Current.CancellationToken);
+        await _service.ReorderImagesAsync(camp.Id, [], TestActorId, TestContext.Current.CancellationToken);
 
         var refreshed = await _service.GetCampsForYearAsync(2026, TestContext.Current.CancellationToken);
         var refreshedSeason = refreshed
@@ -462,6 +463,8 @@ public sealed class CachingCampServiceTests : CampsTestHarness
         _settingsService.GetAllEventSettingsAsync(Arg.Any<CancellationToken>()).Returns([burn]);
         await SeedSettingsAsync(publicYear: 2026, openSeasons: [2026]);
         var (_, season) = await SeedCampWithSeasonAsync(year: 2026);
+        season.EventSettingsId = burn.Id;
+        await SaveAllAsync(TestContext.Current.CancellationToken);
         var granted = await SeedActiveMemberAsync(season.Id, hasEarlyEntry: true);
         await SeedActiveMemberAsync(season.Id, hasEarlyEntry: false);
         await SeedMemberAsync(season.Id, CampMemberStatus.Pending, hasEarlyEntry: true);
@@ -495,11 +498,28 @@ public sealed class CachingCampServiceTests : CampsTestHarness
             CampsDb.CampSettings.Add(new CampSettings
             {
                 Id = Guid.Parse("00000000-0000-0000-0010-000000000001"),
-                PublicYear = publicYear,
-                OpenSeasons = openSeasons
+                PublicYear = publicYear
             });
+            _openSeasons = openSeasons;
             await SaveAllAsync(TestContext.Current.CancellationToken);
         }
+    }
+
+    [HumansFact]
+    public async Task SearchAsync_LimitKeepsTheHighestScoringMatch()
+    {
+        await SeedSettingsAsync(publicYear: 2026, openSeasons: [2026]);
+        var (_, contains) = await SeedCampWithSeasonAsync(2026);
+        contains.Name = "A Kitchen";
+        var (_, prefix) = await SeedCampWithSeasonAsync(2026);
+        prefix.Name = "Kitchen Crew";
+        var (exactCamp, exact) = await SeedCampWithSeasonAsync(2026);
+        exact.Name = "Kitchen";
+        await SaveAllAsync(TestContext.Current.CancellationToken);
+
+        var results = await _service.SearchAsync("Kitchen", 1, TestContext.Current.CancellationToken);
+
+        results.Should().ContainSingle().Which.CampId.Should().Be(exactCamp.Id);
     }
 
     [HumansFact]
@@ -565,13 +585,12 @@ public sealed class CachingCampServiceTests : CampsTestHarness
         { nameof(ICampManagement.WithdrawSeasonAsync), (t, c, se, ct) => t._service.WithdrawSeasonAsync(c, se, actorUserId: TestActorId, ct) },
         { nameof(ICampManagement.ReactivateSeasonAsync), (t, c, se, ct) => t._service.ReactivateSeasonAsync(se, actorUserId: TestActorId, ct) },
         { nameof(ICampManagement.MarkSeasonFullAsync), (t, c, se, ct) => t._service.MarkSeasonFullAsync(c, se, actorUserId: TestActorId, ct) },
-        { nameof(ICampManagement.ChangeSeasonNameAsync), (t, c, se, ct) => t._service.ChangeSeasonNameAsync(c, se, "New Name", actorUserId: TestActorId, ct) },
         { nameof(ICampManagement.UpdateCampAsync), (t, c, se, ct) => t._service.UpdateCampAsync(new CampUpdateInput(c, "e@x.com", "+34600000000", null, null, false, 1, false, se, "Name", SeedSeasonData()), actorUserId: TestActorId, ct) },
-        { nameof(ICampManagement.AddHistoricalNameAsync), (t, c, se, ct) => t._service.AddHistoricalNameAsync(c, "Old Name", ct) },
-        { nameof(ICampManagement.RemoveHistoricalNameAsync), (t, c, se, ct) => t._service.RemoveHistoricalNameAsync(c, Guid.NewGuid(), ct) },
+        { nameof(ICampManagement.AddHistoricalNameAsync), (t, c, se, ct) => t._service.AddHistoricalNameAsync(c, "Old Name", TestActorId, ct) },
+        { nameof(ICampManagement.RemoveHistoricalNameAsync), (t, c, se, ct) => t._service.RemoveHistoricalNameAsync(c, Guid.NewGuid(), TestActorId, ct) },
         { nameof(ICampManagement.UploadImageAsync), (t, c, se, ct) => t._service.UploadImageAsync(c, Stream.Null, "a.jpg", "image/jpeg", 1, actorUserId: TestActorId, ct) },
         { nameof(ICampManagement.DeleteImageAsync), (t, c, se, ct) => t._service.DeleteImageAsync(c, Guid.NewGuid(), actorUserId: TestActorId, ct) },
-        { nameof(ICampManagement.ReorderImagesAsync), (t, c, se, ct) => t._service.ReorderImagesAsync(c, [], ct) },
+        { nameof(ICampManagement.ReorderImagesAsync), (t, c, se, ct) => t._service.ReorderImagesAsync(c, [], TestActorId, ct) },
         { nameof(ICampManagement.SetNameLockDateAsync), (t, c, se, ct) => t._service.SetNameLockDateAsync(EventIdFor(2026), new LocalDate(2026, 5, 1), Guid.NewGuid(), ct) },
         // Seasons without an event id take their year's open event, so registration and event changes can remap them.
         { nameof(ICampManagement.OpenSeasonAsync), (t, c, se, ct) => t._service.OpenSeasonAsync(EventIdFor(2026), Guid.NewGuid(), ct) },
@@ -594,7 +613,6 @@ public sealed class CachingCampServiceTests : CampsTestHarness
         { nameof(ICampRoleService.ReactivateDefinitionAsync), (t, c, se, ct) => ((ICampRoleService)t._service).ReactivateDefinitionAsync(Guid.NewGuid(), TestActorId, ct) },
         { nameof(ICampRoleService.AssignAsync), (t, c, se, ct) => ((ICampRoleService)t._service).AssignAsync(se, Guid.NewGuid(), Guid.NewGuid(), TestActorId, ct) },
         { nameof(ICampRoleService.UnassignAsync), (t, c, se, ct) => ((ICampRoleService)t._service).UnassignAsync(Guid.NewGuid(), TestActorId, ct) },
-        { nameof(ICampRoleService.RemoveAllForMemberAsync), (t, c, se, ct) => ((ICampRoleService)t._service).RemoveAllForMemberAsync(Guid.NewGuid(), TestActorId, ct) },
     };
 
     private static readonly CampRoleDefinitionInput RoleInput =
@@ -619,7 +637,6 @@ public sealed class CachingCampServiceTests : CampsTestHarness
         await roles.AssignAsync(season.Id, Guid.NewGuid(), Guid.NewGuid(), TestActorId, ct);
         await roles.UpdateDefinitionAsync(Guid.NewGuid(), RoleInput, TestActorId, ct);
         await roles.UnassignAsync(Guid.NewGuid(), TestActorId, ct);
-        await roles.RemoveAllForMemberAsync(Guid.NewGuid(), TestActorId, ct);
         await roles.DeactivateDefinitionAsync(Guid.NewGuid(), TestActorId, ct);
 
         _ = await _service.GetCampsForYearAsync(2026, ct);
@@ -744,16 +761,14 @@ public sealed class CachingCampServiceTests : CampsTestHarness
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         _innerSubstitute.GetCampsForYearAsync(2026, Arg.Any<CancellationToken>()).Returns(async _ =>
         {
-            started.SetResult();
+            started.TrySetResult();
             await release.Task.WaitAsync(ct);
             return [];
         });
         var warmup = _service.GetCampsForYearAsync(2026, ct);
         await started.Task.WaitAsync(ct);
 
-        var settings = await CampsDb.CampSettings.SingleAsync(ct);
-        settings.OpenSeasons = [2026, 2027];
-        await SaveAllAsync(ct);
+        _openSeasons = [2026, 2027];
         // A settings write verb is the decorator's own settings-slot eviction path.
         await _service.OpenSeasonAsync(Guid.NewGuid(), TestActorId, ct);
         (await _service.GetSettingsAsync(ct)).OpenSeasons.Should().Contain(2027);
@@ -762,6 +777,7 @@ public sealed class CachingCampServiceTests : CampsTestHarness
 
         (await _service.GetSettingsAsync(ct)).OpenSeasons.Should().Contain(2027,
             "finishing the older camp warmup must not restore its settings snapshot");
+        await _innerSubstitute.Received().GetCampsForYearAsync(2027, Arg.Any<CancellationToken>());
     }
 
     [HumansFact]
@@ -773,9 +789,7 @@ public sealed class CachingCampServiceTests : CampsTestHarness
         (await _service.GetSettingsAsync(ct)).OpenSeasons.Should().NotContain(2027);
         _innerSubstitute.OpenSeasonAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), mutationCancellation.Token).Returns(async _ =>
         {
-            var settings = await CampsDb.CampSettings.SingleAsync(ct);
-            settings.OpenSeasons = [2026, 2027];
-            await SaveAllAsync(ct);
+            _openSeasons = [2026, 2027];
             await mutationCancellation.CancelAsync();
         });
 
@@ -856,7 +870,6 @@ public sealed class CachingCampServiceTests : CampsTestHarness
         _roleInner.AssignAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>())
             .Returns(AssignCampRoleOutcome.Assigned);
         _roleInner.UnassignAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns(true);
-        _roleInner.RemoveAllForMemberAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns(1);
     }
 
     private async Task<(Camp camp, CampSeason season)> SeedCampWithSeasonAsync(

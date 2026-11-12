@@ -1,4 +1,6 @@
 using Humans.Containers;
+using Humans.Base;
+using Microsoft.AspNetCore.Mvc.ModelBinding.Validation;
 using Microsoft.Extensions.Localization;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.AspNetCore.Authorization;
@@ -18,7 +20,6 @@ using Humans.Teams.Contracts;
 using Humans.Settings.Contracts;
 using Humans.Users.Contracts;
 using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
@@ -40,6 +41,7 @@ public sealed class CityPlanningApiControllerTests : CityPlanningTestBase
     private readonly IContainerService _containers = Substitute.For<IContainerService>();
     private IStringLocalizer<ContainersResource> _containersLocalizer = Substitute.For<IStringLocalizer<ContainersResource>>();
     private IAuthorizationService _authorization;
+    private readonly IUserService _users = Substitute.For<IUserService>();
     private readonly ICampService _campService = Substitute.For<ICampService>();
     private readonly ITeamService _teamService = Substitute.For<ITeamService>();
     private readonly ILogger<CityPlanningApiController> _logger = Substitute.For<ILogger<CityPlanningApiController>>();
@@ -51,6 +53,12 @@ public sealed class CityPlanningApiControllerTests : CityPlanningTestBase
 
     public CityPlanningApiControllerTests()
     {
+        _users.GetUserInfoAsync(_userId, Arg.Any<CancellationToken>())
+            .Returns(UserInfo.Create(new User { Id = _userId }, [], [], profile: null));
+        _campService.GetCampSeasonByIdAsync(_campSeasonId, Arg.Any<CancellationToken>())
+            .Returns(new CampSeasonInfo(_campSeasonId, Guid.NewGuid(), "camp", 2026, null, "Camp", "", "",
+                [], CampSeasonStatus.Pending, YesNoMaybe.No, YesNoMaybe.No, AdultPlayspacePolicy.No,
+                0, null, null, null, 0, null, null));
         _campService.GetSettingsAsync(Arg.Any<CancellationToken>())
             .Returns(new CampSettingsInfo(2026, []));
         _teamService.GetTeamsAsync(Arg.Any<CancellationToken>())
@@ -70,15 +78,11 @@ public sealed class CityPlanningApiControllerTests : CityPlanningTestBase
         var hubContext = Substitute.For<IHubContext<CityPlanningHub>>();
         hubContext.Clients.Returns(hubClients);
 
-        var userManager = Substitute.For<UserManager<User>>(
-            Substitute.For<IUserStore<User>>(), null, null, null, null, null, null, null, null);
-        userManager.GetUserId(Arg.Any<ClaimsPrincipal>()).Returns(_userId.ToString());
-
         var claims = roles.Select(r => new Claim(ClaimTypes.Role, r))
             .Append(new Claim(ClaimTypes.NameIdentifier, _userId.ToString()));
         var controller = new CityPlanningApiController(
             _service, _campService, _containers, _containersLocalizer,
-            _authorization, hubContext, userManager,
+            _authorization, hubContext, _users,
             _logger)
         {
             ControllerContext = new ControllerContext
@@ -92,16 +96,129 @@ public sealed class CityPlanningApiControllerTests : CityPlanningTestBase
         return controller;
     }
 
-    [HumansTheory]
-    [InlineData("en", "Invalid container placement GeoJSON.")]
-    [InlineData("es", "El GeoJSON de ubicación del contenedor no es válido.")]
-    [InlineData("de", "Ungültiges GeoJSON für die Containerplatzierung.")]
-    [InlineData("it", "GeoJSON di posizionamento del container non valido.")]
-    [InlineData("fr", "Le GeoJSON de placement du conteneur est invalide.")]
-    [InlineData("ca", "El GeoJSON d’ubicació del contenidor no és vàlid.")]
-    public async Task InvalidContainerPlacement_ReturnsTheOwnersLocalizedError(string culture, string error)
+    [HumansFact]
+    public void PolygonNoteLengthValidation_UsesLocalizedFeedback()
     {
-        using var cultureScope = new CultureScope(culture);
+        using var cultureScope = new CultureScope("en");
+        var registrations = new ServiceCollection().AddLogging().AddLocalization();
+        registrations.AddControllers().AddDataAnnotationsLocalization(options =>
+            options.DataAnnotationLocalizerProvider = (_, factory) => factory.Create(typeof(SharedResource)));
+        using var services = registrations.BuildServiceProvider();
+        var validator = services.GetRequiredService<IObjectModelValidator>();
+        var shared = services.GetRequiredService<IStringLocalizer<SharedResource>>();
+        var expected = shared["Validation_MaxLength", "Note", 512];
+        expected.ResourceNotFound.Should().BeFalse();
+
+        foreach (var length in new[] { 512, 513 })
+        {
+            var context = new ActionContext { HttpContext = new DefaultHttpContext { RequestServices = services } };
+            validator.Validate(context, null, "", new SaveCampPolygonRequest(Square, 10, new string('x', length)));
+            if (length == 512)
+                context.ModelState.IsValid.Should().BeTrue();
+            else
+                context.ModelState["Note"]!.Errors.Should().ContainSingle().Which.ErrorMessage.Should().Be(expected.Value);
+        }
+    }
+
+    [HumansTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PolygonWrites_UseResolvedAccountForHistory(bool restore)
+    {
+        var survivorId = Guid.NewGuid();
+        _users.GetUserInfoAsync(_userId, Arg.Any<CancellationToken>())
+            .Returns(UserInfo.Create(new User { Id = survivorId }, [], [], profile: null));
+        var ct = TestContext.Current.CancellationToken;
+        Guid historyId = default;
+        if (restore)
+        {
+            await _service.SaveCampPolygonAsync(_campSeasonId, Square, 10, Guid.NewGuid(), cancellationToken: ct);
+            historyId = (await CityPlanningDb.CampPolygonHistories.SingleAsync(ct)).Id;
+        }
+        var controller = CreateController(RoleNames.Admin);
+
+        var result = restore
+            ? await controller.RestoreCampPolygon(_campSeasonId, historyId, ct)
+            : await controller.SaveCampPolygon(_campSeasonId, new SaveCampPolygonRequest(Square, 10), ct);
+
+        result.Should().BeOfType<OkObjectResult>();
+        (await CityPlanningDb.CampPolygonHistories.Where(h => h.Id != historyId).SingleAsync(ct))
+            .ModifiedByUserId.Should().Be(survivorId);
+        await _users.Received().GetUserInfoAsync(_userId, ct);
+    }
+
+    public enum ContainerPlacementWrite
+    {
+        SavePlacement,
+        UpdatePlacementNotes,
+        ClearPlacement
+    }
+
+    [HumansTheory]
+    [InlineData(ContainerPlacementWrite.SavePlacement)]
+    [InlineData(ContainerPlacementWrite.UpdatePlacementNotes)]
+    [InlineData(ContainerPlacementWrite.ClearPlacement)]
+    public async Task ContainerWrites_UseResolvedAccountForActor(ContainerPlacementWrite operation)
+    {
+        var survivorId = Guid.NewGuid();
+        _users.GetUserInfoAsync(_userId, Arg.Any<CancellationToken>())
+            .Returns(UserInfo.Create(new User { Id = survivorId }, [], [], profile: null));
+        var id = Guid.NewGuid();
+        _containers.GetByIdAsync(id, Arg.Any<CancellationToken>()).Returns(
+            new ContainerDto(id, Guid.NewGuid(), "Container", null, [], Instant.MinValue, Instant.MinValue));
+        _authorization = Substitute.For<IAuthorizationService>();
+        _authorization.AuthorizeAsync(Arg.Any<ClaimsPrincipal>(), Arg.Any<object>(), Arg.Any<IEnumerable<IAuthorizationRequirement>>())
+            .Returns(AuthorizationResult.Success());
+        _containers.SavePlacementAsync(id, 2026, "{}", Arg.Any<Guid>(), Arg.Any<CancellationToken>())
+            .Returns(new ContainerMutationResult<ContainerPlacementDto>(null, "invalid"));
+        _containers.UpdatePlacementNotesAsync(id, 2026, null, null, false, Arg.Any<Guid>(), Arg.Any<CancellationToken>())
+            .Returns(new ContainerMutationResult<ContainerPlacementDto>(null, "invalid"));
+        _containersLocalizer["invalid", Arg.Any<object[]>()].Returns(new LocalizedString("invalid", "invalid"));
+        var ct = TestContext.Current.CancellationToken;
+        var controller = CreateController();
+
+        if (operation == ContainerPlacementWrite.SavePlacement)
+        {
+            await controller.SaveContainerPlacement(id, 2026, new SaveContainerPlacementRequest("{}"), ct);
+            await _containers.Received(1).SavePlacementAsync(id, 2026, "{}", survivorId, ct);
+        }
+        else if (operation == ContainerPlacementWrite.UpdatePlacementNotes)
+        {
+            await controller.UpdateContainerPlacementNotes(id, 2026, new UpdateContainerPlacementNotesRequest(), ct);
+            await _containers.Received(1).UpdatePlacementNotesAsync(id, 2026, null, null, false, survivorId, ct);
+        }
+        else
+        {
+            await controller.ClearContainerPlacement(id, 2026, ct);
+            await _containers.Received(1).ClearPlacementAsync(id, 2026, survivorId, ct);
+        }
+    }
+
+    [HumansFact]
+    public async Task ContainerExport_UsesResolvedAccountForCampLeadership()
+    {
+        var survivorId = Guid.NewGuid();
+        _users.GetUserInfoAsync(_userId, Arg.Any<CancellationToken>())
+            .Returns(UserInfo.Create(new User { Id = survivorId }, [], [], profile: null));
+        var campId = Guid.NewGuid();
+        var season = new CampSeasonInfo(_campSeasonId, campId, "camp", 2026, null, "Camp", "", "",
+            [], CampSeasonStatus.Pending, YesNoMaybe.No, YesNoMaybe.No, AdultPlayspacePolicy.No,
+            0, null, null, null, 0, null, null)
+        { LeadUserIds = [survivorId] };
+        _campService.GetCampsForYearAsync(2026, Arg.Any<CancellationToken>())
+            .Returns([new CampInfo(campId, "camp", "", "", false, 0, [season])]);
+        _containers.GetAllAsync(Arg.Any<CancellationToken>()).Returns([]);
+        _containers.GetPlacementsByYearAsync(2026, Arg.Any<CancellationToken>()).Returns([]);
+
+        var result = await CreateController().ExportContainersGeoJson(2026, TestContext.Current.CancellationToken);
+
+        result.Should().BeOfType<FileContentResult>();
+    }
+
+    [HumansFact]
+    public async Task InvalidContainerPlacement_ReturnsTheOwnersLocalizedError()
+    {
+        using var cultureScope = new CultureScope("en");
         using var services = new ServiceCollection().AddLogging().AddLocalization().BuildServiceProvider();
         _containersLocalizer = services.GetRequiredService<IStringLocalizer<ContainersResource>>();
         _authorization = Substitute.For<IAuthorizationService>();
@@ -116,7 +233,7 @@ public sealed class CityPlanningApiControllerTests : CityPlanningTestBase
         var result = await CreateController().SaveContainerPlacement(
             id, 2026, new SaveContainerPlacementRequest("{}"), TestContext.Current.CancellationToken);
 
-        result.Should().BeOfType<UnprocessableEntityObjectResult>().Which.Value.Should().Be(error);
+        result.Should().BeOfType<UnprocessableEntityObjectResult>().Which.Value.Should().Be("Invalid container placement GeoJSON.");
     }
 
     [HumansTheory]
@@ -276,7 +393,9 @@ public sealed class CityPlanningApiControllerTests : CityPlanningTestBase
                 IsPromotedToDirectory: false, CreatedAt: Instant.MinValue,
                 Members: [new(Guid.NewGuid(), _userId, string.Empty, null, null, TeamMemberRole.Member, Instant.MinValue)]),
         });
-        await _service.SaveCampPolygonAsync(Guid.NewGuid(), Square, 10, Guid.NewGuid(), cancellationToken: ct);
+        var otherSeason = (await _campService.GetCampSeasonByIdAsync(_campSeasonId, ct))! with { Id = Guid.NewGuid() };
+        _campService.GetCampSeasonByIdAsync(otherSeason.Id, Arg.Any<CancellationToken>()).Returns(otherSeason);
+        await _service.SaveCampPolygonAsync(otherSeason.Id, Square, 10, Guid.NewGuid(), cancellationToken: ct);
         var otherSeasonHistoryId = (await CityPlanningDb.CampPolygonHistories.SingleAsync(ct)).Id;
 
         var result = await CreateController().RestoreCampPolygon(_campSeasonId, otherSeasonHistoryId, ct);
@@ -402,7 +521,7 @@ public sealed class CityPlanningApiControllerTests : CityPlanningTestBase
     [HumansTheory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task PolygonWrite_BroadcastPreparationFailure_ReturnsSavedResult(bool restore)
+    public async Task PolygonWrite_MissingCampSeason_RefusesWithoutWritingOrBroadcasting(bool restore)
     {
         var ct = TestContext.Current.CancellationToken;
         Guid historyId = default;
@@ -412,7 +531,34 @@ public sealed class CityPlanningApiControllerTests : CityPlanningTestBase
             historyId = (await CityPlanningDb.CampPolygonHistories.SingleAsync(ct)).Id;
         }
         _campService.GetCampSeasonByIdAsync(_campSeasonId, Arg.Any<CancellationToken>())
-            .ThrowsAsync(new IOException("Camp directory unavailable"));
+            .Returns((CampSeasonInfo?)null);
+        var controller = CreateController(CampsRoles.CampsAdmin);
+
+        var result = restore
+            ? await controller.RestoreCampPolygon(_campSeasonId, historyId, ct)
+            : await controller.SaveCampPolygon(_campSeasonId, new SaveCampPolygonRequest(Square, 10), ct);
+
+        result.Should().BeOfType<BadRequestResult>();
+        (await CityPlanningDb.CampPolygons.CountAsync(ct)).Should().Be(restore ? 1 : 0);
+        (await CityPlanningDb.CampPolygonHistories.CountAsync(ct)).Should().Be(restore ? 1 : 0);
+        await _allClients.DidNotReceiveWithAnyArgs().SendCoreAsync(default!, default!, default);
+    }
+
+    [HumansTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PolygonWrite_BroadcastPreparationFailure_ReturnsSavedResult(bool restore)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        Guid historyId = default;
+        if (restore)
+        {
+            await _service.SaveCampPolygonAsync(_campSeasonId, Square, 10, _userId, cancellationToken: ct);
+            historyId = (await CityPlanningDb.CampPolygonHistories.SingleAsync(ct)).Id;
+        }
+        var season = await _campService.GetCampSeasonByIdAsync(_campSeasonId, ct);
+        _campService.GetCampSeasonByIdAsync(_campSeasonId, Arg.Any<CancellationToken>())
+            .Returns(_ => season, _ => throw new IOException("Camp directory unavailable"));
         var controller = CreateController(CampsRoles.CampsAdmin);
 
         var result = restore

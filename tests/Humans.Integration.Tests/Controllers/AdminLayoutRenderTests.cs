@@ -52,7 +52,7 @@ public partial class AdminLayoutRenderTests(HumansTestDatabase database) : Integ
     private static (string Url, string Site)[] AdminPages =>
     [
         ("/AuditLog", "Humans.AuditLog — Views/AuditLog/_ViewStart"),
-        ("/Finance", "Humans.Budget — Views/BudgetAdmin/_ViewStart"),
+        ("/Budget/Admin", "Humans.Budget — Views/BudgetAdmin/_ViewStart"),
         ("/Campaigns/Admin", "Humans.Campaigns — Views/Campaign/_ViewStart"),
         ("/Cantina/Roster", "Humans.Cantina — Views/Cantina/_ViewStart"),
         ("/Legal/Admin/Documents", "Humans.Consent — Views/AdminLegalDocuments/_ViewStart"),
@@ -65,7 +65,7 @@ public partial class AdminLayoutRenderTests(HumansTestDatabase database) : Integ
         ("/Governance/BoardVoting", "Humans.Governance — Views/Governance/BoardVoting/_ViewStart"),
         ("/Governance/Applications/Admin", "Humans.Governance — inline override in Applications/Admin.cshtml"),
         ("/MailerLite/Admin", "Humans.MailerLite — Views/MailerLite/Admin/_ViewStart"),
-        ("/OnboardingReview", "Humans.Onboarding — Views/OnboardingReview/_ViewStart"),
+        ("/Consent/ReviewQueue", "Humans.Consent — Views/ConsentReviewQueue/_ViewStart"),
         ("/Scanner", "Humans.Scanner — Views/Scanner/_ViewStart"),
         ("/Shifts/Dashboard", "Humans.Shifts — Views/ShiftDashboard/_ViewStart"),
         ("/Shifts/Summary", "Humans.Shifts — inline override in Shifts/Summary.cshtml"),
@@ -163,7 +163,6 @@ public partial class AdminLayoutRenderTests(HumansTestDatabase database) : Integ
         response.StatusCode.Should().Be(HttpStatusCode.OK);
         var html = await response.Content.ReadAsStringAsync(ct);
 
-        html.Should().Contain("Open feedback", "Feedback's AdminOnly contributed tile must render for an Admin");
         html.Should().Contain("Recent activity", "Admin/Index's AdminOnly panel must render for an Admin");
 
         // The tag helper strips the attribute from elements it lets through, so one that keeps it was never bound.
@@ -322,10 +321,6 @@ public partial class AdminLayoutRenderTests(HumansTestDatabase database) : Integ
                 BuildStartOffset: -14,
                 EventEndOffset: 6,
                 StrikeEndOffset: 9,
-                FirstCrewStartOffset: -25,
-                SetupWeekStartOffset: -16,
-                PreEventWeekStartOffset: -9,
-                FinishingWeekendStartOffset: -4,
                 EarlyEntryCapacity: new Dictionary<int, int>(),
                 BarriosEarlyEntryAllocation: null,
                 EarlyEntryClose: null));

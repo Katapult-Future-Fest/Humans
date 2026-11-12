@@ -149,7 +149,6 @@
   <data name="Expenses_Flash_InvalidApprovalInput" xml:space="preserve"><value>Ungültige Genehmigungsdaten.</value></data>
   <!-- Submitter expense-edit page -->
   <data name="Expenses_EditReport" xml:space="preserve"><value>Ausgabenbericht bearbeiten</value></data>
-  <data name="Expenses_BreadcrumbNavigation" xml:space="preserve"><value>Brotkrümelnavigation</value></data>
   <data name="Expenses_Edit" xml:space="preserve"><value>Bearbeiten</value></data>
   <data name="Expenses_ReportHeader" xml:space="preserve"><value>Berichtskopf</value></data>
   <data name="Expenses_BudgetCategory" xml:space="preserve"><value>Budgetkategorie</value></data>
@@ -306,4 +305,6 @@
   <data name="Expenses_SubjectHelp" xml:space="preserve"><value>Pflichtfeld. Gib den Namen des Projekts an, für das die Ausgabe anfällt, z. B. deines Kunstprojekts.</value></data>
   <data name="Expenses_Validation_SubjectRequired" xml:space="preserve"><value>Bitte gib vor dem Absenden einen Betreff (den Projektnamen) an.</value></data>
   <data name="Expenses_Validation_AmountPrecision" xml:space="preserve"><value>Gib einen Betrag mit höchstens zwei Nachkommastellen ein.</value></data>
+  <data name="Expenses_Flash_DraftSavedFollowupFailed" xml:space="preserve"><value>Der Entwurf wurde gespeichert, aber die Anfrage konnte nicht abgeschlossen werden. Prüfe ihn, bevor du fortfährst.</value></data>
+  <data name="Expenses_Flash_DraftOutcomeUnknown" xml:space="preserve"><value>Es konnte nicht bestätigt werden, ob der Entwurf gespeichert wurde. Prüfe die vorhandenen Berichte, bevor du einen weiteren Entwurf erstellst.</value></data>
 </root>

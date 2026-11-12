@@ -43,7 +43,10 @@ Repository: `IShiftManagementRepository`.
 
 | Cache Key | TTL | Read | Write | Invalidate |
 |-----------|-----|------|-------|------------|
-| `dashboard-overall-coverage` | 5 min | yes | no | yes (via `EvictDashboardCaches`, on EventSettings change) |
+| `dashboard-overview:{eventId}:{period}` (`OverviewCacheKey`) | 5 min sliding | yes | yes | yes (via `EvictDashboardCaches`) |
+| `dashboard-coordinator-activity:{eventId}:{period}` (`CoordinatorActivityCacheKey`) | 5 min sliding | yes | yes | yes (via `EvictDashboardCaches`) |
+| `dashboard-trends:{eventId}:{window}:{period}` (`TrendsCacheKey`) | 5 min sliding | yes | yes | yes (via `EvictDashboardCaches`) |
+| `dashboard-overall-coverage` | 5 min sliding | yes | yes | yes (via `EvictDashboardCaches`, on EventSettings change) |
 
 Cross-section calls via `IAuditLogService`, `IAdminAuthorizationService`,
 plus `IServiceProvider` for cycle-breaking, which
@@ -76,7 +79,7 @@ Repositories: `IShiftManagementRepository`, `IVolunteerTrackingRepository`.
 | VolunteerEventProfiles | R/W (via repo, incl. GDPR erasure) |
 | VolunteerTagPreferences | R/W (via repo, incl. GDPR erasure) |
 | GeneralAvailability | R/W (via `IVolunteerTrackingRepository`; R for GDPR export, W for GDPR erasure) |
-| VolunteerBuildStatuses | W (via `IVolunteerTrackingRepository`, GDPR erasure) |
+| VolunteerBuildStatuses | R/W (via `IVolunteerTrackingRepository`; R for GDPR export, W for GDPR erasure) |
 
 Cross-section calls via `IShiftManagement`, `ISettingsService` (via
 `EventCalendarResolver`, nobodies-collective/Humans#1630),
@@ -90,6 +93,15 @@ signups; Cancelled/Bailed/NoShow history excluded). `EraseForUserAsync`
 event profile, availability/build-status rows (via
 `IVolunteerTrackingRepository.DeleteVolunteerTrackingForUserAsync`), and
 shift-tag preferences. No `IMemoryCache`.
+
+### ShiftSignupNotices (constructed by ShiftSignupService, not DI-registered)
+
+No repository, no `IMemoryCache`, no table access. Post-save notice delivery for signups: the volunteer's
+assignment notice and the team coordinators' coverage-gap and signup-change notices. A lookup or channel failure
+is logged and never changes the saved signup outcome. Cross-section calls via `INotificationEmitter`,
+`IUserService` (recipient culture), `EventCalendarResolver` (gate-opening date, via `ISettingsService`), and
+`ITeamService` (coordinator ids, lazy-resolved through `IServiceProvider` to keep the TeamService constructor
+cycle open).
 
 ### VolunteerTrackingService (Scoped)
 
@@ -167,13 +179,10 @@ Both cache instances are surfaced on `/Debug/CacheStats`.
 
 ### BurnSettingsService (Scoped)
 
-Repository: `IShiftManagementRepository` (read-only — fetches `EventSettings`).
+No repository, no tables. Reads through the section's `EventCalendarResolver`, which composes
+`ISettingsService`'s event dates with Shifts' own build sub-periods.
 
-| Table | R/W |
-|-------|-----|
-| EventSettings | R |
-
-Read-only adapter mapping `EventSettings` → `BurnSettingsInfo` DTO at the
+Read-only adapter exposing the composed `BurnSettingsInfo` DTO at the
 section boundary. Exposes `IBurnSettingsService` for cross-section
 consumers that need active-event metadata without coupling to the full
 shifts surface. No cache (single active row, cold path).
@@ -226,3 +235,91 @@ Stateless calculators / projections — no DI dependencies, no DB access.
 ---
 
 
+
+### ShiftBrowseReader (internal, owned by ShiftManagementService)
+
+Repository: `IShiftManagementRepository`. Assembles urgent/general browse rows
+through the existing event calendar resolver, urgency ranking and department
+aggregation helpers. Resolves Teams, Users and Auth lazily through the existing
+service provider; owns unchanged coordinator/approval read predicates used by
+browse eligibility. Shared shift/rota projection also serves existing management
+reads. No writes, cache or separate DI registration.
+
+### ShiftDashboardMetrics (internal, owned by ShiftManagementService)
+
+Repository: `IShiftManagementRepository`. Computes the dashboard overview, trends and stale-pending
+figures. Read-only; no DI registration. `ShiftManagementService` caches its results; this class holds
+no `IMemoryCache`.
+
+| Table | R/W |
+|-------|-----|
+| Shifts | R |
+| Rotas | R |
+| ShiftSignups | R (status counts, confirmed counts per shift, created-at window, stale pending) |
+| EventSettings | R |
+
+Cross-section reads, lazy-resolved through `IServiceProvider`: `ITeamService`, `ITicketService`,
+`IUserService`; `IClock` for the windows.
+
+### ShiftCoordinatorActivity (internal, owned by ShiftManagementService)
+
+Repository: `IShiftManagementRepository`. Computes the per-coordinator activity rows for the
+dashboard. Read-only; no DI registration, no cache of its own (the owner caches under
+`dashboard-coordinator-activity:{eventId}:{period}`).
+
+| Table | R/W |
+|-------|-----|
+| Rotas | R |
+| Shifts | R |
+| ShiftSignups | R (pending counts per team) |
+
+Cross-section reads, lazy-resolved through `IServiceProvider`: `ITeamService` (coordinators),
+`IUserService` (display names).
+
+### ShiftCoverageReports (internal, owned by ShiftManagementService)
+
+Repository: `IShiftManagementRepository`. Staffing snapshot and department coverage figures.
+Read-only; no DI registration, no cache of its own (the owner caches
+`dashboard-overall-coverage`).
+
+| Table | R/W |
+|-------|-----|
+| Rotas | R |
+| Shifts | R |
+| ShiftSignups | R (confirmed counts per shift) |
+| EventSettings | R |
+
+Cross-section reads via `ITeamService`, lazy-resolved through `IServiceProvider`.
+
+### ShiftCampSummary (internal, owned by ShiftManagementService)
+
+Repository: `IShiftManagementRepository`. The read-only shift summary by camp. Confirmed signup
+totals come from `GetConfirmedUserShiftTotalsAsync`; camp labels and the active-camp roster from
+`ICampService`, display names from `IUserService`, team scoping from `ITeamService` — all lazy-resolved
+through `IServiceProvider` and stitched in memory. No DI registration, no cache.
+
+| Table | R/W |
+|-------|-----|
+| ShiftSignups | R (confirmed totals per user) |
+| Shifts | R |
+| Rotas | R |
+| EventSettings | R |
+
+### ShiftSignupPersonalData (internal, owned by ShiftSignupService)
+
+Repositories: `IShiftManagementRepository`, `IVolunteerTrackingRepository`. Builds the member's GDPR
+export slices (`ShiftSignups`, `VolunteerEventProfiles`, `GeneralAvailability`,
+`VolunteerBuildStatuses`, `ShiftTagPreferences`) behind `ShiftSignupService`'s
+`IUserDataContributor`. Read-only; no DI registration, no cache.
+
+| Table | R/W |
+|-------|-----|
+| ShiftSignups | R (per account in the merge chain, with shift, rota and event settings) |
+| EventSettings | R |
+| VolunteerEventProfiles | R |
+| VolunteerTagPreferences | R |
+| GeneralAvailability | R (via `IVolunteerTrackingRepository`) |
+| VolunteerBuildStatuses | R (via `IVolunteerTrackingRepository`) |
+
+Cross-section calls via `IUserService` (merge chain), `ITeamService` (lazy through
+`IServiceProvider`) and `EventCalendarResolver` (Settings).

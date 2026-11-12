@@ -21,12 +21,13 @@ public sealed class Section : ISection, ISectionChrome, ISectionJobs
 
         services.AddSingleton<INotificationRepository, NotificationRepository>();
 
+        services.AddSingleton<INotificationSourceContributor, RetiredNotificationSources>();
         services.AddSingleton<NotificationSourceRegistry>();
         services.AddSingleton<IHostedService>(sp => sp.GetRequiredService<NotificationSourceRegistry>());
 
-        // A separate type from NotificationService so TeamService and RoleAssignmentService can take
-        // INotificationEmitter without a DI cycle. Only ValidateOnBuild at startup catches a regression.
-        services.AddScoped<INotificationEmitter, NotificationEmitter>();
+        // Only ValidateOnBuild at startup catches a regression of the emitter's DI-cycle break.
+        services.AddScoped<NotificationEmitter>();
+        services.AddScoped<INotificationEmitter>(sp => sp.GetRequiredService<NotificationEmitter>());
         services.AddScoped<NotificationService>();
         services.AddScoped<INotificationService>(sp => sp.GetRequiredService<NotificationService>());
         services.AddScoped<IUserMerge>(sp => sp.GetRequiredService<NotificationService>());

@@ -79,30 +79,26 @@ internal sealed class MailerLiteAudienceSyncService(
                 "Audience {Audience}: dropped {Count} candidates with no notification-target email",
                 audience.Key, droppedNoEmail);
 
-        var groups = await ml.ListGroupsAsync(ct);
-        var group = groups.FirstOrDefault(g => string.Equals(g.Name, audience.MailerLiteGroupName, StringComparison.Ordinal))
+        var snapshot = await BuildSnapshotAsync(ct);
+        var group = snapshot.Groups.FirstOrDefault(g => string.Equals(g.Name, audience.MailerLiteGroupName, StringComparison.Ordinal))
             ?? await ml.CreateGroupAsync(audience.MailerLiteGroupName, ct);
 
-        // Single snapshot reused for diff + apply; per-write methods don't invalidate the subscriber cache.
-        var subscribers = new List<MailerLiteSubscriber>();
-        await foreach (var s in ml.ListSubscribersAsync(ct)) subscribers.Add(s);
-        var byEmail = subscribers.ToDictionary(s => MailerLiteEmailNormalization.Normalize(s.Email), s => s, StringComparer.Ordinal);
-        var currentGroupMemberIds = subscribers
+        var currentGroupMemberIds = snapshot.ByEmail.Values
             .Where(s => s.GroupIds.Contains(group.Id, StringComparer.Ordinal))
             .Select(s => s.Id)
             .ToHashSet(StringComparer.Ordinal);
 
-        var toBulkImport = new List<string>();
-        var toAssign = new List<string>();
+        var toBulkImport = new Dictionary<string, string>(StringComparer.Ordinal);
+        var toAssign = new HashSet<string>(StringComparer.Ordinal);
         var keepSubscriberIds = new HashSet<string>(StringComparer.Ordinal);
         int excluded = 0, alreadyAssigned = 0;
 
         foreach (var (_, email) in userEmailMap)
         {
             var norm = MailerLiteEmailNormalization.Normalize(email);
-            if (!byEmail.TryGetValue(norm, out var sub))
+            if (!snapshot.ByEmail.TryGetValue(norm, out var sub))
             {
-                toBulkImport.Add(email);
+                toBulkImport.TryAdd(norm, email);
                 continue;
             }
             if (sub.IsSuppressed)
@@ -125,7 +121,7 @@ internal sealed class MailerLiteAudienceSyncService(
         {
             try
             {
-                var bulk = await ml.BulkImportSubscribersToGroupAsync(group.Id, toBulkImport, ct);
+                var bulk = await ml.BulkImportSubscribersToGroupAsync(group.Id, toBulkImport.Values.ToList(), ct);
                 created = bulk.Created;
                 errors += bulk.Errors;
             }
@@ -145,7 +141,7 @@ internal sealed class MailerLiteAudienceSyncService(
             }
             catch (Exception ex)
             {
-                logger.LogWarning(ex, "Assign failed for {Sub} in {Audience}", subId, audience.Key);
+                logger.LogError(ex, "Assign failed for {Sub} in {Audience}", subId, audience.Key);
                 errors++;
             }
         }
@@ -159,7 +155,7 @@ internal sealed class MailerLiteAudienceSyncService(
             }
             catch (Exception ex)
             {
-                logger.LogWarning(ex, "Unassign failed for {Sub} in {Audience}", subId, audience.Key);
+                logger.LogError(ex, "Unassign failed for {Sub} in {Audience}", subId, audience.Key);
                 errors++;
             }
         }

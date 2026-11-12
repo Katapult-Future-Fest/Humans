@@ -31,7 +31,7 @@ internal partial interface IUserRepository
 
     /// <summary>
     /// Account-merge fold: re-FKs source rows to target. A shared address collapses onto the
-    /// target's row (IsVerified OR-combined); moved rows lose IsPrimary and IsGoogle so the
+    /// target's row (IsVerified OR-combined); moved rows lose IsPrimary so the
     /// target's selections stand.
     /// </summary>
     Task ReassignUserEmailsToUserAsync(
@@ -56,10 +56,6 @@ internal partial interface IUserRepository
     /// <summary>Rows matching any of <paramref name="emails"/>, case-insensitive, read-only.</summary>
     Task<IReadOnlyList<UserEmail>> GetUserEmailsByEmailsAsync(
         IReadOnlyCollection<string> emails, CancellationToken ct = default);
-
-    /// <summary>userId → verified notification-target email; with several, one is picked arbitrarily.</summary>
-    Task<Dictionary<Guid, string>> GetAllNotificationTargetUserEmailsAsync(
-        CancellationToken ct = default);
 
     Task<IReadOnlyList<Guid>> GetUserIdsByUserEmailPrefixAndSuffixAsync(
         string prefix,

@@ -1,4 +1,6 @@
 using Humans.GoogleIntegration.Contracts;
+using Humans.Camps.Controllers;
+using Microsoft.AspNetCore.Mvc;
 using Humans.Notifications.Contracts;
 using AwesomeAssertions;
 using Humans.Users.Contracts;
@@ -343,7 +345,7 @@ public sealed class CampRoleServiceTests : CampsTestHarness
             .Returns(new CampMemberLookup(season.Id, member.UserId, CampMemberStatus.Active));
         _userService.GetUserInfoAsync(member.UserId, Arg.Any<CancellationToken>())
             .Returns(new ValueTask<UserInfo?>(UserInfo.Create(
-                new User { Id = member.UserId, PreferredLanguage = "es" }, [], [], [], null, [])));
+                new User { Id = member.UserId, PreferredLanguage = "es" }, [], [], null)));
         if (lookupFails)
             _userService.GetUserInfoAsync(member.UserId, Arg.Any<CancellationToken>())
                 .Returns(ValueTask.FromException<UserInfo?>(new IOException("Language lookup unavailable")));
@@ -356,6 +358,31 @@ public sealed class CampRoleServiceTests : CampsTestHarness
             ? $"You were assigned the {def.Name} role."
             : $"Se te ha asignado el rol {def.Name}.");
         ((IReadOnlyList<Guid>)notice[4]!).Should().ContainSingle().Which.Should().Be(member.UserId);
+        (await CampsDb.CampRoleAssignments.AsNoTracking().SingleAsync(ct)).CampMemberId.Should().Be(member.Id);
+    }
+
+    [HumansFact]
+    public async Task Assign_notice_routes_merged_member_to_live_recipient()
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var (_, season) = await SeedCampWithSeasonAsync();
+        var member = await SeedActiveMemberAsync(season.Id);
+        var def = await SeedDefinitionAsync();
+        var liveUserId = Guid.NewGuid();
+        _campAccess.GetCampMemberStatusAsync(member.Id, Arg.Any<CancellationToken>())
+            .Returns(new CampMemberLookup(season.Id, member.UserId, CampMemberStatus.Active));
+        _userService.GetUserInfoAsync(member.UserId, Arg.Any<CancellationToken>())
+            .Returns(new ValueTask<UserInfo?>(UserInfo.Create(
+                new User { Id = liveUserId, PreferredLanguage = "es" }, [], [], null)));
+
+        var outcome = await _service.AssignAsync(season.Id, def.Id, member.Id, _actorUserId, ct);
+
+        outcome.Should().Be(AssignCampRoleOutcome.Assigned);
+        var notice = Notifier.ReceivedCalls().Should().ContainSingle().Subject.GetArguments();
+        notice[0].Should().Be(CampsNotificationSources.CampRoleAssigned);
+        notice[3].Should().Be($"Se te ha asignado el rol {def.Name}.");
+        ((IReadOnlyList<Guid>)notice[4]!).Should().ContainSingle().Which.Should().Be(liveUserId);
+        notice[10].Should().Be(CancellationToken.None);
         (await CampsDb.CampRoleAssignments.AsNoTracking().SingleAsync(ct)).CampMemberId.Should().Be(member.Id);
     }
 
@@ -537,6 +564,7 @@ public sealed class CampRoleServiceTests : CampsTestHarness
     {
         var (camp, season) = await SeedCampWithSeasonAsync(year: 2026);
         var consent = await SeedDefinitionAsync(slotCount: 2, minimumRequired: 1);
+        consent.SortOrder = -1;
         // minimumRequired: 0 — excluded from the compliance report, but the directory shows ALL active roles.
         await SeedDefinitionAsync("Power", slotCount: 3, minimumRequired: 0);
         var member = await SeedActiveMemberAsync(season.Id);
@@ -553,7 +581,7 @@ public sealed class CampRoleServiceTests : CampsTestHarness
         summaries.Should().ContainKey(season.Id);
         var rows = summaries[season.Id];
         rows.Should().HaveCount(2);
-        rows.Should().ContainEquivalentOf(new CampDirectoryRoleSummary("Consent Lead", 1, 2));
+        rows.Should().ContainEquivalentOf(new CampDirectoryRoleSummary("Consent Lead", 1, 2) { SortOrder = -1 });
         rows.Should().ContainEquivalentOf(new CampDirectoryRoleSummary("Power", 0, 3));
     }
 
@@ -572,11 +600,11 @@ public sealed class CampRoleServiceTests : CampsTestHarness
     }
 
     [HumansFact]
-    public async Task BuildComplianceMatrix_joins_assignees_by_definition_id_with_columns_in_sort_order()
+    public async Task Compliance_joins_assignees_by_definition_id_and_orders_columns_with_their_cells()
     {
         var (camp, season) = await SeedCampWithSeasonAsync(year: 2026);
         // Sort order puts "LNT" before "Consent Lead" regardless of name.
-        var consent = await SeedDefinitionAsync(slotCount: 2, minimumRequired: 1);
+        var consent = await SeedDefinitionAsync(slotCount: 2, minimumRequired: 2);
         var lnt = await SeedDefinitionAsync("LNT", slotCount: 1, minimumRequired: 1);
         lnt.SortOrder = -5;
         await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
@@ -599,7 +627,7 @@ public sealed class CampRoleServiceTests : CampsTestHarness
         var matrix = await _service.BuildComplianceMatrixAsync(Event2026.EventSettingsId, Xunit.TestContext.Current.CancellationToken);
 
         matrix!.Event.Should().Be(Event2026);
-        matrix.Roles.Select(r => r.Name).Should().Equal("LNT", "Consent Lead");
+        matrix.Roles.Select(r => (r.Name, r.SortOrder)).Should().BeEquivalentTo(new[] { ("LNT", -5), ("Consent Lead", 0) });
 
         var row = matrix.Rows.Single();
         row.CampName.Should().Be(season.Name);
@@ -607,8 +635,21 @@ public sealed class CampRoleServiceTests : CampsTestHarness
         row.JoinedMemberCount.Should().Be(7);
         row.TargetMemberCount.Should().Be(25);
         row.AssigneeUserIdsByRole.Should().HaveCount(2);
-        row.AssigneeUserIdsByRole[0].Should().BeEmpty();
-        row.AssigneeUserIdsByRole[1].Should().Equal(member.UserId);
+        row.AssigneeUserIdsByRole[matrix.Roles.ToList().FindIndex(role => role.Id == lnt.Id)].Should().BeEmpty();
+        row.AssigneeUserIdsByRole[matrix.Roles.ToList().FindIndex(role => role.Id == consent.Id)].Should().Equal(member.UserId);
+
+        var camps = Substitute.For<ICampService>();
+        camps.GetSettingsAsync(Arg.Any<CancellationToken>())
+            .Returns(new CampSettingsInfo(2026, [2026]) { Events = [Event2026] });
+        var controller = new CampComplianceController(camps, _service, _userService);
+        var result = await controller.Compliance(Event2026.EventSettingsId, Xunit.TestContext.Current.CancellationToken);
+        var model = result.Should().BeOfType<ViewResult>().Which.Model.Should().BeOfType<CampComplianceViewModel>().Which;
+        model.Roles.Select(role => role.Name).Should().Equal("LNT", "Consent Lead");
+        model.Rows.Single().Cells[0].AssigneeUserIds.Should().BeEmpty();
+        model.Rows.Single().Cells[0].Shortfall.Should().Be(1);
+        model.Rows.Single().Cells[1].AssigneeUserIds.Should().Equal(member.UserId);
+        model.Rows.Single().Cells[1].Shortfall.Should().Be(1);
+        model.Roles.Select(role => role.MinimumRequired).Should().Equal(1, 2);
     }
 
     [HumansFact]
@@ -662,25 +703,6 @@ public sealed class CampRoleServiceTests : CampsTestHarness
         var matrix = await _service.BuildComplianceMatrixAsync(Event2026.EventSettingsId, Xunit.TestContext.Current.CancellationToken);
 
         matrix!.Rows.Single().AssigneeUserIdsByRole.Single().Should().BeEmpty();
-    }
-
-    [HumansFact]
-    public async Task RemoveAllForMember_deletes_all_assignments_for_one_member()
-    {
-        var (_, season) = await SeedCampWithSeasonAsync();
-        var def1 = await SeedDefinitionAsync();
-        var def2 = await SeedDefinitionAsync("LNT");
-        var member = await SeedActiveMemberAsync(season.Id);
-
-        await CampsDb.CampRoleAssignments.AddRangeAsync(
-            new CampRoleAssignment { Id = Guid.NewGuid(), CampSeasonId = season.Id, CampRoleDefinitionId = def1.Id, CampMemberId = member.Id, AssignedAt = Clock.GetCurrentInstant(), AssignedByUserId = _actorUserId },
-            new CampRoleAssignment { Id = Guid.NewGuid(), CampSeasonId = season.Id, CampRoleDefinitionId = def2.Id, CampMemberId = member.Id, AssignedAt = Clock.GetCurrentInstant(), AssignedByUserId = _actorUserId });
-        await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
-
-        var deletedCount = await _service.RemoveAllForMemberAsync(member.Id, _actorUserId, Xunit.TestContext.Current.CancellationToken);
-
-        deletedCount.Should().Be(2);
-        (await CampsDb.CampRoleAssignments.CountAsync(Xunit.TestContext.Current.CancellationToken)).Should().Be(0);
     }
 
     [HumansFact]

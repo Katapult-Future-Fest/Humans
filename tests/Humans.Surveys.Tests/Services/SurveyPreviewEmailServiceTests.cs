@@ -18,6 +18,10 @@ public sealed class SurveyPreviewEmailServiceTests
     [HumansTheory]
     [Xunit.InlineData("missing-survey")]
     [Xunit.InlineData("missing-email")]
+    [Xunit.InlineData("null-email")]
+    [Xunit.InlineData("empty-email")]
+    [Xunit.InlineData("blank-email")]
+    [Xunit.InlineData("blank-email-send")]
     [Xunit.InlineData("queue-failure")]
     public async Task Preview_failures_return_refusal_keys_without_localized_exceptions(string failure)
     {
@@ -26,7 +30,6 @@ public sealed class SurveyPreviewEmailServiceTests
         var surveyId = Guid.NewGuid();
         var userId = Guid.NewGuid();
         var surveys = Substitute.For<ISurveyService>();
-        var userEmails = Substitute.For<IUserEmailService>();
         var users = Substitute.For<IUserService>();
         var emailService = Substitute.For<IEmailService>();
         var editable = new SurveyEditInput(
@@ -36,33 +39,39 @@ public sealed class SurveyPreviewEmailServiceTests
         if (!string.Equals(failure, "missing-survey", StringComparison.Ordinal))
             surveys.GetForEditAsync(surveyId, Arg.Any<CancellationToken>())
                 .Returns(new SurveyDetail(surveyId, SurveyStatus.Draft, editable, userId));
-        userEmails.GetNotificationTargetEmailsAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<Guid, string>());
-        if (string.Equals(failure, "queue-failure", StringComparison.Ordinal))
+
+        if (failure is not ("missing-survey" or "missing-email"))
         {
-            userEmails.GetNotificationTargetEmailsAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-                .Returns(new Dictionary<Guid, string> { [userId] = "author@example.org" });
             users.GetUserInfoAsync(userId, Arg.Any<CancellationToken>())
                 .Returns(new UserInfo(
                     userId, "Author", false, "fr", null, Instant.FromUnixTimeSeconds(0),
                     null, null, null, null, null, null,
-                    null, null, null, [], [], [], null, []));
+                    null, null, null, [], [], null) with
+                {
+                    IdentityEmailColumn = failure switch
+                    {
+                        "null-email" => null,
+                        "empty-email" => "",
+                        "blank-email" or "blank-email-send" => " \t ",
+                        _ => "author@example.org"
+                    }
+                });
             emailService.SendAsync(Arg.Any<EmailMessage>(), Arg.Any<CancellationToken>())
                 .Returns(Task.FromException(new IOException("Outbox unavailable")));
         }
         var sut = new SurveyPreviewEmailService(
-            surveys, userEmails, users, emailService, TestSurveysEmails.Create(),
+            surveys, users, emailService, TestSurveysEmails.Create(),
             Substitute.For<IEmailPreviewService>(),
             new SurveyPreviewTokenProvider(DataProtectionProvider.Create("survey-preview-error-language-tests")),
             NullLogger<SurveyPreviewEmailService>.Instance);
-        var errorKey = string.Equals(failure, "queue-failure", StringComparison.Ordinal)
+        var errorKey = failure is "queue-failure" or "blank-email-send"
             ? (await sut.SendToUserAsync(surveyId, userId, ct)).ErrorKey
             : (await sut.PreviewForUserAsync(surveyId, userId, ct)).ErrorKey;
 
         errorKey.Should().Be(failure switch
         {
             "missing-survey" => "Surveys_PreviewNotFound",
-            "missing-email" => "Surveys_PreviewNoEmail",
+            "missing-email" or "null-email" or "empty-email" or "blank-email" or "blank-email-send" => "Surveys_PreviewNoEmail",
             _ => "Surveys_PreviewQueueFailed"
         });
         if (!string.Equals(failure, "queue-failure", StringComparison.Ordinal))
@@ -75,7 +84,6 @@ public sealed class SurveyPreviewEmailServiceTests
         var surveyId = Guid.NewGuid();
         var userId = Guid.NewGuid();
         var surveys = Substitute.For<ISurveyService>();
-        var userEmails = Substitute.For<IUserEmailService>();
         var users = Substitute.For<IUserService>();
         var emailService = Substitute.For<IEmailService>();
         var messages = TestSurveysEmails.Create();
@@ -89,19 +97,18 @@ public sealed class SurveyPreviewEmailServiceTests
             false, null, null, null, null, null, null, []);
         surveys.GetForEditAsync(surveyId, Arg.Any<CancellationToken>())
             .Returns(new SurveyDetail(surveyId, SurveyStatus.Draft, editable, Guid.NewGuid()));
-        userEmails.GetNotificationTargetEmailsAsync(
-                Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<Guid, string> { [userId] = "tester@example.com" });
+
         users.GetUserInfoAsync(userId, Arg.Any<CancellationToken>())
             .Returns(new UserInfo(
                 userId, "Tester", false, "en", null, Instant.FromUnixTimeSeconds(0),
                 null, null, null, null, null, null,
-                null, null, null, [], [], [], null, []));
+                null, null, null, [], [], null) with
+            { IdentityEmailColumn = "tester@example.com" });
         var wrapped = new RenderedEmailPreview(
             "tester@example.com", "Choose our gathering dates", "<html>Branded preview</html>");
         emailPreviews.RenderSystemMessage(Arg.Any<EmailMessage>()).Returns(wrapped);
         var sut = new SurveyPreviewEmailService(
-            surveys, userEmails, users, emailService, messages, emailPreviews, previewTokens,
+            surveys, users, emailService, messages, emailPreviews, previewTokens,
             NullLogger<SurveyPreviewEmailService>.Instance);
 
         var preview = await sut.PreviewForUserAsync(
@@ -128,7 +135,6 @@ public sealed class SurveyPreviewEmailServiceTests
         var surveyId = Guid.NewGuid();
         var userId = Guid.NewGuid();
         var surveys = Substitute.For<ISurveyService>();
-        var userEmails = Substitute.For<IUserEmailService>();
         var users = Substitute.For<IUserService>();
         var emailService = Substitute.For<IEmailService>();
         var messages = TestSurveysEmails.Create();
@@ -142,18 +148,15 @@ public sealed class SurveyPreviewEmailServiceTests
             false, null, null, null, null, null, null, []);
         surveys.GetForEditAsync(surveyId, Arg.Any<CancellationToken>())
             .Returns(new SurveyDetail(surveyId, SurveyStatus.Draft, editable, Guid.NewGuid()));
-        userEmails.GetNotificationTargetEmailsAsync(
-                Arg.Is<IReadOnlyCollection<Guid>>(ids => ids.Count == 1 && ids.Single() == userId),
-                Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<Guid, string> { [userId] = "tester@example.com" });
+
         users.GetUserInfoAsync(userId, Arg.Any<CancellationToken>())
             .Returns(new UserInfo(
                 userId, "Tester", false, "fr", null, Instant.FromUnixTimeSeconds(0),
                 null, null, null, null, null, null,
-                null, null, null, [], [], [], null, []));
+                null, null, null, [], [], null) with
+            { IdentityEmailColumn = "tester@example.com" });
         var sut = new SurveyPreviewEmailService(
             surveys,
-            userEmails,
             users,
             emailService,
             messages,
@@ -207,7 +210,6 @@ public sealed class SurveyPreviewEmailServiceTests
         var surveyId = Guid.NewGuid();
         var userId = Guid.NewGuid();
         var surveys = Substitute.For<ISurveyService>();
-        var userEmails = Substitute.For<IUserEmailService>();
         var users = Substitute.For<IUserService>();
         var emailService = Substitute.For<IEmailService>();
         var messages = TestSurveysEmails.Create();
@@ -230,19 +232,18 @@ public sealed class SurveyPreviewEmailServiceTests
             false, null, null, null, null, null, null, []);
         surveys.GetForEditAsync(surveyId, Arg.Any<CancellationToken>())
             .Returns(new SurveyDetail(surveyId, SurveyStatus.Draft, editable, Guid.NewGuid()));
-        userEmails.GetNotificationTargetEmailsAsync(
-                Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<Guid, string> { [userId] = "tester@example.com" });
+
         users.GetUserInfoAsync(userId, Arg.Any<CancellationToken>())
             .Returns(new UserInfo(
                 userId, "Tester", false, "fr", null, Instant.FromUnixTimeSeconds(0),
                 null, null, null, null, null, null,
-                null, null, null, [], [], [], null, []));
+                null, null, null, [], [], null) with
+            { IdentityEmailColumn = "tester@example.com" });
         emailPreviews.RenderSystemMessage(Arg.Any<EmailMessage>())
             .Returns(call => new RenderedEmailPreview(
                 "tester@example.com", call.Arg<EmailMessage>().Subject, call.Arg<EmailMessage>().HtmlBody));
         var sut = new SurveyPreviewEmailService(
-            surveys, userEmails, users, emailService, messages, emailPreviews, previewTokens,
+            surveys, users, emailService, messages, emailPreviews, previewTokens,
             NullLogger<SurveyPreviewEmailService>.Instance);
 
         await sut.PreviewForUserAsync(

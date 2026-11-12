@@ -1,23 +1,31 @@
 @model DocumentPageViewModel
+@inject Microsoft.AspNetCore.Mvc.Localization.IHtmlLocalizer<WorkgroupsResource> HtmlLocalizer
 @{
     var w = Model.Workgroup;
     var d = Model.Document;
     ViewData["Title"] = d.Title;
-    var categories = d.Comments.Select(c => c.Category).Concat(d.CommentCategories).Distinct().ToList();
+    var comments = d.Comments.OrderBy(c => c.CreatedAt).ToList();
+    var categories = comments.Select(c => c.Category).Concat(d.CommentCategories).Distinct().ToList();
+    var editor = await Component.InvokeAsync(typeof(HumanViewComponent), new
+    {
+        userId = d.UpdatedByUserId ?? d.CreatedByUserId ?? Guid.Empty,
+        link = HumanLink.None,
+    });
+    using var editorWriter = new System.IO.StringWriter();
+    editor.WriteTo(editorWriter, System.Text.Encodings.Web.HtmlEncoder.Default);
+    // Keep the component's template indentation out of localized sentence punctuation.
+    var editorHtml = new Microsoft.AspNetCore.Html.HtmlString(editorWriter.ToString().Trim());
 }
 
-<nav aria-label="@Localizer["Workgroups_BreadcrumbNavigation"]">
-    <ol class="breadcrumb">
-        <li class="breadcrumb-item"><a asp-action="Index">@Localizer["Workgroups_Title"]</a></li>
-        <li class="breadcrumb-item"><a asp-action="Details" asp-route-slug="@w.Slug">@w.Name</a></li>
-        <li class="breadcrumb-item active" aria-current="page">@d.Title</li>
-    </ol>
-</nav>
+@section Crumbs {
+    <a asp-action="Index">@Localizer["Workgroups_Title"]</a>
+    <a asp-action="Details" asp-route-slug="@w.Slug">@w.Name</a>
+    <span>@d.Title</span>
+}
 
-<div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-2">
-    <div>
-        <h1 class="mb-1">@d.Title</h1>
-        <span class="badge @EnumBadgeMap.For(d.Status)">@Localizer.EnumDisplay(d.Status)</span>
+<page-header title="@d.Title">
+    <page-header-subtitle>
+        <status-badge value="@d.Status" localizer="@Localizer" />
         <span class="badge bg-light text-dark border">@Localizer.EnumDisplay(d.Kind)</span>
         @if (Model.IsOpenForComment)
         {
@@ -25,18 +33,18 @@
         }
         @if (d.Disposition is { } disposition)
         {
-            <span class="badge @EnumBadgeMap.For(disposition)">@Localizer.EnumDisplay(disposition)</span>
+            <status-badge value="@disposition" localizer="@Localizer" />
         }
-    </div>
+    </page-header-subtitle>
     @if (Model.CanDoMemberWork && d.Status != WorkgroupDocumentStatus.Delivered)
     {
         <a asp-action="EditDocument" asp-route-slug="@w.Slug" asp-route-id="@d.Id" class="btn btn-sm btn-outline-secondary">
             <i class="fa-solid fa-pen me-1"></i>@SharedLocalizer["Common_Edit"]
         </a>
     }
-</div>
+</page-header>
 
-<div class="text-muted small mb-3">@Localizer["Workgroups_LastEditedBy", Model.DisplayName(d.UpdatedByUserId ?? d.CreatedByUserId), d.UpdatedAt.ToDateTime()]</div>
+<div class="text-muted small mb-3">@HtmlLocalizer["Workgroups_LastEditedBy", editorHtml, d.UpdatedAt.ToDateTime()]</div>
 
 <div class="card mb-3">
     <div class="card-body">
@@ -135,13 +143,13 @@ else if (d.Disposition is { } recorded && !string.IsNullOrWhiteSpace(d.Dispositi
 
 @if (categories.Count == 0)
 {
-    <p class="text-muted">@Localizer["Workgroups_NoComments"]</p>
+    <empty-state>@Localizer["Workgroups_NoComments"]</empty-state>
 }
 else
 {
     @foreach (var category in categories)
     {
-        var inCategory = d.Comments.Where(c => c.Category == category).OrderBy(c => c.CreatedAt).ToList();
+        var inCategory = comments.Where(c => c.Category == category).ToList();
         if (inCategory.Count == 0) { continue; }
         <h3 class="h6 mt-3">@category <span class="badge bg-secondary">@inCategory.Count</span></h3>
         <ul class="list-group mb-3">
@@ -155,9 +163,9 @@ else
                             {
                                 <span class="badge bg-secondary me-1">@Localizer["Workgroups_HiddenByGroup"]</span>
                             }
-                            <span class="text-muted small">@Model.DisplayName(c.AuthorUserId) · @c.CreatedAt.ToDateTime()</span>
+                            <span class="text-muted small"><vc:human user-id="@(c.AuthorUserId ?? Guid.Empty)" link="None" /> · @c.CreatedAt.ToDateTime()</span>
                         </div>
-                        <span class="badge @EnumBadgeMap.For(c.Disposition)">@Localizer.EnumDisplay(c.Disposition)</span>
+                        <status-badge value="@c.Disposition" localizer="@Localizer" />
                     </div>
                     @if (hidden)
                     {

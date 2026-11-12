@@ -23,7 +23,6 @@ public sealed class ProfileServiceTests : ServiceTestHarness
     private readonly ProfileEditorService _editor;
     private readonly IUserRepository _userRepository;
     private readonly IUserManagement _userService = Substitute.For<IUserManagement>();
-    private readonly ICommunicationPreferenceRepository _communicationPreferenceRepository = Substitute.For<ICommunicationPreferenceRepository>();
     private readonly UserService _storageUserService;
     private readonly InMemoryFileStorage _fileStorage = new();
     private readonly IFileStorage _pictureStorage = Substitute.For<IFileStorage>();
@@ -47,7 +46,6 @@ public sealed class ProfileServiceTests : ServiceTestHarness
         _userRepository = new UserRepository(DbFactory, Clock);
         _storageUserService = new UserService(
             _userRepository,
-            _communicationPreferenceRepository,
             AdminAuthorization,
             _pictureStorage,
             Clock,
@@ -272,7 +270,7 @@ public sealed class ProfileServiceTests : ServiceTestHarness
     [HumansTheory]
     [Xunit.InlineData(false)]
     [Xunit.InlineData(true)]
-    public async Task SaveProfileAsync_LostSaveAcknowledgement_PreservesCommittedPicture(bool replacingPicture)
+    public async Task SaveProfileAsync_LostSaveAcknowledgement_PreservesOnlyCommittedPicture(bool replacingPicture)
     {
         var ct = Xunit.TestContext.Current.CancellationToken;
         var userId = Guid.NewGuid();
@@ -280,8 +278,7 @@ public sealed class ProfileServiceTests : ServiceTestHarness
         var options = new DbContextOptionsBuilder<UsersDbContext>(DbOptions)
             .AddInterceptors(new LoseProfileSaveAcknowledgement()).Options;
         var service = new UserService(
-            new UserRepository(new TestDbContextFactory(options), Clock),
-            _communicationPreferenceRepository, AdminAuthorization,
+            new UserRepository(new TestDbContextFactory(options), Clock), AdminAuthorization,
             _pictureStorage, Clock, NullLogger<UserService>.Instance, AuditLog);
         var command = new UserProfileSaveCommand(
             "TestBurner", "Test", "User", null, null, null, null, null, null, null, null, null,
@@ -295,8 +292,31 @@ public sealed class ProfileServiceTests : ServiceTestHarness
         var picture = await _service.GetProfilePictureAsync(profileId, ct);
         picture.Should().NotBeNull();
         picture.Value.Data.Should().Equal(4, 5, 6);
-        if (replacingPicture)
-            _fileStorage.Files[PicKey(profileId, "image/png")].Should().Equal(1, 2, 3);
+        _fileStorage.Files.Keys.Should().ContainSingle().Which.Should().Be(saved.ProfilePictureStorageKey);
+    }
+
+    [HumansTheory]
+    [Xunit.InlineData(false)]
+    [Xunit.InlineData(true)]
+    public async Task SaveProfileAsync_RemovalFailure_DeletesOnlyAnUnreferencedPicture(bool afterCommit)
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var userId = Guid.NewGuid();
+        var profileId = await SeedUserWithProfileAsync(userId, withPicture: true);
+        SaveChangesInterceptor interceptor = afterCommit ? new LoseProfileSaveAcknowledgement() : new RejectUserNameSave();
+        var options = new DbContextOptionsBuilder<UsersDbContext>(DbOptions).AddInterceptors(interceptor).Options;
+        var service = new UserService(new UserRepository(new TestDbContextFactory(options), Clock), AdminAuthorization,
+            _pictureStorage, Clock, NullLogger<UserService>.Instance, AuditLog);
+        var command = new UserProfileSaveCommand(
+            "TestBurner", "Test", "User", null, null, null, null, null, null, null, null, null,
+            null, null, null, null, null, false, UserProfilePictureMutation.Remove, null);
+
+        var save = () => service.SaveProfileAsync(userId, command, null, ct);
+        await save.Should().ThrowAsync<InvalidOperationException>();
+
+        var stored = await Db.Profiles.AsNoTracking().SingleAsync(profile => profile.Id == profileId, ct);
+        stored.ProfilePictureContentType.Should().Be(afterCommit ? null : "image/png");
+        _fileStorage.Files.ContainsKey(PicKey(profileId, "image/png")).Should().Be(!afterCommit);
     }
 
     private sealed class LoseProfileSaveAcknowledgement : SaveChangesInterceptor
@@ -320,7 +340,7 @@ public sealed class ProfileServiceTests : ServiceTestHarness
         repo.GetProfilePictureLocationAsync(profileId, Arg.Any<CancellationToken>())
             .ThrowsAsync(new IOException("Could not verify the committed picture"));
         var service = new UserService(
-            repo, _communicationPreferenceRepository, AdminAuthorization,
+            repo, AdminAuthorization,
             _pictureStorage, Clock, NullLogger<UserService>.Instance, AuditLog);
         var command = new UserProfileSaveCommand(
             "TestBurner", "Test", "User", null, null, null, null, null, null, null, null, null,
@@ -343,11 +363,11 @@ public sealed class ProfileServiceTests : ServiceTestHarness
         var existing = await Db.Profiles.AsNoTracking().FirstAsync(p => p.Id == profileId, Xunit.TestContext.Current.CancellationToken);
         var failingRepo = Substitute.For<IUserRepository>();
         failingRepo.GetByUserIdAsync(userId, Arg.Any<CancellationToken>()).Returns(existing);
+        failingRepo.GetProfilePictureLocationAsync(profileId, Arg.Any<CancellationToken>()).Returns(("image/png", (string?)null));
         failingRepo.UpdateAsync(Arg.Any<Profile>(), Arg.Any<CancellationToken>(), Arg.Any<IReadOnlyList<CVEntry>?>())
             .ThrowsAsync(new InvalidOperationException("Database unavailable"));
         var sut = new UserService(
             failingRepo,
-            _communicationPreferenceRepository,
             AdminAuthorization,
             _pictureStorage,
             Clock,
@@ -375,8 +395,7 @@ public sealed class ProfileServiceTests : ServiceTestHarness
         var options = new DbContextOptionsBuilder<UsersDbContext>(DbOptions)
             .AddInterceptors(new RejectUserNameSave()).Options;
         var sut = new UserService(
-            new UserRepository(new TestDbContextFactory(options), Clock),
-            _communicationPreferenceRepository, AdminAuthorization,
+            new UserRepository(new TestDbContextFactory(options), Clock), AdminAuthorization,
             _pictureStorage, Clock, NullLogger<UserService>.Instance, AuditLog);
         var command = new UserProfileSaveCommand(
             "TestBurner", "Test", "User", null, null, null, null, null, null, null, null, null,
@@ -486,7 +505,6 @@ public sealed class ProfileServiceTests : ServiceTestHarness
         retained.ProfilePictureContentType.Should().Be("image/png");
         retained.ProfilePictureStorageKey.Should().Be(versioned ? key : null);
         _fileStorage.Files.Should().ContainKey(key);
-        await _communicationPreferenceRepository.DidNotReceive().DeleteAllForUserAsync(userId, Arg.Any<CancellationToken>());
 
         await erase();
 
@@ -622,7 +640,7 @@ public sealed class ProfileServiceTests : ServiceTestHarness
                 c.Arg<IReadOnlyList<ProfileLanguage>>(), c.Arg<CancellationToken>()));
         repository.GetOwnerUserIdAsync(profileId, Arg.Any<CancellationToken>())
             .ThrowsAsync(new InvalidOperationException("Owner lookup failed"));
-        var service = new UserService(repository, _communicationPreferenceRepository, AdminAuthorization, _pictureStorage,
+        var service = new UserService(repository, AdminAuthorization, _pictureStorage,
             Clock, NullLogger<UserService>.Instance, AuditLog);
 
         var act = () => service.SaveProfileLanguagesAsync(profileId,
@@ -634,11 +652,31 @@ public sealed class ProfileServiceTests : ServiceTestHarness
 
     private UserService BuildUserServiceWith(IUserRepository userRepository) => new(
         userRepository,
-        _communicationPreferenceRepository,
         AdminAuthorization,
         Substitute.For<IFileStorage>(),
         Clock,
         NullLogger<UserService>.Instance, AuditLog);
+
+    [HumansTheory]
+    [Xunit.InlineData(double.NaN, 0)]
+    [Xunit.InlineData(0, double.PositiveInfinity)]
+    [Xunit.InlineData(90.1, 0)]
+    [Xunit.InlineData(-90.1, 0)]
+    [Xunit.InlineData(0, 180.1)]
+    [Xunit.InlineData(0, -180.1)]
+    public async Task SaveProfileAsync_InvalidCoordinates_ReturnsRefusalWithoutWrites(double latitude, double longitude)
+    {
+        var userId = Guid.NewGuid();
+        await SeedUserAsync(userId);
+        var request = MakeRequest() with { Latitude = latitude, Longitude = longitude };
+
+        var result = await _editor.SaveProfileAsync(userId, request, Xunit.TestContext.Current.CancellationToken);
+
+        result.Succeeded.Should().BeFalse();
+        result.ErrorKey.Should().Be("Users_Profile_InvalidLocation");
+        await _userService.DidNotReceiveWithAnyArgs().SaveProfileAsync(default, default!);
+        (await Db.Profiles.CountAsync(Xunit.TestContext.Current.CancellationToken)).Should().Be(0);
+    }
 
     [HumansFact]
     public async Task SaveProfileAsync_EmptyCvWithoutNoPriorExperienceFlag_ReturnsRefusalWithoutWrites()
@@ -683,27 +721,6 @@ public sealed class ProfileServiceTests : ServiceTestHarness
             Arg.Any<byte[]?>(), Arg.Any<CancellationToken>());
         (await Db.VolunteerHistoryEntries.AsNoTracking().SingleAsync(Xunit.TestContext.Current.CancellationToken))
             .EventName.Should().Be("Existing history");
-    }
-
-    [HumansFact]
-    public async Task SaveProfileAsync_LeavesTheLegacyFoodColumnsUntouched()
-    {
-        var userId = Guid.NewGuid();
-        var profileId = await SeedUserWithProfileAsync(userId);
-        var existing = await Db.Profiles.FirstAsync(profile => profile.Id == profileId, Xunit.TestContext.Current.CancellationToken);
-        existing.DietaryPreference = "Vegan";
-        existing.Allergies = ["Other"];
-        existing.AllergyOtherText = null;
-        await Db.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
-
-        var result = await _editor.SaveProfileAsync(userId, MakeRequest(burnerName: "Named"), Xunit.TestContext.Current.CancellationToken);
-
-        result.Succeeded.Should().BeTrue();
-        var saved = await Db.Profiles.AsNoTracking().FirstAsync(profile => profile.Id == profileId, Xunit.TestContext.Current.CancellationToken);
-        saved.BurnerName.Should().Be("Named");
-        saved.DietaryPreference.Should().Be("Vegan");
-        saved.Allergies.Should().Equal("Other");
-        saved.AllergyOtherText.Should().BeNull();
     }
 
     [HumansTheory]
@@ -846,8 +863,7 @@ public sealed class ProfileServiceTests : ServiceTestHarness
         await Db.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
     }
 
-    private async Task<Guid> SeedUserWithProfileAsync(Guid userId,
-        bool isApproved = false, bool withPicture = false)
+    private async Task<Guid> SeedUserWithProfileAsync(Guid userId, bool withPicture = false)
     {
         await SeedUserAsync(userId);
         var profile = new Profile
@@ -857,7 +873,6 @@ public sealed class ProfileServiceTests : ServiceTestHarness
             BurnerName = "OldName",
             FirstName = "Old",
             LastName = "User",
-            IsApproved = isApproved,
             CreatedAt = Clock.GetCurrentInstant() - Duration.FromDays(1),
             UpdatedAt = Clock.GetCurrentInstant() - Duration.FromDays(1)
         };

@@ -21,9 +21,9 @@ namespace Humans.Calendar.Tests.Services;
 ///
 /// <para>Covers:</para>
 /// <list type="bullet">
-///   <item><see cref="CalendarService.RecurrenceRuleRefusal"/> — rejects malformed
+///   <item><see cref="CalendarRecurrenceRules.RecurrenceRuleRefusal"/> — rejects malformed
 ///     RRULEs so they cannot persist and blow up later occurrence expansion.</item>
-///   <item><see cref="CalendarService.TimezoneRefusal"/> — rejects unknown timezone
+///   <item><see cref="CalendarRecurrenceRules.TimezoneRefusal"/> — rejects unknown timezone
 ///     IDs at the service boundary so non-controller callers can't slip past the
 ///     web-layer guard and crash inside occurrence expansion.</item>
 ///   <item>NodaTime Tzdb contract — <c>GetZoneOrNull</c> returns null for unknown IDs
@@ -40,8 +40,8 @@ public class CalendarServiceValidationTests
     [InlineData(true, false)]
     public async Task EventWithResultAsync_RecurrenceRuleMustFitStorage(bool update, bool oversized)
     {
-        // The 147-position rule is exactly 500 characters; the next position exceeds the limit.
-        var rule = "FREQ=YEARLY;BYSETPOS=" + string.Join(',', Enumerable.Range(1, oversized ? 148 : 147));
+        // With two weekday selectors, 144 positions fill the 500-character column.
+        var rule = "FREQ=YEARLY;BYSETPOS=" + string.Join(',', Enumerable.Range(1, oversized ? 145 : 144)) + ";BYDAY=MO,TU";
         Action parse = () => _ = new Ical.Net.DataTypes.RecurrencePattern(rule);
         parse.Should().NotThrow();
         rule.Length.Should().Be(oversized ? 504 : 500);
@@ -85,10 +85,30 @@ public class CalendarServiceValidationTests
     [InlineData("FREQ=YEARLY;BYDAY=54MO", true, true)]
     [InlineData("FREQ=YEARLY;BYDAY=-54TU", false, false)]
     [InlineData("FREQ=MONTHLY;BYDAY=MO,0SA", true, true)]
+    [InlineData("FREQ= 3 ;COUNT=1", true, false)]
+    [InlineData("FREQ= HOURLY ;COUNT=1", true, true)]
     [InlineData("FREQ=3;COUNT=1", true, false)]
     [InlineData("FREQ=3;COUNT=1", true, true)]
     [InlineData("FREQ=3;COUNT=1", false, false)]
     [InlineData("FREQ=3;COUNT=1", false, true)]
+    [InlineData("FREQ=WEEKLY;BYDAY=1MO", false, false)]
+    [InlineData("FREQ=DAILY;BYDAY=-1TU", true, true)]
+    [InlineData("FREQ=YEARLY;BYWEEKNO=1;BYDAY=1MO", false, true)]
+    [InlineData("FREQ=WEEKLY;BYMONTHDAY=1", true, false)]
+    [InlineData("FREQ=DAILY;BYYEARDAY=1", false, false)]
+    [InlineData("FREQ=WEEKLY;BYYEARDAY=1", true, true)]
+    [InlineData("FREQ=MONTHLY;BYYEARDAY=1", false, true)]
+    [InlineData("FREQ=MONTHLY;BYWEEKNO=1", true, false)]
+    [InlineData("FREQ=MONTHLY;BYSETPOS=1", false, false)]
+    [InlineData("FREQ=DAILY;FREQ=WEEKLY", true, true)]
+    [InlineData("FREQ=DAILY;BYDAY=MO;byday=TU", false, true)]
+    [InlineData("FREQ=DAILY;UNTIL=abcdefgh", true, false)]
+    [InlineData("freq=daily;until= 2026060x ", true, true)]
+    [InlineData("FREQ=DAILY;UNTIL=garbage", false, false)]
+    [InlineData("FREQ=DAILY;UNTIL=2026-06-03", false, true)]
+    [InlineData("FREQ=DAILY;UNTIL=20260603T1000", false, false)]
+    [InlineData("FREQ=DAILY;UNTIL=20260603T100000Zjunk", false, true)]
+    [InlineData("FREQ=DAILY;UNTIL=20260603T100000+0200", false, false)]
     public async Task EventWithResultAsync_InvalidRecurrence_is_rejected_before_persistence(
         string rule, bool allDay, bool update)
     {
@@ -189,9 +209,14 @@ public class CalendarServiceValidationTests
     [InlineData("FREQ=YEARLY;BYDAY=-53SU")]
     [InlineData("FREQ=WEEKLY;BYDAY=TU;COUNT=4")]
     [InlineData("FREQ=WEEKLY;UNTIL=20240201T000000Z")]
+    [InlineData("FREQ=MONTHLY;BYDAY=MO,TU,WE,TH,FR;BYSETPOS=-1")]
+    [InlineData("FREQ=MONTHLY;BYMONTHDAY=1")]
+    [InlineData("FREQ=YEARLY;BYWEEKNO=2;BYDAY=MO")]
+    [InlineData("FREQ=YEARLY;BYMONTH=1;BYSETPOS=1")]
+    [InlineData("FREQ=HOURLY;BYYEARDAY=1;BYSETPOS=1")]
     public void RecurrenceRuleRefusal_valid_input_returns_null(string? rrule)
     {
-        CalendarService.RecurrenceRuleRefusal(rrule).Should().BeNull();
+        CalendarRecurrenceRules.RecurrenceRuleRefusal(rrule).Should().BeNull();
     }
 
     [HumansTheory]
@@ -199,7 +224,7 @@ public class CalendarServiceValidationTests
     [InlineData("FREQ=WEEKLY;BYDAY=XX")]
     public void RecurrenceRuleRefusal_malformed_input_returns_reason(string rrule)
     {
-        CalendarService.RecurrenceRuleRefusal(rrule).Should().Contain("Recurrence rule is malformed");
+        CalendarRecurrenceRules.RecurrenceRuleRefusal(rrule).Should().Contain("Recurrence rule is malformed");
     }
 
     [HumansTheory]
@@ -210,7 +235,7 @@ public class CalendarServiceValidationTests
     [InlineData("UTC")]
     public void TimezoneRefusal_valid_input_returns_null(string? tz)
     {
-        CalendarService.TimezoneRefusal(tz).Should().BeNull();
+        CalendarRecurrenceRules.TimezoneRefusal(tz).Should().BeNull();
     }
 
     [HumansTheory]
@@ -218,7 +243,7 @@ public class CalendarServiceValidationTests
     [InlineData("Not/A/Real/Zone")]
     public void TimezoneRefusal_unknown_input_returns_reason(string tz)
     {
-        CalendarService.TimezoneRefusal(tz).Should().Contain("Recurrence timezone is unknown");
+        CalendarRecurrenceRules.TimezoneRefusal(tz).Should().Contain("Recurrence timezone is unknown");
     }
 
     // The three tests below document the NodaTime Tzdb contract the CalendarController
@@ -389,9 +414,12 @@ public class CalendarServiceValidationTests
     [InlineData("FREQ=DAILY;UNTIL=20260603T100000Z", true)]
     [InlineData("FREQ=DAILY;UNTIL=20260603T100000z", true)]
     [InlineData("freq=daily;until=20260603t100000z", true)]
+    [InlineData("FREQ=DAILY;UNTIL= 20260603T100000Z ", false)]
+    [InlineData("FREQ=DAILY;UNTIL=\t20260603T100000z\t", true)]
+    [InlineData("FREQ= DAILY ;UNTIL=20260603T100000Z", false)]
     public async Task EventWithResultAsync_UTC_until_is_independent_of_case_and_server_timezone(string rule, bool update)
     {
-        CalendarService.RecurrenceRuleRefusal(rule).Should().BeNull();
+        CalendarRecurrenceRules.RecurrenceRuleRefusal(rule).Should().BeNull();
         var repo = Substitute.For<ICalendarRepository>();
         var service = BuildService(repo);
         var start = Instant.FromUtc(2026, 6, 1, 10, 0);
@@ -420,8 +448,10 @@ public class CalendarServiceValidationTests
                 Arg.Any<CancellationToken>());
     }
 
-    [HumansFact]
-    public async Task CreateEventWithResultAsync_DATE_until_persists_the_end_of_that_local_day()
+    [HumansTheory]
+    [InlineData("20260603")]
+    [InlineData(" 20260603 ")]
+    public async Task CreateEventWithResultAsync_DATE_until_persists_the_end_of_that_local_day(string until)
     {
         var repo = Substitute.For<ICalendarRepository>();
         var service = BuildService(repo);
@@ -431,7 +461,7 @@ public class CalendarServiceValidationTests
             new CreateCalendarEventDto(
                 "Madrid daily events", null, null, null, Guid.NewGuid(),
                 start, start + Duration.FromHours(1), false,
-                "FREQ=DAILY;UNTIL=20260603", "Europe/Madrid"),
+                $"FREQ=DAILY;UNTIL={until}", "Europe/Madrid"),
             Guid.NewGuid(), TestContext.Current.CancellationToken);
 
         result.Succeeded.Should().BeTrue(result.ErrorMessage);
@@ -443,6 +473,7 @@ public class CalendarServiceValidationTests
     }
 
     [HumansTheory]
+    [InlineData(" 20260329T023000 ", "Europe/Madrid", 2026, 3, 29, 1, 30)]
     [InlineData("20260329T023000", "Europe/Madrid", 2026, 3, 29, 1, 30)]
     [InlineData("20261025T023000", "Europe/Madrid", 2026, 10, 25, 0, 30)]
     [InlineData("20111229", "Pacific/Apia", 2011, 12, 30, 10, 0)]
@@ -464,6 +495,27 @@ public class CalendarServiceValidationTests
         result.Succeeded.Should().BeTrue(result.ErrorMessage);
         await repo.Received(1).AddAsync(
             Arg.Is<Humans.Calendar.Domain.CalendarEvent>(e => e.RecurrenceUntilUtc == expectedUntil),
+            Arg.Any<CancellationToken>());
+    }
+
+    [HumansTheory]
+    [InlineData("FREQ=DAILY;UNTIL=20260603")]
+    [InlineData("FREQ= DAILY ;UNTIL= 20260603 ")]
+    public async Task CreateEventWithResultAsync_AllDayUntil_preserves_rule_text_and_date_bound(string rule)
+    {
+        var repo = Substitute.For<ICalendarRepository>();
+        var service = BuildService(repo);
+        var day = new LocalDate(2026, 6, 1);
+
+        var result = await service.CreateEventWithResultAsync(
+            new CreateCalendarEventDto("All day", null, null, null, Guid.NewGuid(),
+                null, null, true, rule, null, day, day.PlusDays(1)),
+            Guid.NewGuid(), TestContext.Current.CancellationToken);
+
+        result.Succeeded.Should().BeTrue(result.ErrorMessage);
+        await repo.Received(1).AddAsync(
+            Arg.Is<Humans.Calendar.Domain.CalendarEvent>(e =>
+                e.RecurrenceRule == rule && e.RecurrenceUntilDate == new LocalDate(2026, 6, 4)),
             Arg.Any<CancellationToken>());
     }
 

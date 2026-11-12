@@ -32,8 +32,6 @@ public sealed class CampServiceEarlyEntryTests : CampsTestHarness
         var repo = new CampRepository(CampsDbFactory);
 
         _campRoleService = Substitute.For<ICampRoleService>();
-        _campRoleService.RemoveAllForMemberAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>())
-            .Returns(Task.FromResult(0));
 
         _userService = Substitute.For<IUserService>();
 
@@ -136,8 +134,7 @@ public sealed class CampServiceEarlyEntryTests : CampsTestHarness
             CampsDb.CampSettings.Add(new CampSettings
             {
                 Id = Guid.Parse("00000000-0000-0000-0010-000000000001"),
-                PublicYear = 2026,
-                OpenSeasons = [2026]
+                PublicYear = 2026
             });
             await SaveAllAsync(Xunit.TestContext.Current.CancellationToken);
         }

@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Resources;
 using Humans.Base.Extensions;
 using Humans.Base.Constants;
 using Humans.Tickets.Controllers;
@@ -30,6 +32,59 @@ namespace Humans.Tickets.Tests.Services;
 /// </summary>
 public sealed class TicketTransferServiceTests
 {
+    public enum TransferNotice { Requested, Approved, Rejected }
+
+    [HumansTheory]
+    [Xunit.InlineData(TransferNotice.Requested)]
+    [Xunit.InlineData(TransferNotice.Approved)]
+    [Xunit.InlineData(TransferNotice.Rejected)]
+    public async Task TransferNotices_UseLiveOwnersAndPreserveStoredReceiverContact(TransferNotice notice)
+    {
+        var sender = MakeUser(Guid.NewGuid(), "Current Sender");
+        sender.BurnerName = "Current Sender";
+        sender.PreferredLanguage = "es";
+        var receiver = MakeUser(Guid.NewGuid(), "Current Receiver");
+        receiver.BurnerName = "Current Receiver";
+        receiver.PreferredLanguage = "de";
+        var senderInfo = WrapInUserInfo(sender, null);
+        _userService.GetUserInfoAsync(_senderId, Arg.Any<CancellationToken>()).Returns(senderInfo);
+        _userService.GetUserInfoAsync(_receiverId, Arg.Any<CancellationToken>()).Returns(WrapInUserInfo(receiver, null));
+        var request = MakePending(Guid.NewGuid(), "recorded@example.org");
+        var notices = new TicketTransferNotices(_ticketRepo, _userService, _emailService, _emailMessages,
+            NullLogger<TicketTransferService>.Instance);
+
+        if (notice == TransferNotice.Requested)
+            await notices.NotifyRequestedAsync(request, MakeAttendee(_attendeeId, _orderId, _senderId, TicketAttendeeStatus.Valid),
+                _senderId, Xunit.TestContext.Current.CancellationToken);
+        else
+            await notices.NotifyDecisionAsync(request, notice == TransferNotice.Approved, "Decision reason",
+                Xunit.TestContext.Current.CancellationToken);
+
+        var messages = _emailService.ReceivedCalls().Select(call => call.GetArguments()[0]).Cast<EmailMessage>().ToList();
+        messages.Should().HaveCount(2);
+        var senderMessage = messages.Should().ContainSingle(message => message.UserId == sender.Id).Subject;
+        senderMessage.RecipientEmail.Should().Be(senderInfo.Email);
+        senderMessage.RecipientName.Should().Be("Current Sender");
+        var subjectKey = notice switch
+        {
+            TransferNotice.Requested => "Tickets_TicketTransfer_Email_Requested_Subject",
+            TransferNotice.Approved => "Tickets_TicketTransfer_Email_Completed_Subject",
+            _ => "Tickets_TicketTransfer_Email_Cancelled_Subject"
+        };
+        senderMessage.Subject.Should().Be(Subject(subjectKey, "es"));
+        if (notice == TransferNotice.Requested)
+            messages.Should().ContainSingle(message => message.UserId == null && message.TemplateName == "ticket_transfer_team");
+        else
+        {
+            var receiverMessage = messages.Should().ContainSingle(message => message.UserId == receiver.Id).Subject;
+            receiverMessage.RecipientEmail.Should().Be(request.ReceiverEmail);
+            receiverMessage.RecipientName.Should().Be(request.ReceiverLegalName);
+            receiverMessage.Subject.Should().Be(Subject(subjectKey, "de"));
+        }
+        request.SenderUserId.Should().Be(_senderId);
+        request.ReceiverUserId.Should().Be(_receiverId);
+    }
+
     private static readonly Instant _now = Instant.FromUtc(2026, 5, 5, 10, 0);
     private readonly FakeClock _clock = new(_now);
 
@@ -43,7 +98,6 @@ public sealed class TicketTransferServiceTests
     private readonly ITicketRepository _ticketRepo = Substitute.For<ITicketRepository>();
     private readonly ITicketVendorService _vendor = Substitute.For<ITicketVendorService>();
     private readonly IUserService _userService = Substitute.For<IUserService>();
-    private readonly IUserEmailService _userEmailService = Substitute.For<IUserEmailService>();
     private readonly IEmailService _emailService = Substitute.For<IEmailService>();
     private readonly TicketsEmails _emailMessages = TestTicketsEmails.Create();
     private readonly IAuditLogService _auditLog = Substitute.For<IAuditLogService>();
@@ -60,8 +114,6 @@ public sealed class TicketTransferServiceTests
                 MakeUser(_receiverId, "Alice"),
                 UserFixtures.Profile(
                     burnerName: "Alice", firstName: "Alice", lastName: "Smith")));
-        _userEmailService.GetPrimaryEmailAsync(_receiverId, Arg.Any<CancellationToken>())
-            .Returns("alice@example.com");
 
         // Sender: display name + primary email (for emails).
         _userService.GetUserInfoAsync(_senderId, Arg.Any<CancellationToken>())
@@ -69,8 +121,6 @@ public sealed class TicketTransferServiceTests
                 MakeUser(_senderId, "Bob"),
                 UserFixtures.Profile(
                     burnerName: "Bob", firstName: "Bob", lastName: "Jones")));
-        _userEmailService.GetPrimaryEmailAsync(_senderId, Arg.Any<CancellationToken>())
-            .Returns("bob@example.com");
 
         _transferRepo.GetBySenderAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>())
             .Returns([]);
@@ -78,16 +128,27 @@ public sealed class TicketTransferServiceTests
 
     }
 
-    [HumansFact]
-    public async Task GetConfirmation_ReturnsSummary_ForValidPair()
+    [HumansTheory]
+    [Xunit.InlineData(false, false, "alice@example.com")]
+    [Xunit.InlineData(true, false, "contact@example.com")]
+    [Xunit.InlineData(true, true, "contact@example.com")]
+    public async Task GetConfirmation_ReturnsSummary_ForValidPair(
+        bool hasVerifiedEmail, bool isPrimary, string expectedEmail)
     {
+        _userService.GetUserInfoAsync(_receiverId, Arg.Any<CancellationToken>())
+            .Returns(WrapInUserInfo(
+                MakeUser(_receiverId, "Alice"),
+                UserFixtures.Profile(burnerName: "Alice", firstName: "Alice", lastName: "Smith"),
+                hasVerifiedEmail
+                    ? [new UserEmail { UserId = _receiverId, Email = "contact@example.com", IsVerified = true, IsPrimary = isPrimary }]
+                    : []));
         StubAttendee(TicketAttendeeStatus.Valid, _senderId);
 
         var confirm = await _service.GetConfirmationAsync(_attendeeId, _receiverId, _senderId, Xunit.TestContext.Current.CancellationToken);
 
         confirm.Should().NotBeNull();
         confirm.ReceiverLegalName.Should().Be("Alice Smith");
-        confirm.ReceiverEmail.Should().Be("alice@example.com");
+        confirm.ReceiverEmail.Should().Be(expectedEmail);
         confirm.VendorTicketId.Should().Be("tkt_original");
     }
 
@@ -157,13 +218,105 @@ public sealed class TicketTransferServiceTests
     }
 
     [HumansTheory]
-    [Xunit.InlineData("es", "Solicitud de transferencia de entrada")]
-    [Xunit.InlineData("", "Ticket transfer requested")]
-    [Xunit.InlineData(" ", "Ticket transfer requested")]
-    [Xunit.InlineData("not a culture!", "Ticket transfer requested")]
-    [Xunit.InlineData("fr-FR", "Ticket transfer requested")]
-    public async Task CreateRequest_Persists_Audits_AndEmailsSenderAndTeam(string language, string expectedSubject)
+    [Xunit.InlineData(false, "deleted")]
+    [Xunit.InlineData(true, "deleted")]
+    [Xunit.InlineData(false, "merged")]
+    [Xunit.InlineData(true, "merged")]
+    [Xunit.InlineData(false, "erased")]
+    [Xunit.InlineData(true, "erased")]
+    public async Task ReceiverSelection_RefusesTombstoneWithRetainedContactDetails(bool create, string tombstone)
     {
+        StubAttendee(TicketAttendeeStatus.Valid, _senderId);
+        var receiver = WrapInUserInfo(MakeUser(_receiverId, "Alice"),
+            UserFixtures.Profile(burnerName: "Alice", firstName: "Alice", lastName: "Smith"));
+        receiver = tombstone switch
+        {
+            "deleted" => receiver with { State = UserState.Deleted },
+            "merged" => receiver with { State = UserState.Merged },
+            _ => receiver with { IsGdprAnonymized = true }
+        };
+        _userService.GetUserInfoAsync(_receiverId, Arg.Any<CancellationToken>()).Returns(receiver);
+
+        if (create)
+        {
+            var result = await _service.CreateRequestAsync(
+                new TicketTransferRequestDto(_attendeeId, _receiverId, "Reason"), _senderId,
+                Xunit.TestContext.Current.CancellationToken);
+            result.RefusalKey.Should().Be("Tickets_TicketTransfer_InvalidSelection");
+        }
+        else
+        {
+            var result = await _service.GetConfirmationAsync(_attendeeId, _receiverId, _senderId,
+                Xunit.TestContext.Current.CancellationToken);
+            result.Should().BeNull();
+        }
+
+        await _transferRepo.DidNotReceive().AddAsync(Arg.Any<TicketTransferRequest>(), Arg.Any<CancellationToken>());
+        _auditLog.ReceivedCalls().Should().BeEmpty();
+        _emailService.ReceivedCalls().Should().BeEmpty();
+        _vendor.ReceivedCalls().Should().BeEmpty();
+    }
+
+    [HumansTheory]
+    [Xunit.InlineData(null)]
+    [Xunit.InlineData("")]
+    [Xunit.InlineData(" \t ")]
+    public async Task ReceiverSelection_BlankEmail_RefusesConfirmationAndCreation(string? address)
+    {
+        StubAttendee(TicketAttendeeStatus.Valid, _senderId);
+        var receiver = MakeUser(_receiverId, "Alice");
+        receiver.Email = address;
+        _userService.GetUserInfoAsync(_receiverId, Arg.Any<CancellationToken>())
+            .Returns(WrapInUserInfo(receiver,
+                UserFixtures.Profile(burnerName: "Alice", firstName: "Alice", lastName: "Smith")));
+
+        (await _service.GetConfirmationAsync(_attendeeId, _receiverId, _senderId,
+            Xunit.TestContext.Current.CancellationToken)).Should().BeNull();
+        var result = await _service.CreateRequestAsync(new TicketTransferRequestDto(_attendeeId, _receiverId, "Reason"),
+            _senderId, Xunit.TestContext.Current.CancellationToken);
+
+        result.RefusalKey.Should().Be("Tickets_TicketTransfer_InvalidSelection");
+        await _transferRepo.DidNotReceive().AddAsync(Arg.Any<TicketTransferRequest>(), Arg.Any<CancellationToken>());
+        _auditLog.ReceivedCalls().Should().BeEmpty();
+        _emailService.ReceivedCalls().Should().BeEmpty();
+        _vendor.ReceivedCalls().Should().BeEmpty();
+    }
+
+    [HumansFact]
+    public async Task CreateRequest_PreservesMaximumLengthProfileName_WithinSnapshotColumn()
+    {
+        var firstName = new string('A', 256);
+        var lastName = new string('B', 256);
+        var fullName = $"{firstName} {lastName}";
+        _userService.GetUserInfoAsync(_receiverId, Arg.Any<CancellationToken>())
+            .Returns(WrapInUserInfo(MakeUser(_receiverId, "Alice"),
+                UserFixtures.Profile(burnerName: "Alice", firstName: firstName, lastName: lastName)));
+        StubAttendee(TicketAttendeeStatus.Valid, _senderId);
+
+        var result = await _service.CreateRequestAsync(
+            new TicketTransferRequestDto(_attendeeId, _receiverId, "Going abroad"), _senderId,
+            Xunit.TestContext.Current.CancellationToken);
+
+        result.Transfer!.ReceiverLegalName.Should().Be(fullName);
+        await _transferRepo.Received(1).AddAsync(
+            Arg.Is<TicketTransferRequest>(r => r.ReceiverLegalName == fullName), Arg.Any<CancellationToken>());
+        await using var db = new TicketsDbContext(new DbContextOptionsBuilder<TicketsDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString()).Options);
+        var columnLength = db.Model.FindEntityType(typeof(TicketTransferRequest))!
+            .FindProperty(nameof(TicketTransferRequest.ReceiverLegalName))!.GetMaxLength();
+        columnLength.Should().NotBeNull();
+        fullName.Length.Should().BeLessThanOrEqualTo(columnLength!.Value);
+    }
+
+    [HumansTheory]
+    [Xunit.InlineData("es", "es")]
+    [Xunit.InlineData("", "en")]
+    [Xunit.InlineData(" ", "en")]
+    [Xunit.InlineData("not a culture!", "en")]
+    [Xunit.InlineData("fr-FR", "en")]
+    public async Task CreateRequest_Persists_Audits_AndEmailsSenderAndTeam(string language, string expectedCulture)
+    {
+        var expectedSubject = Subject("Tickets_TicketTransfer_Email_Requested_Subject", expectedCulture);
         using var actorCulture = new CultureScope("fr");
         var sender = MakeUser(_senderId, "Bob");
         sender.PreferredLanguage = language;
@@ -493,16 +646,18 @@ public sealed class TicketTransferServiceTests
     }
 
     [HumansTheory]
-    [Xunit.InlineData("es", "de", "Transferencia de entrada completada", "Ticketübertragung abgeschlossen")]
-    [Xunit.InlineData("", "es", "Ticket transfer complete", "Transferencia de entrada completada")]
-    [Xunit.InlineData(" ", "de", "Ticket transfer complete", "Ticketübertragung abgeschlossen")]
-    [Xunit.InlineData("not a culture!", "fr-FR", "Ticket transfer complete", "Ticket transfer complete")]
-    [Xunit.InlineData("fr-FR", "", "Ticket transfer complete", "Ticket transfer complete")]
-    [Xunit.InlineData("es", " ", "Transferencia de entrada completada", "Ticket transfer complete")]
-    [Xunit.InlineData("es", "not a culture!", "Transferencia de entrada completada", "Ticket transfer complete")]
+    [Xunit.InlineData("es", "de", "es", "de")]
+    [Xunit.InlineData("", "es", "en", "es")]
+    [Xunit.InlineData(" ", "de", "en", "de")]
+    [Xunit.InlineData("not a culture!", "fr-FR", "en", "en")]
+    [Xunit.InlineData("fr-FR", "", "en", "en")]
+    [Xunit.InlineData("es", " ", "es", "en")]
+    [Xunit.InlineData("es", "not a culture!", "es", "en")]
     public async Task Approve_EmailsEachPartyInTheirOwnLanguage(
-        string senderLanguage, string receiverLanguage, string expectedSenderSubject, string expectedReceiverSubject)
+        string senderLanguage, string receiverLanguage, string expectedSenderCulture, string expectedReceiverCulture)
     {
+        var expectedSenderSubject = Subject("Tickets_TicketTransfer_Email_Completed_Subject", expectedSenderCulture);
+        var expectedReceiverSubject = Subject("Tickets_TicketTransfer_Email_Completed_Subject", expectedReceiverCulture);
         using var actorCulture = new CultureScope("fr");
         var sender = MakeUser(_senderId, "Bob");
         sender.PreferredLanguage = senderLanguage;
@@ -527,6 +682,9 @@ public sealed class TicketTransferServiceTests
                 && m.Subject == expectedReceiverSubject),
             Arg.Any<CancellationToken>());
     }
+
+    private static string Subject(string key, string culture) =>
+        new ResourceManager(typeof(TicketsResource)).GetString(key, CultureInfo.GetCultureInfo(culture))!;
 
     [HumansFact]
     public async Task Approve_ReceiverLookupFails_StillEmailsReceiverInEnglish()
@@ -622,6 +780,55 @@ public sealed class TicketTransferServiceTests
         await _emailService.Received(2).SendAsync(
             Arg.Is<EmailMessage>(m => m.TemplateName == "ticket_transfer_completed"),
             Arg.Any<CancellationToken>());
+    }
+
+    [HumansTheory]
+    [Xunit.InlineData(false)]
+    [Xunit.InlineData(true)]
+    public async Task Reissue_PreservesFullReceiverName_WithinAttendeeColumn(bool retry)
+    {
+        var fullName = $"{new string('A', 256)} {new string('B', 256)}";
+        var request = new TicketTransferRequest
+        {
+            Id = Guid.NewGuid(),
+            OriginalTicketAttendeeId = _attendeeId,
+            SenderUserId = _senderId,
+            ReceiverUserId = _receiverId,
+            ReceiverLegalName = fullName,
+            ReceiverEmail = "alice@example.com",
+            SenderReason = "Going abroad",
+            RequestedAt = _now,
+        };
+        if (retry)
+        {
+            request.VendorResult = TicketTransferVendorResult.VoidSucceededIssueFailed;
+            request.VendorHoldId = "hold_123";
+        }
+        _transferRepo.GetByIdAsync(request.Id, Arg.Any<CancellationToken>()).Returns(request);
+        StubAttendee(retry ? TicketAttendeeStatus.Void : TicketAttendeeStatus.Valid, _senderId);
+        _vendor.VoidIssuedTicketAsync("tkt_original", true, Arg.Any<CancellationToken>())
+            .Returns(new VoidIssuedTicketResult("tkt_original", "hold_123"));
+        _vendor.IssueTicketAsync(Arg.Any<IssueTicketRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new VendorTicketDto("tt_new", null, fullName, "alice@example.com", "Full Week", 0m, "valid"));
+        TicketAttendee? reissued = null;
+        _ticketRepo.When(r => r.UpsertAttendeesAsync(
+                Arg.Any<IReadOnlyList<TicketAttendee>>(), Arg.Any<CancellationToken>()))
+            .Do(call => reissued = call.ArgAt<IReadOnlyList<TicketAttendee>>(0)
+                .Single(a => string.Equals(a.VendorTicketId, "tt_new", StringComparison.Ordinal)));
+
+        var result = retry
+            ? await _service.RetryReissueAsync(request.Id, _adminId, null, Xunit.TestContext.Current.CancellationToken)
+            : await _service.ProcessTransferAsync(request.Id, _adminId, null, Xunit.TestContext.Current.CancellationToken);
+
+        result.Succeeded.Should().BeTrue();
+        reissued.Should().NotBeNull();
+        reissued!.AttendeeName.Should().Be(fullName);
+        await using var db = new TicketsDbContext(new DbContextOptionsBuilder<TicketsDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString()).Options);
+        var columnLength = db.Model.FindEntityType(typeof(TicketAttendee))!
+            .FindProperty(nameof(TicketAttendee.AttendeeName))!.GetMaxLength();
+        columnLength.Should().NotBeNull();
+        reissued.AttendeeName.Length.Should().BeLessThanOrEqualTo(columnLength!.Value);
     }
 
     [HumansFact]
@@ -784,6 +991,44 @@ public sealed class TicketTransferServiceTests
             "the void has already committed — an aborted admin request must not cancel the reissue");
         req.VendorResult.Should().Be(TicketTransferVendorResult.Succeeded);
         req.VendorHoldId.Should().BeNull();
+    }
+
+    [HumansTheory]
+    [Xunit.InlineData(false, "")]
+    [Xunit.InlineData(false, " \t ")]
+    [Xunit.InlineData(true, "")]
+    [Xunit.InlineData(true, " \t ")]
+    public async Task AutomatedProcessing_BlankStoredReceiverEmail_DoesNotCallVendorOrChangeState(bool retry, string address)
+    {
+        var request = MakePending(Guid.NewGuid(), address);
+        if (retry)
+        {
+            request.VendorResult = TicketTransferVendorResult.VoidSucceededIssueFailed;
+            request.VendorHoldId = "hold_123";
+        }
+        var originalResult = request.VendorResult;
+        var originalHold = request.VendorHoldId;
+        _transferRepo.GetByIdAsync(request.Id, Arg.Any<CancellationToken>()).Returns(request);
+        _ticketRepo.GetAttendeeByIdAsync(_attendeeId, Arg.Any<CancellationToken>())
+            .Returns(MakeAttendee(_attendeeId, _orderId, _senderId, retry ? TicketAttendeeStatus.Void : TicketAttendeeStatus.Valid));
+        _vendor.VoidIssuedTicketAsync("tkt_original", true, Arg.Any<CancellationToken>())
+            .Returns(new VoidIssuedTicketResult("tkt_original", "hold_123"));
+        _vendor.IssueTicketAsync(Arg.Any<IssueTicketRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new VendorTicketDto("tt_new", null, "Alice Smith", address, "Full Week", 0m, "valid"));
+
+        var result = retry
+            ? await _service.RetryReissueAsync(request.Id, _adminId, null, Xunit.TestContext.Current.CancellationToken)
+            : await _service.ProcessTransferAsync(request.Id, _adminId, null, Xunit.TestContext.Current.CancellationToken);
+
+        _vendor.ReceivedCalls().Should().BeEmpty();
+        result.Succeeded.Should().BeFalse();
+        result.OperatorRefusal.Should().Contain("Receiver email");
+        request.Status.Should().Be(TicketTransferStatus.Pending);
+        request.VendorResult.Should().Be(originalResult);
+        request.VendorHoldId.Should().Be(originalHold);
+        await _transferRepo.DidNotReceive().UpdateAsync(Arg.Any<TicketTransferRequest>(), Arg.Any<CancellationToken>());
+        _auditLog.ReceivedCalls().Should().BeEmpty();
+        _emailService.ReceivedCalls().Should().BeEmpty();
     }
 
     [HumansFact]
@@ -1098,7 +1343,6 @@ public sealed class TicketTransferServiceTests
             Substitute.For<ITicketService>(),
             _vendor,
             _userService,
-            _userEmailService,
             _emailService,
             _emailMessages,
             _auditLog,
@@ -1181,13 +1425,12 @@ public sealed class TicketTransferServiceTests
         NormalizedUserName = $"{displayName.ToLowerInvariant().Replace(" ", "")}@EXAMPLE.COM",
     };
 
-    private static UserInfo WrapInUserInfo(User user, ProfileInfo? profile) => UserInfo.Create(
+    private static UserInfo WrapInUserInfo(
+        User user, ProfileInfo? profile, IReadOnlyList<UserEmail>? emails = null) => UserInfo.Create(
         user: user,
-        userEmails: [],
-        eventParticipations: [],
+        userEmails: emails ?? [],
         externalLogins: [],
-        profile: profile,
-        communicationPreferences: []);
+        profile: profile);
 
     private static TicketAttendee MakeAttendee(
         Guid id, Guid orderId, Guid attendeeMatchedUserId, TicketAttendeeStatus status,
@@ -1227,7 +1470,7 @@ public sealed class TicketTransferServiceTests
         };
     }
 
-    private static TicketTransferRequest MakePending(Guid id) =>
+    private static TicketTransferRequest MakePending(Guid id, string receiverEmail = "alice@example.com") =>
         new()
         {
             Id = id,
@@ -1235,7 +1478,7 @@ public sealed class TicketTransferServiceTests
             SenderUserId = _senderId,
             ReceiverUserId = _receiverId,
             ReceiverLegalName = "Alice Smith",
-            ReceiverEmail = "alice@example.com",
+            ReceiverEmail = receiverEmail,
             SenderReason = "Going abroad",
             Status = TicketTransferStatus.Pending,
             RequestedAt = _now,

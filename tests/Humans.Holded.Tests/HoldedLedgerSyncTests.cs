@@ -80,16 +80,18 @@ public sealed class HoldedLedgerSyncTests
         StubWindowFetch(
             Dto(1, 1, 40000004, FixedNow, credit: 23m),
             Dto(1, 2, 62900140, FixedNow, debit: 23m));   // NOT creditor-block — cached anyway (full mirror)
+        (await _service.GetLedgerSyncedAtAsync(ct)).Should().BeNull();
 
         (await _service.SyncLedgerAsync(full: false, ct)).Should().BeTrue();
+        (await _service.GetLedgerSyncedAtAsync(ct)).Should().Be(FixedNow);
 
         var calls = LedgerCalls();
         calls.Should().ContainSingle();
         calls[0].From.Should().Be(new LocalDate(2020, 1, 1));
         calls[0].To.Should().Be(Today);
 
-        (await _repo.GetLedgerLinesByAccountNumAsync(62900140, ct)).Should().ContainSingle();
-        (await _repo.GetLedgerLinesByAccountNumAsync(40000004, ct)).Should().ContainSingle();
+        (await _repo.GetLedgerLinesByAccountNumAsync(62900140, ct: ct)).Should().ContainSingle();
+        (await _repo.GetLedgerLinesByAccountNumAsync(40000004, ct: ct)).Should().ContainSingle();
     }
 
     [HumansFact]
@@ -122,7 +124,7 @@ public sealed class HoldedLedgerSyncTests
         StubWindowFetch(Dto(1, 1, 40000004, FixedNow, credit: 23m));
         await _service.SyncLedgerAsync(full: true, ct);
 
-        var lines = await _repo.GetLedgerLinesByAccountNumAsync(40000004, ct);
+        var lines = await _repo.GetLedgerLinesByAccountNumAsync(40000004, ct: ct);
         lines.Should().ContainSingle();
         lines[0].EntryNumber.Should().Be(1);
     }
@@ -152,7 +154,7 @@ public sealed class HoldedLedgerSyncTests
         ledgerState.SyncStatus.Should().Be(HoldedSyncStatus.Idle);               // reported, not failed
 
         // The re-pulled lines landed in the mirror despite the residual.
-        (await _repo.GetLedgerLinesByAccountNumAsync(57200001, ct)).Should().ContainSingle();
+        (await _repo.GetLedgerLinesByAccountNumAsync(57200001, ct: ct)).Should().ContainSingle();
     }
 
     [HumansFact]
@@ -251,8 +253,7 @@ public sealed class HoldedLedgerSyncTests
         var logger = new CapturingLogger<Humans.Holded.Controllers.HoldedController>();
         var controller = new Humans.Holded.Controllers.HoldedController(
             Substitute.For<Humans.Users.Contracts.IUserService>(),
-            Substitute.For<IHoldedAdminService>(), holded,
-            Substitute.For<Humans.Finance.Contracts.IHoldedFinanceService>(), logger)
+            Substitute.For<IHoldedAdminService>(), holded, logger)
         {
             TempData = new Microsoft.AspNetCore.Mvc.ViewFeatures.TempDataDictionary(
                 new Microsoft.AspNetCore.Http.DefaultHttpContext(),
@@ -305,5 +306,26 @@ public sealed class HoldedLedgerSyncTests
         // Every cached line, whatever its date — reconciliation compares this against Holded's
         // own all-time chart balance, so any date narrowing here would manufacture drift.
         (await _service.GetAccountBalancesAsync(ct))[62900105].Should().Be(140m);
+    }
+
+    [HumansFact]
+    public async Task Account_repull_replaces_only_that_accounts_whole_history()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var june = Instant.FromUtc(2026, 6, 12, 0, 0);
+        StubWindowFetch(
+            Dto(1, 1, 57200003, june, credit: 10m),
+            Dto(2, 1, 57200003, june, credit: 99m),
+            Dto(3, 1, 57200001, june, credit: 5m));
+        await _service.SyncLedgerAsync(full: true, ct);
+
+        _client.ListLedgerEntriesAsync(Arg.Any<LocalDate>(), Arg.Any<LocalDate>(), 57200003, Arg.Any<CancellationToken>())
+            .Returns([Dto(1, 1, 57200003, june, credit: 10m), Dto(4, 1, 57200003, june, credit: 7m)]);
+        (await _service.SyncAccountLedgerAsync(57200003, ct)).Should().BeTrue();
+
+        LedgerCalls().Last().Should().Be((new LocalDate(2020, 1, 1), Today, (int?)57200003));
+        (await _repo.GetLedgerLinesByAccountNumAsync(57200003, ct: ct)).Select(l => l.EntryNumber)
+            .Should().BeEquivalentTo([1, 4]);
+        (await _repo.GetLedgerLinesByAccountNumAsync(57200001, ct: ct)).Should().ContainSingle();
     }
 }

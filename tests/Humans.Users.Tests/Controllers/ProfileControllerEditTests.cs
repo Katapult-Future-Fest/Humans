@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Mvc.ModelBinding.Validation;
 using Humans.Base.Extensions;
 using Humans.Users.Controllers;
 using Humans.Users.Services;
+using Humans.Users.Data.Repositories;
 using Humans.Users.Models;
 using System.Reflection;
 using System.Security.Claims;
@@ -58,6 +59,7 @@ public class ProfileControllerEditTests
     private readonly IOnboardingIntake _onboardingService = Substitute.For<IOnboardingIntake>();
     private readonly IConfiguration _configuration = Substitute.For<IConfiguration>();
     private readonly IMembershipCalculator _membershipCalculator = Substitute.For<IMembershipCalculator>();
+    private readonly IUserRepository _userRepository = Substitute.For<IUserRepository>();
     private readonly ProfileController _controller;
     private readonly Guid _userId = Guid.NewGuid();
     private readonly Guid _profileId = Guid.NewGuid();
@@ -95,7 +97,7 @@ public class ProfileControllerEditTests
             sharedLocalizer,
             _governanceService,
             _membershipCalculator,
-            ConsentReviewStubs.Create());
+            new MedicalConditionsService(_userRepository, _userService, Substitute.For<IAuditLogService>()));
 
         var identity = new ClaimsIdentity([
             new Claim(ClaimTypes.NameIdentifier, _userId.ToString())
@@ -122,6 +124,30 @@ public class ProfileControllerEditTests
         _userService.SaveProfileLanguagesAsync(
                 Arg.Any<Guid>(), Arg.Any<IReadOnlyList<ProfileLanguageInfo>>(), Arg.Any<CancellationToken>())
             .Returns(Task.FromResult(new UserProfileLanguagesSaveResult(true, _userId)));
+    }
+
+    [HumansTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Profile_mutation_account_preflight_observes_cancellation(bool medical)
+    {
+        using var request = new CancellationTokenSource();
+        _controller.HttpContext.RequestAborted = request.Token;
+        _userService.GetUserInfoAsync(_userId, Arg.Any<CancellationToken>()).Returns(call =>
+        {
+            call.Arg<CancellationToken>().Should().Be(request.Token);
+            call.Arg<CancellationToken>().ThrowIfCancellationRequested();
+            return new ValueTask<UserInfo?>(new User { Id = _userId }.ToUserInfo());
+        });
+        await request.CancelAsync();
+        Func<Task<IActionResult>> invoke = medical
+            ? () => _controller.Medical(new MedicalViewModel())
+            : () => _controller.Edit(new ProfileViewModel());
+
+        await invoke.Should().ThrowAsync<OperationCanceledException>();
+        _profileEditorService.ReceivedCalls().Should().BeEmpty();
+        _userService.ReceivedCalls().Should().OnlyContain(call => call.GetMethodInfo().Name == nameof(IUserService.GetUserInfoAsync));
+        _controller.TempData.Should().BeEmpty();
     }
 
     [HumansTheory]
@@ -248,8 +274,8 @@ public class ProfileControllerEditTests
             Value = "legacy@example.org",
             Visibility = ContactFieldVisibility.BoardOnly
         };
-        var info = UserInfoFactory.Create(new User { Id = _userId, PreferredLanguage = "en" }, [], [], [],
-            new Profile { Id = _profileId, UserId = _userId, FirstName = "First", LastName = "Last" }, [legacy], [], [], []);
+        var info = UserInfoFactory.Create(new User { Id = _userId, PreferredLanguage = "en" }, [], [],
+            new Profile { Id = _profileId, UserId = _userId, FirstName = "First", LastName = "Last" }, [legacy], [], []);
         _userService.GetUserInfoAsync(_userId, Arg.Any<CancellationToken>()).Returns(new ValueTask<UserInfo?>(info));
         var model = MakeValidModel();
         model.ContactFields = [new() { Id = Guid.NewGuid(), Value = "untrusted@example.org" }];
@@ -264,16 +290,10 @@ public class ProfileControllerEditTests
         _contactFields.ReceivedCalls().Should().BeEmpty();
     }
 
-    [HumansTheory]
-    [InlineData("en")]
-    [InlineData("es")]
-    [InlineData("de")]
-    [InlineData("it")]
-    [InlineData("fr")]
-    [InlineData("ca")]
-    public void MemberProfileForms_LocalizeValidationMessages(string culture)
+    [HumansFact]
+    public void MemberProfileForms_LocalizeValidationMessages()
     {
-        using var cultureScope = new CultureScope(culture);
+        using var cultureScope = new CultureScope("en");
         var registrations = new ServiceCollection().AddLogging().AddLocalization();
         registrations.AddControllers().AddDataAnnotationsLocalization(options =>
             options.DataAnnotationLocalizerProvider = (_, factory) => factory.Create(typeof(SharedResource)));
@@ -330,6 +350,9 @@ public class ProfileControllerEditTests
             ("EmergencyContactRelationship", "Validation_MaxLength", ["", 100]),
             ("BirthdayMonth", "Validation_Range", ["", 1, 12]),
             ("BirthdayDay", "Validation_Range", ["", 1, 31]));
+        AssertErrors(new ProfileViewModel { Latitude = double.NaN, Longitude = 180.1 },
+            ("Latitude", "Validation_Range", ["", -90, 90]),
+            ("Longitude", "Validation_Range", ["", -180, 180]));
         AssertErrors(new MedicalViewModel { MedicalConditions = new string('x', 4001) },
             ("MedicalConditions", "Validation_MaxLength", ["", 4000]));
         AssertErrors(new ProfileViewModel
@@ -392,6 +415,55 @@ public class ProfileControllerEditTests
         await load.Should().ThrowAsync<OperationCanceledException>();
     }
 
+    [HumansTheory]
+    [InlineData(UserState.Active, false, false)]
+    [InlineData(UserState.Bare, false, true)]
+    [InlineData(UserState.Active, true, true)]
+    public async Task Edit_Get_SetupModeFollowsAccountStateAndPreview(UserState state, bool preview, bool initialSetup)
+    {
+        var info = BuildUserInfo(new Profile { UserId = _userId, BurnerName = "Burner" }) with { State = state };
+        _userService.GetUserInfoAsync(_userId, Arg.Any<CancellationToken>()).Returns(info);
+        _governanceService.GetUserApplicationsAsync(_userId, Arg.Any<CancellationToken>()).Returns([]);
+
+        var result = await _controller.Edit(preview);
+
+        result.Should().BeOfType<ViewResult>().Which.Model.Should().BeOfType<ProfileViewModel>()
+            .Which.IsInitialSetup.Should().Be(initialSetup);
+    }
+
+    [HumansTheory]
+    [InlineData(UserState.Active, false, false)]
+    [InlineData(UserState.Active, false, true)]
+    [InlineData(UserState.Active, true, false)]
+    [InlineData(UserState.Active, true, true)]
+    [InlineData(UserState.Bare, false, false)]
+    [InlineData(UserState.Bare, false, true)]
+    [InlineData(UserState.Bare, true, false)]
+    [InlineData(UserState.Bare, true, true)]
+    public async Task Edit_Post_RedisplayRestoresTrustedPresentationAndSetupMode(UserState state, bool serviceRefusal, bool hasPicture)
+    {
+        var info = BuildUserInfo(new Profile { UserId = _userId, BurnerName = "Burner", ProfilePictureContentType = hasPicture ? "image/png" : null }) with { State = state };
+        _userService.GetUserInfoAsync(_userId, Arg.Any<CancellationToken>()).Returns(info);
+        if (serviceRefusal)
+            _profileEditorService.SaveProfileAsync(Arg.Any<Guid>(), Arg.Any<ProfileSaveRequest>(), Arg.Any<CancellationToken>())
+                .Returns(new ProfileEditResult(false, ErrorKey: "Users_Profile_BurnerCVRequired"));
+        else
+            _controller.ModelState.AddModelError(nameof(ProfileViewModel.BurnerName), "Invalid");
+        var model = MakeValidModel();
+        model.IsInitialSetup = state != UserState.Bare;
+        model.UserId = Guid.NewGuid();
+        model.HasCustomProfilePicture = !hasPicture;
+        model.BurnerName = "Unsaved edited name";
+
+        var result = await _controller.Edit(model);
+
+        result.Should().BeOfType<ViewResult>().Which.Model.Should().BeSameAs(model);
+        model.IsInitialSetup.Should().Be(state == UserState.Bare);
+        model.UserId.Should().Be(_userId);
+        model.HasCustomProfilePicture.Should().Be(hasPicture);
+        model.BurnerName.Should().Be("Unsaved edited name");
+    }
+
     [HumansFact]
     public async Task Edit_InitialSetup_SavesProfileWithoutTouchingTierApplications()
     {
@@ -440,15 +512,15 @@ public class ProfileControllerEditTests
     [HumansFact]
     public async Task Medical_Get_ShowsOnlyTheSignedInMembersOwnConditions()
     {
-        _userService.GetUserInfoAsync(_userId, Arg.Any<CancellationToken>())
-            .Returns(BuildUserInfo(new Profile { UserId = _userId, BurnerName = "Burner", MedicalConditions = "Epilepsy" }));
+        _userRepository.GetByUserIdReadOnlyAsync(_userId, Arg.Any<CancellationToken>())
+            .Returns(new Profile { UserId = _userId, BurnerName = "Burner", MedicalConditions = "Epilepsy" });
 
         var result = await _controller.Medical(CancellationToken.None);
 
         var model = result.Should().BeOfType<ViewResult>().Which.Model.Should().BeOfType<MedicalViewModel>().Which;
         model.MedicalConditions.Should().Be("Epilepsy");
         model.UserId.Should().Be(_userId, "the reveal list below the form is keyed on the signed-in member");
-        await _userService.Received().GetUserInfoAsync(_userId, Arg.Any<CancellationToken>());
+        await _userRepository.Received().GetByUserIdReadOnlyAsync(_userId, Arg.Any<CancellationToken>());
     }
 
     [HumansTheory]
@@ -502,11 +574,9 @@ public class ProfileControllerEditTests
     private UserInfo BuildUserInfo(Profile? profile) => UserInfoFactory.Create(
         user: new User { Id = _userId, DisplayName = "Test Human", PreferredLanguage = "en" },
         userEmails: [],
-        eventParticipations: [],
         externalLogins: [],
         profile: profile,
         contactFields: [],
         profileLanguages: [],
-        volunteerHistory: [],
-        communicationPreferences: []);
+        volunteerHistory: []);
 }

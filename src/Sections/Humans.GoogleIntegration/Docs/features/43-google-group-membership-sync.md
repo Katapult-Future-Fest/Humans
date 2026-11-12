@@ -34,11 +34,11 @@ Google Group membership is reconciled as expected state from application-owned s
 - apply adds/removes according to Google Groups sync mode
 - audit, notify on removals, and schedule scoped retries
 
-`TeamService` directly implements `IGoogleGroupMembershipSource` for team Google Groups, and Camps' `CampRoleService` implements it for camp role groups. `ITeamService` intentionally does not inherit the source interface; Teams registers the concrete service as a source so the Teams public service boundary does not grow for Google-only ownership.
+`TeamService` directly implements `IGoogleGroupMembershipSource` for team Google Groups, Camps' `CampRoleService` implements it for camp role groups, and Workgroups' `WorkgroupGoogleGroupSource` for a workgroup's optional email group. `ITeamService` intentionally does not inherit the source interface; Teams registers the concrete service as a source so the Teams public service boundary does not grow for Google-only ownership.
 
 ## Reconciliation Modes
 
-`ReconcileAllAsync` is the daily, hourly teams-system-sync, and bulk preview/execute path. It loads every source claim, hydrates expected users once for the pass, records per-group errors, and schedules the capped scoped retry path for groups that fail during Execute.
+`ReconcileAllAsync` is the daily, hourly teams-system-sync, and bulk preview/execute path. It loads every source claim, hydrates expected users once for the pass, records per-group errors, and schedules the capped scoped retry path for groups that fail during Execute. A transport error (a reset connection) in the provisioning or membership client is that group's error, never the pass's.
 
 `ReconcileOneAsync` is the scoped path used by per-row Execute and queued Hangfire requests after team membership or Google-email changes. On Google API failure during Execute, it schedules delayed retries for the same group key, capped at five scoped retry attempts.
 

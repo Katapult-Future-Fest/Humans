@@ -45,7 +45,7 @@ City Planning organizes the physical layout of the event site across these phase
 - **US-38.8: Real-Time Collaborative View** — Remote cursors visible live; polygon saves broadcast to all connected clients via SignalR
 - **US-38.9: Placement Phase Card** — Shows the Open / Adjustments only / Closed badge and a help modal with the schedule's calendar dates (opening day, last day to place, last day to adjust), also on the Camp Details page
 - **US-38.10: Admin — Override the Placement Window** — From `/Settings#city-planning`, Force open / Force closed override the schedule; Follow schedule clears the override. Each is audited and timestamped (peterdrier/Humans#2102)
-- **US-38.11: Admin — Set the Placement Schedule** — From `/Settings#city-planning`, set three day offsets from the active event's gate opening (opens, closes, changeable until); the tab shows each one's calendar date and the current effective state. The schedule drives placement automatically — no button press needed (peterdrier/Humans#2102)
+- **US-38.11: Admin — Set the Placement Schedule** — From `/Settings#city-planning`, set day offsets from the active event's gate opening (opens, closes, changeable until); the tab shows each one's calendar date and the current effective state. The schedule drives placement automatically — no button press needed (peterdrier/Humans#2102)
 - **US-38.12: Admin — Upload/Delete Limit Zone** — GeoJSON boundary for allowed placement area; rendered as dashed colored outline (color-coded by sound zone); download/delete supported
 - **US-38.13: Admin — Upload/Delete Official Zones** — Read-only named overlay (dark gray, labeled); each Feature requires a `name` property; download/delete supported
 - **US-38.14: Admin — Export All Placements** — Download all polygons as a GeoJSON FeatureCollection
@@ -103,7 +103,6 @@ CityPlanningSettings
 ├── PlacementOpensOffset: int? (first open day, days from gate opening)
 ├── PlacementClosesOffset: int? (last open day)
 ├── PlacementChangeableUntilOffset: int? (last day a lead may adjust an existing polygon)
-├── PlacementOpensAt / PlacementClosesAt: LocalDateTime? (retired by #2102; [Obsolete], unread, column drop pending approval)
 ├── IsContainerPlacementOpen: bool
 ├── ContainerPlacementOpenedAt: Instant?
 ├── ContainerPlacementClosedAt: Instant?
@@ -253,9 +252,9 @@ Map admin = the `CityPlanningMapAdmin` policy: `Admin` or `CampsAdmin`, **or** m
 | Route | Description |
 |-------|-------------|
 | `GET /api/city-planning/state` | Map state: settings + all polygons + unmapped seasons |
-| `PUT /api/city-planning/camp-polygons/{campSeasonId}` | Save or update a polygon |
+| `PUT /api/city-planning/camp-polygons/{campSeasonId}` | Save or update a polygon for an existing camp season; missing season returns 400 |
 | `GET /api/city-planning/camp-polygons/{campSeasonId}/history` | Version history for a polygon |
-| `POST /api/city-planning/camp-polygons/{campSeasonId}/restore/{historyId}` | Restore a historical version |
+| `POST /api/city-planning/camp-polygons/{campSeasonId}/restore/{historyId}` | Restore a historical version; matching history with a missing camp season returns 400 |
 | `GET /api/city-planning/export.geojson?year={year}` | Export all barrio polygons as GeoJSON |
 | `GET /api/city-planning/containers/{year}` | All containers for year with `canEdit` flag |
 | `PUT /api/city-planning/containers/{id}/placement/{year}` | Set container location GeoJSON |

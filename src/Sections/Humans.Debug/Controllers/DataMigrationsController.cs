@@ -16,18 +16,21 @@ internal sealed class DataMigrationsController(
 {
     [HttpGet("")]
     public async Task<IActionResult> Index(CancellationToken ct) =>
-        View(await dataMigrations.GetReportsAsync(ct));
+        View((await dataMigrations.GetReportsAsync(ct))
+            .OrderBy(report => report.Migration.Section, StringComparer.Ordinal)
+            .ThenBy(report => report.Migration.Key, StringComparer.Ordinal)
+            .ToList());
 
     [HttpPost("Apply")]
     [Authorize(Policy = PolicyNames.AdminOnly)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Apply(string key, CancellationToken ct)
     {
-        var actorId = GetCurrentUserId();
-        if (actorId is null)
+        var actor = await GetCurrentUserInfoAsync(ct);
+        if (actor is null)
             return Unauthorized();
 
-        var rows = await dataMigrations.ApplyAsync(key, actorId.Value, ct);
+        var rows = await dataMigrations.ApplyAsync(key, actor.Id, ct);
         if (rows is null)
             return NotFound();
 

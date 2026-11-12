@@ -43,7 +43,6 @@ public sealed class Section :
     ISectionHelp,
     ISectionJobs,
     ISectionMemberDashboard,
-    ISectionNav,
     ISectionThingsToDo
 {
     public void Register(IServiceCollection services, IConfiguration configuration)
@@ -54,7 +53,7 @@ public sealed class Section :
 
         services.AddSingleton<IApplicationRepository, ApplicationRepository>();
 
-        services.AddSingleton<IMembershipTierRepository, MembershipTierRepository>();
+        services.AddSingleton<IMembershipTierRepository>(sp => (IMembershipTierRepository)sp.GetRequiredService<IApplicationRepository>());
         services.AddScoped<MembershipTierService>();
         services.AddScoped<IUserDataContributor>(sp => sp.GetRequiredService<MembershipTierService>());
         // Snapshot legacy tier grants before ApplicationDecisionService moves their applications.
@@ -230,12 +229,6 @@ public sealed class Section :
         new ChromeComponent(ChromeSlots.MemberDashboard, typeof(GovernanceApplicationsTileViewComponent), Weight: 40),
     ];
 
-    IEnumerable<MemberNavItem> ISectionNav.Items() =>
-    [
-        new("Nav_Votes", Controller: "GovernanceVotes", Action: "Index",
-            Policy: PolicyNames.AppAccess, Weight: 45)
-    ];
-
     async ValueTask<IEnumerable<ThingsToDoEntry>> ISectionThingsToDo.EntriesAsync(
         IServiceProvider services, ClaimsPrincipal user, CancellationToken ct)
     {
@@ -282,6 +275,7 @@ public sealed class Section :
 
         return votes
             .Where(v => v.Status == AssemblyVoteStatus.Open && v.IsOnRoster)
+            .OrderByDescending(v => v.ClosesAt)
             .Select(v => new ThingsToDoEntry(
                 $"assembly-vote-{v.Id}",
                 localizer["Todo_AssemblyVote_Title"].Value,

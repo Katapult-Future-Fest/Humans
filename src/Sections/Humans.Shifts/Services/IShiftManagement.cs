@@ -21,7 +21,7 @@ internal interface IShiftManagement
         Guid eventSettingsId, Guid? departmentId = null, ShiftPeriod? period = null,
         BuildSubPeriod? subPeriod = null, CancellationToken ct = default);
 
-    /// <summary>Parent teams with active rotas in the event.</summary>
+    /// <summary>Rota-owning teams in the event; callers choose display ordering.</summary>
     Task<IReadOnlyList<(Guid TeamId, string TeamName)>> GetDepartmentsWithRotasAsync(
         Guid eventSettingsId, CancellationToken ct = default);
 
@@ -40,16 +40,6 @@ internal interface IShiftManagement
     Task SaveKnobsAsync(
         Guid eventSettingsId, bool isShiftBrowsingOpen, int? globalVolunteerCap, int reminderLeadTimeHours,
         BuildSubPeriodStarts subPeriods, Guid actorUserId);
-
-    /// <summary>
-    /// Settings cycles whose build sub-periods still come from Settings (no Shifts row, or one with a start unset),
-    /// with the values the copy will write.
-    /// </summary>
-    Task<IReadOnlyList<(Guid EventSettingsId, string EventName, BuildSubPeriodStarts Starts)>> GetUncopiedBuildSubPeriodsAsync(
-        CancellationToken ct = default);
-
-    /// <summary>Writes Settings' values onto every row <see cref="GetUncopiedBuildSubPeriodsAsync"/> lists. Returns the rows written.</summary>
-    Task<int> CopyBuildSubPeriodsAsync(CancellationToken ct = default);
 
     /// <summary>Validates that the team is a department and the event is active.</summary>
     Task CreateRotaAsync(Rota rota, IReadOnlyList<Guid>? tagIds = null);
@@ -96,8 +86,8 @@ internal interface IShiftManagement
 
     /// <summary>
     /// One pie per top-level department or promoted sub-team; other sub-teams roll up to their parent. AdminOnly shifts and
-    /// hidden rotas are excluded. Rows come in <c>TeamName</c> order; the view model places promoted sub-teams by their
-    /// parent.
+    /// hidden rotas are excluded. Rows have no display order; the view model orders departments and places promoted
+    /// sub-teams by their parent.
     /// </summary>
     Task<IReadOnlyList<DepartmentCoveragePie>> GetDepartmentCoveragePiesAsync(
         Guid eventSettingsId,

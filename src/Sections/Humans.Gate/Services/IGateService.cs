@@ -35,7 +35,7 @@ internal interface IGateService : IApplicationService
     /// <summary>
     /// De-duplicated signups whose gate shift starts within ±2 hours of now, event-local. Empty with no active event.
     /// </summary>
-    Task<IReadOnlyList<GateRosterEntry>> GetShiftRosterAsync(Guid rosterTeamId, CancellationToken ct = default);
+    Task<IReadOnlyList<Guid>> GetShiftRosterAsync(Guid rosterTeamId, CancellationToken ct = default);
 
     // Personal device PINs: the claim flow has no reachable page since peterdrier/Humans#1075; deletion is tracked in
     // nobodies-collective/Humans#933. Kiosk overrides verify the shared Gate:SupervisorPin inside RecordDecisionAsync.
@@ -63,7 +63,6 @@ internal interface IGateService : IApplicationService
     Task ClearPinAsync(Guid userId, Guid actorUserId, CancellationToken ct = default);
 }
 
-internal sealed record GateRosterEntry(Guid UserId, string DisplayName);
 
 internal sealed record GatePinStatus(bool HasPin, bool IsSupervisor);
 
@@ -120,7 +119,8 @@ internal sealed record GateDecisionResult(
     Guid? PreviousAdmitByUserId,
     string? VendorTicketId = null,
     GateOverrideFailure? OverrideFailure = null,
-    int? RetryAfterSeconds = null);
+    int? RetryAfterSeconds = null,
+    bool InputTooLong = false);
 
 internal enum GateOverrideFailure
 {

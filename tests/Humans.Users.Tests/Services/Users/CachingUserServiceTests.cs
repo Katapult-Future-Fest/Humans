@@ -19,7 +19,196 @@ namespace Humans.Users.Tests.Services.Users;
 
 public class CachingUserServiceTests
 {
+    [HumansFact]
+    public async Task DelayedEmailRefresh_DoesNotRestoreAnOlderAccountState()
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var userId = Guid.NewGuid();
+        var before = SampleUserInfo(userId) with { State = UserState.Active };
+        var current = before with { State = UserState.DeletePending };
+        var sut = CreateSut();
+        await PrimeAsync(sut, before);
+        var pending = new TaskCompletionSource<UserInfo?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _inner.GetUserInfoAsync(userId, Arg.Any<CancellationToken>()).Returns(new ValueTask<UserInfo?>(pending.Task));
+        var oldRefresh = sut.RefreshUserEmailsAsync(userId, ct);
+        _inner.GetUserInfoAsync(userId, Arg.Any<CancellationToken>()).Returns(new ValueTask<UserInfo?>(current));
+        _inner.GetAllUserInfosAsync(Arg.Any<CancellationToken>()).Returns((IReadOnlyCollection<UserInfo>)[current]);
+        await sut.RefreshAsync(userId, ct);
+        pending.SetResult(before);
+        await oldRefresh;
+
+        (await sut.GetUserInfoAsync(userId, ct))!.State.Should().Be(UserState.DeletePending);
+        (await sut.GetAllUserInfosAsync(ct)).Should().ContainSingle().Which.State.Should().Be(UserState.DeletePending);
+    }
+
+    [HumansTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task OnDemandWarm_DoesNotRestoreAnOlderAccountSnapshot(bool deleted)
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var userId = Guid.NewGuid();
+        var before = SampleUserInfo(userId) with { State = UserState.Active };
+        var current = before with { State = UserState.Suspended };
+        var pending = new TaskCompletionSource<IReadOnlyCollection<UserInfo>>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _inner.GetAllUserInfosAsync(Arg.Any<CancellationToken>())
+            .Returns(pending.Task, Task.FromResult<IReadOnlyCollection<UserInfo>>(deleted ? [] : [current]));
+        _inner.GetUserInfoAsync(userId, Arg.Any<CancellationToken>()).Returns(new ValueTask<UserInfo?>(current));
+        var sut = CreateSut();
+        var read = sut.GetAllUserInfosAsync(ct);
+        if (deleted) sut.DeleteKey(userId);
+        else await sut.RefreshAsync(userId, ct);
+        pending.SetResult([before]);
+
+        var people = await read;
+
+        if (deleted) people.Should().BeEmpty();
+        else people.Should().ContainSingle().Which.State.Should().Be(UserState.Suspended);
+        sut.IsWarmedUp.Should().BeTrue();
+    }
+
     private readonly IUserManagement _inner = Substitute.For<IUserManagement>();
+
+    [HumansTheory]
+    [InlineData("SetPreferredLanguage")]
+    [InlineData("MarkFake")]
+    [InlineData("SetDeletionPending")]
+    [InlineData("ClearDeletion")]
+    [InlineData("EnsureStubProfile")]
+    [InlineData("SetSuspension")]
+    [InlineData("SetRejected")]
+    [InlineData("SaveProfile")]
+    [InlineData("SaveMedicalConditions")]
+    [InlineData("SaveProfileLanguages")]
+    [InlineData("SuspendProfilesForMissingConsent")]
+    [InlineData("AddUserEmail")]
+    [InlineData("UpdateUserEmail")]
+    [InlineData("RemoveUserEmail")]
+    [InlineData("ApplyUserEmailReconcilePlan")]
+    [InlineData("ApplyExpiredDeletionAnonymization")]
+    [InlineData("AnonymizeForMerge")]
+    [InlineData("DeleteUsers")]
+    [InlineData("Reassign")]
+    public async Task Mutation_UnknownCompletion_DropsAllPotentiallyChangedUsers(string operation)
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var userId = Guid.NewGuid();
+        var otherId = Guid.NewGuid();
+        IReadOnlyCollection<Guid> affectedIds = [userId, otherId];
+        var before = new[] { SampleUserInfo(userId, "Before"), SampleUserInfo(otherId, "Other before") };
+        var after = new[] { SampleUserInfo(userId, "After"), SampleUserInfo(otherId, "Other after") };
+        var committed = false;
+        _inner.GetAllUserInfosAsync(Arg.Any<CancellationToken>())
+            .Returns(_ => (IReadOnlyCollection<UserInfo>)(committed ? after : before));
+        var sut = CreateSut();
+        (await sut.GetUserInfoAsync(userId, ct))!.BurnerName.Should().Be("Before");
+        var failure = new IOException("Write acknowledgement failed");
+        Task InvokeAsync(IUserManagement service) => operation switch
+        {
+            "SetPreferredLanguage" => service.SetPreferredLanguageAsync(userId, "es", ct),
+            "MarkFake" => service.MarkFakeAsync(userId, otherId, "test", ct),
+            "SetDeletionPending" => service.SetDeletionPendingAsync(userId, default, default, null, ct),
+            "ClearDeletion" => service.ClearDeletionAsync(userId, ct),
+            "EnsureStubProfile" => service.EnsureStubProfileAsync(userId, ct: ct),
+            "SetSuspension" => service.SetSuspensionAsync(userId, true, ct: ct),
+            "SetRejected" => service.SetRejectedAsync(userId, ct),
+            "SaveProfile" => service.SaveProfileAsync(userId, null!, ct: ct),
+            "SaveMedicalConditions" => service.SaveMedicalConditionsAsync(userId, "updated", ct),
+            "SaveProfileLanguages" => service.SaveProfileLanguagesAsync(otherId, [], ct),
+            "SuspendProfilesForMissingConsent" => service.SuspendProfilesForMissingConsentAsync(affectedIds, ct),
+            "AddUserEmail" => service.AddUserEmailAsync(userId, null!, ct),
+            "UpdateUserEmail" => service.UpdateUserEmailAsync(userId, otherId, null!, ct),
+            "RemoveUserEmail" => service.RemoveUserEmailAsync(userId, otherId, null!, ct),
+            "ApplyUserEmailReconcilePlan" => service.ApplyUserEmailReconcilePlanAsync(userId, null!, ct),
+            "ApplyExpiredDeletionAnonymization" => service.ApplyExpiredDeletionAnonymizationAsync(userId, ct),
+            "AnonymizeForMerge" => service.AnonymizeForMergeAsync(userId, otherId, default, ct),
+            "DeleteUsers" => service.DeleteUsersAsync(affectedIds, ct),
+            "Reassign" => service.ReassignAsync(userId, otherId, otherId, default, ct),
+            _ => throw new ArgumentOutOfRangeException(nameof(operation))
+        };
+        _inner.When(inner => InvokeAsync(inner)).Do(_ =>
+        {
+            committed = true;
+            throw failure;
+        });
+
+        Func<Task> write = () => InvokeAsync(sut);
+        (await write.Should().ThrowAsync<IOException>()).Which.Should().BeSameAs(failure);
+
+        (await sut.GetUserInfoAsync(userId, ct))!.BurnerName.Should().Be("After");
+        (await sut.GetUserInfoAsync(otherId, ct))!.BurnerName.Should().Be("Other after");
+    }
+
+    [HumansTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RecordLogin_TrackingFailure_DoesNotBlockSignIn_AndEvictsUncertainSnapshot(bool refreshFailure)
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var userId = Guid.NewGuid();
+        var before = SampleUserInfo(userId, "Before");
+        var after = SampleUserInfo(userId, "After");
+        var committed = false;
+        _inner.GetAllUserInfosAsync(Arg.Any<CancellationToken>())
+            .Returns(_ => (IReadOnlyCollection<UserInfo>)[committed ? after : before]);
+        var sut = CreateSut();
+        (await sut.GetUserInfoAsync(userId, ct))!.BurnerName.Should().Be("Before");
+        var failure = new IOException("Login tracking unavailable");
+        _inner.RecordLoginAsync(userId, ct).Returns(_ =>
+        {
+            committed = true;
+            return refreshFailure ? Task.CompletedTask : Task.FromException(failure);
+        });
+        _inner.GetUserInfoAsync(userId, Arg.Any<CancellationToken>())
+            .Returns(_ => ValueTask.FromException<UserInfo?>(failure));
+
+        var record = () => sut.RecordLoginAsync(userId, ct);
+
+        await record.Should().NotThrowAsync();
+        (await sut.GetUserInfoAsync(userId, ct))!.BurnerName.Should().Be("After");
+    }
+
+    [HumansFact]
+    public async Task RecordLogin_CallerCancellation_Propagates()
+    {
+        var userId = Guid.NewGuid();
+        using var cancelled = new CancellationTokenSource();
+        await cancelled.CancelAsync();
+        _inner.RecordLoginAsync(userId, cancelled.Token)
+            .Returns(Task.FromCanceled(cancelled.Token));
+        var sut = CreateSut();
+
+        var record = () => sut.RecordLoginAsync(userId, cancelled.Token);
+
+        await record.Should().ThrowAsync<OperationCanceledException>();
+    }
+
+    [HumansFact]
+    public async Task SuspendProfiles_RefreshFailure_DoesNotLeaveOtherChangedUsersStale()
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var first = Guid.NewGuid();
+        var second = Guid.NewGuid();
+        IReadOnlyCollection<UserInfo> stored = [SampleUserInfo(first, "Before"), SampleUserInfo(second, "Other before")];
+        _inner.GetAllUserInfosAsync(Arg.Any<CancellationToken>()).Returns(_ => stored);
+        var sut = CreateSut();
+        await sut.GetUserInfoAsync(first, ct);
+        _inner.SuspendProfilesForMissingConsentAsync(Arg.Any<IReadOnlyCollection<Guid>>(), ct)
+            .Returns(_ =>
+            {
+                stored = [SampleUserInfo(first, "After"), SampleUserInfo(second, "Other after")];
+                return (IReadOnlySet<Guid>)new HashSet<Guid> { first, second };
+            });
+        var failure = new IOException("Refresh read failed");
+        _inner.GetUserInfoAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>())
+            .Returns(_ => ValueTask.FromException<UserInfo?>(failure));
+
+        var write = () => sut.SuspendProfilesForMissingConsentAsync([first, second], ct);
+        (await write.Should().ThrowAsync<IOException>()).Which.Should().BeSameAs(failure);
+
+        (await sut.GetUserInfoAsync(first, ct))!.BurnerName.Should().Be("After");
+        (await sut.GetUserInfoAsync(second, ct))!.BurnerName.Should().Be("Other after");
+    }
 
     private CachingUserService CreateSut()
     {
@@ -39,18 +228,15 @@ public class CachingUserServiceTests
 
     private static UserInfo SampleUserInfo(
         Guid userId,
-        string displayName = "Alice",
-        IReadOnlyList<EventParticipation>? eventParticipations = null) =>
+        string displayName = "Alice") =>
         UserInfoFactory.Create(
             new User { Id = userId, BurnerName = displayName, PreferredLanguage = "en" },
             userEmails: [],
-            eventParticipations: eventParticipations ?? [],
             externalLogins: [],
             profile: SampleProfile(userId, displayName),
             contactFields: [],
             profileLanguages: [],
-            volunteerHistory: [],
-            communicationPreferences: []);
+            volunteerHistory: []);
 
     private static Profile SampleProfile(Guid userId, string burnerName) => new()
     {
@@ -59,7 +245,6 @@ public class CachingUserServiceTests
         BurnerName = burnerName,
         CreatedAt = Instant.FromUtc(2026, 1, 1, 0, 0),
         UpdatedAt = Instant.FromUtc(2026, 1, 1, 0, 0),
-        IsApproved = true,
     };
 
     [HumansTheory]
@@ -72,22 +257,13 @@ public class CachingUserServiceTests
         user.BurnerName = "Before";
         user.State = suspend ? UserState.Active : UserState.Suspended;
         var profile = SampleProfile(user.Id, "Before");
-        var participation = new EventParticipation
-        {
-            Id = Guid.NewGuid(),
-            UserId = user.Id,
-            Year = 2026,
-            Status = LegacyParticipationStatus.Ticketed,
-            Source = LegacyParticipationSource.TicketSync,
-        };
-        var original = UserInfoFactory.Create(user, [], [participation], [], profile, [], [], [], []);
+        var original = UserInfoFactory.Create(user, [], [], profile, [], [], []);
         var options = new DbContextOptionsBuilder<UsersDbContext>()
             .UseInMemoryDatabase(Guid.NewGuid().ToString(), new InMemoryDatabaseRoot()).Options;
         await using (var seed = new UsersDbContext(options))
         {
             seed.Users.Add(user);
             seed.Profiles.Add(profile);
-            seed.EventParticipations.Add(participation);
             await seed.SaveChangesAsync(ct);
         }
         var cached = CreateSut();
@@ -104,6 +280,7 @@ public class CachingUserServiceTests
             row.State = expectedState;
             row.BurnerName = "After";
             row.PreferredLanguage = "es";
+            row.MarkedFakeAt = Instant.FromUnixTimeSeconds(1);
             await write.SaveChangesAsync(ct);
         }
 
@@ -113,10 +290,8 @@ public class CachingUserServiceTests
         refreshed!.State.Should().Be(expectedState);
         refreshed.BurnerName.Should().Be("After");
         refreshed.PreferredLanguage.Should().Be("es");
+        refreshed.IsFake.Should().BeTrue();
         refreshed.Profile.Should().BeEquivalentTo(original.Profile);
-#pragma warning disable HUM_USER_PARTICIPATIONS // the frozen legacy slice must survive a user-row refresh: Tickets' fallback reads it
-        refreshed.EventParticipations.Should().BeEquivalentTo(original.EventParticipations);
-#pragma warning restore HUM_USER_PARTICIPATIONS
     }
 
     [HumansFact]
@@ -167,70 +342,6 @@ public class CachingUserServiceTests
         (await sut.GetUserInfoAsync(userId, ct))!.Profile.Should().NotBeNull();
     }
 
-    [HumansFact]
-    public async Task CommittedLegacyPreferenceErasure_FinishesCacheRefreshDespiteRequestCancellation()
-    {
-        // Email owns the live preferences; the frozen legacy rows are deleted only by erasure,
-        // and the cached legacy slice must follow that delete.
-        var testCt = Xunit.TestContext.Current.CancellationToken;
-        var userId = Guid.NewGuid();
-        var preference = new CommunicationPreference
-        {
-            Id = Guid.NewGuid(),
-            UserId = userId,
-            Category = LegacyMessageCategory.Marketing,
-            OptedOut = false,
-            UpdatedAt = Instant.FromUtc(2026, 1, 1, 0, 0),
-            UpdateSource = "Profile"
-        };
-        var options = new DbContextOptionsBuilder<UsersDbContext>()
-            .UseInMemoryDatabase(Guid.NewGuid().ToString(), new InMemoryDatabaseRoot()).Options;
-        await using (var seed = new UsersDbContext(options))
-        {
-            seed.CommunicationPreferences.Add(preference);
-            await seed.SaveChangesAsync(testCt);
-        }
-#pragma warning disable HUM_USER_COMMPREFS // pins the cache's handling of the frozen legacy slice
-        var original = SampleUserInfo(userId) with
-        {
-            CommunicationPreferences =
-            [new LegacyCommunicationPreferenceInfo(preference.Id, preference.Category, false, true,
-                preference.UpdatedAt, preference.UpdateSource, null)]
-        };
-        var cached = CreateSut();
-        await PrimeAsync(cached, original);
-        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(testCt);
-        _inner.GetUserInfoAsync(userId, Arg.Any<CancellationToken>())
-            .Returns(call => new ValueTask<UserInfo?>(ReloadAsync(call.ArgAt<CancellationToken>(1))));
-        async Task<UserInfo?> ReloadAsync(CancellationToken readCt)
-        {
-            // This reload runs only after the delete has committed.
-            await cancellation.CancelAsync();
-            readCt.ThrowIfCancellationRequested();
-            await using var read = new UsersDbContext(options);
-            var saved = await read.CommunicationPreferences.AsNoTracking().ToListAsync(readCt);
-            return original with
-            {
-                CommunicationPreferences =
-                [.. saved.Select(p => new LegacyCommunicationPreferenceInfo(p.Id, p.Category, p.OptedOut, p.InboxEnabled,
-                    p.UpdatedAt, p.UpdateSource, p.SubscribedAt))]
-            };
-        }
-        var services = new ServiceCollection();
-        services.AddSingleton<IUserInfoSliceRefresher>(cached);
-        await using var provider = services.BuildServiceProvider();
-        var interceptor = new UserInfoSaveChangesInterceptor(provider, NullLogger<UserInfoSaveChangesInterceptor>.Instance);
-        var interceptedOptions = new DbContextOptionsBuilder<UsersDbContext>(options).AddInterceptors(interceptor).Options;
-        var repository = new CommunicationPreferenceRepository(new TestDbContextFactory(interceptedOptions));
-
-        (await repository.DeleteAllForUserAsync(userId, cancellation.Token)).Should().Be(1);
-
-        var refreshed = await cached.GetUserInfoAsync(userId, testCt);
-        refreshed!.CommunicationPreferences.Should().BeEmpty();
-        original.CommunicationPreferences.Should().ContainSingle();
-#pragma warning restore HUM_USER_COMMPREFS
-    }
-
     [HumansTheory]
     [Xunit.InlineData("add")]
     [Xunit.InlineData("update")]
@@ -240,8 +351,8 @@ public class CachingUserServiceTests
         var testCt = Xunit.TestContext.Current.CancellationToken;
         var userId = Guid.NewGuid();
         var now = Instant.FromUtc(2026, 1, 1, 0, 0);
-        var email = new UserEmailInfo(Guid.NewGuid(), "member@example.com", false, false, false,
-            null, null, null, null, now, now, default);
+        var email = new UserEmailInfo(Guid.NewGuid(), "member@example.com", false, false,
+            null, null, null, null, now, now);
         var original = SampleUserInfo(userId) with
         {
             UserEmails = string.Equals(operation, "add", StringComparison.Ordinal) ? [] : [email]
@@ -514,7 +625,6 @@ public class CachingUserServiceTests
         var userId = Guid.NewGuid();
         var profileId = Guid.NewGuid();
         var emailId = Guid.NewGuid();
-        var participationId = Guid.NewGuid();
         var contactFieldId = Guid.NewGuid();
         var languageId = Guid.NewGuid();
         var historyId = Guid.NewGuid();
@@ -533,18 +643,8 @@ public class CachingUserServiceTests
             Email = "eight@example.com",
             IsVerified = true,
             IsPrimary = true,
-            IsGoogle = true,
-            GoogleEmailStatus = LegacyGoogleEmailStatus.Valid,
             Provider = "Google",
             ProviderKey = "subject-xyz",
-        };
-        var participation = new EventParticipation
-        {
-            Id = participationId,
-            UserId = userId,
-            Year = 2026,
-            Status = LegacyParticipationStatus.Ticketed,
-            Source = LegacyParticipationSource.TicketSync,
         };
         var profile = new Profile
         {
@@ -554,8 +654,6 @@ public class CachingUserServiceTests
             FirstName = "Eight",
             LastName = "Tables",
             DateOfBirth = new LocalDate(1990, 7, 4),
-            IsApproved = true,
-            MembershipTier = LegacyMembershipTier.Asociado,
             CreatedAt = Instant.FromUtc(2026, 1, 1, 0, 0),
             UpdatedAt = Instant.FromUtc(2026, 1, 2, 0, 0),
         };
@@ -589,12 +687,11 @@ public class CachingUserServiceTests
             };
 
         var fullInfo = UserInfoFactory.Create(
-            user, [userEmail], [participation],
+            user, [userEmail],
             externalLogins,
             profile, [contactField],
             profile.Languages.ToList(),
-            profile.VolunteerHistory.ToList(),
-            []);
+            profile.VolunteerHistory.ToList());
 
         _inner.GetUserInfoAsync(userId, Arg.Any<CancellationToken>())
             .Returns(new ValueTask<UserInfo?>(fullInfo));
@@ -608,10 +705,6 @@ public class CachingUserServiceTests
         result.PreferredLanguage.Should().Be("es");
         result.UserEmails.Should().ContainSingle(e =>
             e.Id == emailId && e.IsPrimary && e.IsVerified);
-#pragma warning disable HUM_USER_PARTICIPATIONS // the legacy table still flows into UserInfo for Tickets' fallback
-        result.EventParticipations.Should().ContainSingle(p =>
-            p.Id == participationId && p.Year == 2026 && p.Status == LegacyParticipationStatus.Ticketed);
-#pragma warning restore HUM_USER_PARTICIPATIONS
         result.ExternalLogins.Should().ContainSingle(l =>
             l.Provider == "Google" && l.ProviderKey == "ext-key-1");
         result.Profile.Should().NotBeNull();
@@ -754,7 +847,6 @@ public class CachingUserServiceTests
         string? bio = null,
         string? pronouns = null,
         string? contributionInterests = null,
-        bool isApproved = true,
         bool isSuspended = false,
         bool isRejected = false,
         bool hasProfile = true,
@@ -796,10 +888,8 @@ public class CachingUserServiceTests
             Bio = bio,
             Pronouns = pronouns,
             ContributionInterests = contributionInterests,
-            IsApproved = isApproved,
             CreatedAt = Instant.FromUtc(2026, 1, 1, 0, 0),
             UpdatedAt = Instant.FromUtc(2026, 1, 1, 0, 0),
-            RejectedAt = isRejected ? Instant.FromUtc(2026, 1, 1, 0, 0) : null,
         };
 
         var cfRows = (contactFields ?? [])
@@ -827,12 +917,10 @@ public class CachingUserServiceTests
 
         return UserInfoFactory.Create(
             user, userEmails,
-            eventParticipations: [],
             externalLogins: [],
             hasProfile ? profile : null, cfRows,
             profileLanguages: [],
-            volunteerHistory: vhRows,
-            communicationPreferences: []);
+            volunteerHistory: vhRows);
     }
 
     private async Task PrimeAsync(CachingUserService sut, UserInfo info)
@@ -859,6 +947,27 @@ public class CachingUserServiceTests
         results.Should().HaveCount(1);
         results[0].UserId.Should().Be(userId);
         results[0].MatchField.Should().Be("Name");
+    }
+
+    [HumansTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SearchUsersAsync_LimitKeepsTheHighestScore_RegardlessOfWhichUserMatchesExactly(bool swap)
+    {
+        var ids = new[]
+        {
+            Guid.Parse("00000000-0000-0000-0000-000000000001"),
+            Guid.Parse("00000000-0000-0000-0000-000000000002"),
+        };
+        var exactId = ids[swap ? 1 : 0];
+        var sut = CreateSut();
+        foreach (var id in ids)
+            await PrimeAsync(sut, BuildSearchableUserInfo(id, burnerName: id == exactId ? "Ian" : "Brian"));
+
+        var results = await sut.SearchUsersAsync("Ian", PersonSearchFields.PublicAll, limit: 1,
+            ct: Xunit.TestContext.Current.CancellationToken);
+
+        results.Should().ContainSingle().Which.UserId.Should().Be(exactId);
     }
 
     [HumansFact]
@@ -914,17 +1023,6 @@ public class CachingUserServiceTests
     }
 
     [HumansFact]
-    public async Task SearchUsersAsync_PublicAll_IncludesUnapproved()
-    {
-        var sut = CreateSut();
-        await PrimeAsync(sut, BuildSearchableUserInfo(Guid.NewGuid(), city: "Madrid", isApproved: false));
-
-        var results = await sut.SearchUsersAsync("Madrid", PersonSearchFields.PublicAll, ct: Xunit.TestContext.Current.CancellationToken);
-
-        results.Should().HaveCount(1);
-    }
-
-    [HumansFact]
     public async Task SearchUsersAsync_PublicAll_ExcludesRejected()
     {
         var sut = CreateSut();
@@ -968,16 +1066,10 @@ public class CachingUserServiceTests
         results.Should().HaveCount(1);
     }
 
-    [HumansTheory]
-    [InlineData("en", "User ID")]
-    [InlineData("es", "ID de usuario")]
-    [InlineData("de", "Benutzer-ID")]
-    [InlineData("it", "ID utente")]
-    [InlineData("fr", "ID utilisateur")]
-    [InlineData("ca", "ID d'usuari")]
-    public async Task SearchUsersAsync_AdminBit_ExactUserIdLookup(string culture, string label)
+    [HumansFact]
+    public async Task SearchUsersAsync_AdminBit_ExactUserIdLookup()
     {
-        using var scope = new CultureScope(culture);
+        using var scope = new CultureScope("en");
         var userId = Guid.NewGuid();
         var sut = CreateSut();
         await PrimeAsync(sut, BuildSearchableUserInfo(userId, burnerName: "Alice"));
@@ -986,7 +1078,7 @@ public class CachingUserServiceTests
 
         results.Should().HaveCount(1);
         results[0].UserId.Should().Be(userId);
-        results[0].MatchField.Should().Be(label);
+        results[0].MatchField.Should().Be("User ID");
     }
 
     [HumansFact]
@@ -1093,13 +1185,11 @@ public class CachingUserServiceTests
         UserInfoFactory.Create(
             new User { Id = userId, BurnerName = profile?.BurnerName, PreferredLanguage = "en" },
             userEmails: [],
-            eventParticipations: [],
             externalLogins: [],
             profile: profile,
             contactFields: [],
             profileLanguages: profile?.Languages.ToList() ?? [],
-            volunteerHistory: profile?.VolunteerHistory.ToList() ?? [],
-            communicationPreferences: []);
+            volunteerHistory: profile?.VolunteerHistory.ToList() ?? []);
 
     private static UserInfo UserInfoWithEmail(Guid userId, string email) =>
         UserInfoFactory.Create(
@@ -1117,13 +1207,11 @@ public class CachingUserServiceTests
                     UpdatedAt = Instant.MinValue,
                 }
             ],
-            eventParticipations: [],
             externalLogins: [],
             profile: SampleProfile(userId, "Alice"),
             contactFields: [],
             profileLanguages: [],
-            volunteerHistory: [],
-            communicationPreferences: []);
+            volunteerHistory: []);
 
     private void StubRefreshEntry(Guid userId, Profile? profile) =>
         _inner.GetUserInfoAsync(userId, Arg.Any<CancellationToken>())
@@ -1190,38 +1278,6 @@ public class CachingUserServiceTests
         refreshed.Profile.Should().NotBeNull();
         refreshed.Profile!.BurnerName.Should().Be("New Burner");
         refreshed.Profile.ProfilePictureContentType.Should().Be("image/png");
-    }
-
-    [HumansFact]
-    public async Task AnonymizeProfileForDeletionAsync_RefreshesAnonymizedProfileSlice()
-    {
-        var userId = Guid.NewGuid();
-        var profileId = Guid.NewGuid();
-        var sut = CreateSut();
-        await PrimeAsync(sut, SampleUserInfo(userId));
-
-        _inner.AnonymizeProfileForDeletionAsync(userId, Arg.Any<CancellationToken>())
-            .Returns(new UserProfileAnonymizeResult(true));
-
-        StubRefreshEntry(userId, new Profile
-        {
-            Id = profileId,
-            UserId = userId,
-            BurnerName = "",
-            FirstName = "Deleted",
-            LastName = "User",
-            ProfilePictureContentType = null,
-            CreatedAt = Instant.FromUtc(2026, 1, 1, 0, 0),
-            UpdatedAt = Instant.FromUtc(2026, 1, 2, 0, 0),
-        });
-
-        var result = await sut.AnonymizeProfileForDeletionAsync(userId, Xunit.TestContext.Current.CancellationToken);
-
-        result.Anonymized.Should().BeTrue();
-        var refreshed = await sut.GetUserInfoAsync(userId, Xunit.TestContext.Current.CancellationToken);
-        refreshed!.Profile.Should().NotBeNull();
-        refreshed.Profile!.FirstName.Should().Be("Deleted");
-        refreshed.Profile.ProfilePictureContentType.Should().BeNull();
     }
 
     [HumansTheory]
@@ -1432,9 +1488,9 @@ public class CachingUserServiceTests
                 MergedAt = mergedTo is not null || gdprErased ? Instant.FromUtc(2026, 1, 1, 0, 0) : null,
                 State = gdprErased ? UserState.Deleted : mergedTo is not null ? UserState.Merged : UserState.Active,
             },
-            userEmails: [], eventParticipations: [], externalLogins: [],
+            userEmails: [], externalLogins: [],
             profile: null, contactFields: [], profileLanguages: [],
-            volunteerHistory: [], communicationPreferences: []);
+            volunteerHistory: []);
 
     /// <summary>A→B→C chain plus an unrelated GDPR-erased row D.</summary>
     private (Guid A, Guid B, Guid C, Guid D) SeedChain()
@@ -1551,9 +1607,9 @@ public class CachingUserServiceTests
             Email = "alice@example.com",
         };
         var info = UserInfoFactory.Create(
-            user, userEmails: [], eventParticipations: [], externalLogins: [],
+            user, userEmails: [], externalLogins: [],
             profile: SampleProfile(userId, "Deleted User"), contactFields: [],
-            profileLanguages: [], volunteerHistory: [], communicationPreferences: []);
+            profileLanguages: [], volunteerHistory: []);
         _inner.GetUserInfoAsync(userId, Arg.Any<CancellationToken>())
             .Returns(new ValueTask<UserInfo?>(info));
         var sut = CreateSut();

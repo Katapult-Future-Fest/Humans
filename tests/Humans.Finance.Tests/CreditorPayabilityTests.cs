@@ -35,11 +35,10 @@ public class CreditorPayabilityTests
     private static readonly Guid ReportId = Guid.NewGuid();
 
     private readonly IHoldedRepository _repo = Substitute.For<IHoldedRepository>();
-    private readonly IHoldedClient _client = Substitute.For<IHoldedClient>();
-    private readonly IHoldedService _holded = Substitute.For<IHoldedService>();
+    private readonly IHoldedService _holded = TestContacts.Holded();
+    private readonly IHoldedWrite _write = Substitute.For<IHoldedWrite>();
     private readonly IExpenseHoldedBookingService _expenses = Substitute.For<IExpenseHoldedBookingService>();
     private readonly IUserService _users = Substitute.For<IUserService>();
-    private readonly IUserEmailService _userEmails = Substitute.For<IUserEmailService>();
     private readonly SepaOptions _sepa = new()
     {
         CreditorName = "Nobodies Collective",
@@ -48,31 +47,31 @@ public class CreditorPayabilityTests
     };
 
     private Service MakeService() => new(
-        _repo, _client, Substitute.For<IBudgetService>(), _holded, _expenses, new FakeClock(FixedNow),
-        new MemoryCache(new MemoryCacheOptions()), Substitute.For<IAuditLogService>(), _users,
-        _userEmails, Substitute.For<IEmailService>(), TestFinanceEmails.Create(),
+        _repo, Substitute.For<IBudgetService>(), _holded, _write, _expenses, new FakeClock(FixedNow),
+        Substitute.For<IAuditLogService>(), _users,
+        Substitute.For<IEmailService>(), TestFinanceEmails.Create(),
         Options.Create(_sepa), new TrackedCache<string, Dictionary<string, int>>("Finance.SepaStuckBankLines", warmOnStartup: false, NullLogger<Service>.Instance),
-        NullLogger<Service>.Instance);
+        Substitute.For<IPaymentDetailsManagement>(), NullLogger<Service>.Instance);
 
     public CreditorPayabilityTests()
     {
+        // A payout refreshes the contact mirror first; an unstubbed Task<bool> reads as a sync already running.
+        _holded.SyncContactsAsync(Arg.Any<CancellationToken>()).Returns(true);
         _holded.GetAccountBalancesAsync(Arg.Any<CancellationToken>())
             .Returns(new Dictionary<int, decimal> { [Account] = -4800m });
-        _client.ListContactsAsync(Arg.Any<CancellationToken>()).Returns(new List<HoldedContactDto>
+        _holded.GetContactsAsync(Arg.Any<CancellationToken>()).Returns(TestContacts.Synced(new List<HoldedContactDto>
         {
             new() { Id = "c1", Name = "Paul Vivien", SupplierAccountNum = Account, Iban = "ES7921000813610123456789" },
-        });
+        }));
         _repo.GetCreditorContactsAsync(Arg.Any<CancellationToken>()).Returns(new List<HoldedCreditorContact>
         {
             new() { UserId = UserId, HoldedContactId = "c1", SupplierAccountNum = Account, Source = CreditorContactSource.Auto },
         });
         _repo.GetSepaPayoutTransferRowsAsync(Arg.Any<CancellationToken>()).Returns(new List<SepaPayoutTransferRow>());
-        _client.ListPurchaseDocumentsAsync(Arg.Any<CancellationToken>()).Returns(new List<HoldedPurchaseDocListItemDto>());
+        _holded.GetPurchaseDocumentsAsync(Arg.Any<CancellationToken>()).Returns(TestPurchaseMirror.Of(new List<HoldedPurchaseDocListItemDto>()));
         _expenses.GetHoldedBookingsAsync(Arg.Any<CancellationToken>()).Returns(new List<ExpenseHoldedBooking>());
         _users.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<Guid, UserInfo>());
-        _userEmails.GetNotificationTargetEmailsAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<Guid, string>());
     }
 
     private static SepaPayoutTransferRow Transfer(Instant? bookedAt = null, Instant? withdrawnAt = null, Instant? generatedAt = null) =>
@@ -103,14 +102,14 @@ public class CreditorPayabilityTests
         _repo.GetSepaPayoutTransferRowsAsync(Arg.Any<CancellationToken>()).Returns([Transfer()]);
         var service = MakeService();
 
-        var (rows, _) = await service.ListCreditorAccountsAsync(TestContext.Current.CancellationToken);
+        var (rows, _, _) = await service.ListCreditorAccountsAsync(TestContext.Current.CancellationToken);
         var result = await service.GenerateSepaPayoutAsync([new SepaPayoutSelection(Account, 4800m)], 10000m, Guid.NewGuid());
 
         var row = rows.Should().ContainSingle().Subject;
         row.PendingPayoutFileName.Should().Be("m929.xml");
         row.HasDuplicateDocuments.Should().BeFalse();
-        new CreditorAccountRowVm(Account, row.Name, 4800m, [new CreditorBindingVm(UserId, "Paul", "Auto")], row.IbanMasked,
-            0, row.PendingPayoutFileName, row.HasDuplicateDocuments).NotPayableReason.Should().Be("in payout file m929.xml, not booked yet");
+        row.NotPayableReason.Should().Contain("already in payout file m929.xml");
+        result.ErrorMessage.Should().Be(row.NotPayableReason);
         result.Succeeded.Should().BeFalse();
         result.ErrorMessage.Should().Contain("already in payout file m929.xml");
         await _repo.DidNotReceiveWithAnyArgs().AddSepaPayoutAsync(default!, default!);
@@ -128,10 +127,11 @@ public class CreditorPayabilityTests
             generatedAt: string.Equals(state, "stale", StringComparison.Ordinal) ? FixedNow - Duration.FromDays(120) : null)]);
         var service = MakeService();
 
-        var (rows, _) = await service.ListCreditorAccountsAsync(TestContext.Current.CancellationToken);
+        var (rows, _, _) = await service.ListCreditorAccountsAsync(TestContext.Current.CancellationToken);
         var result = await service.GenerateSepaPayoutAsync([new SepaPayoutSelection(Account, 4800m)], 10000m, Guid.NewGuid());
 
         rows.Should().ContainSingle().Which.PendingPayoutFileName.Should().BeNull();
+        rows[0].NotPayableReason.Should().BeNull();
         result.Succeeded.Should().BeTrue(result.ErrorMessage);
     }
 
@@ -139,16 +139,16 @@ public class CreditorPayabilityTests
     public async Task Row_WhoseMemberHasDuplicateDocuments_IsNotPayable_AndTheGenerationRefusesIt()
     {
         _expenses.GetHoldedBookingsAsync(Arg.Any<CancellationToken>()).Returns([Booking("doc-a")]);
-        _client.ListPurchaseDocumentsAsync(Arg.Any<CancellationToken>()).Returns([Doc("doc-a", 4800m), Doc("doc-b", 4800m)]);
+        _holded.GetPurchaseDocumentsAsync(Arg.Any<CancellationToken>()).Returns(TestPurchaseMirror.Of([Doc("doc-a", 4800m), Doc("doc-b", 4800m)]));
         var service = MakeService();
 
-        var (rows, _) = await service.ListCreditorAccountsAsync(TestContext.Current.CancellationToken);
+        var (rows, _, _) = await service.ListCreditorAccountsAsync(TestContext.Current.CancellationToken);
         var result = await service.GenerateSepaPayoutAsync([new SepaPayoutSelection(Account, 4800m)], 10000m, Guid.NewGuid());
 
         var row = rows.Should().ContainSingle().Subject;
         row.HasDuplicateDocuments.Should().BeTrue();
-        new CreditorAccountRowVm(Account, row.Name, 4800m, [new CreditorBindingVm(UserId, "Paul", "Auto")], row.IbanMasked,
-            0, null, true).NotPayableReason.Should().Be(CreditorAccountRowVm.DuplicateDocumentsReason);
+        row.NotPayableReason.Should().Contain("duplicate documents in Holded");
+        result.ErrorMessage.Should().Be(row.NotPayableReason);
         result.Succeeded.Should().BeFalse();
         result.ErrorMessage.Should().Contain("duplicate documents in Holded");
         await _repo.DidNotReceiveWithAnyArgs().AddSepaPayoutAsync(default!, default!);
@@ -157,10 +157,10 @@ public class CreditorPayabilityTests
     [HumansFact]
     public async Task Row_WhenHoldedsDocumentsCannotBeRead_HasAnUnknownFlag_AndTheGenerationRefuses()
     {
-        _client.ListPurchaseDocumentsAsync(Arg.Any<CancellationToken>()).Throws(new HoldedTransientException("Holded 503"));
+        _holded.GetPurchaseDocumentsAsync(Arg.Any<CancellationToken>()).Returns(TestPurchaseMirror.NeverSynced);
         var service = MakeService();
 
-        var (rows, _) = await service.ListCreditorAccountsAsync(TestContext.Current.CancellationToken);
+        var (rows, _, _) = await service.ListCreditorAccountsAsync(TestContext.Current.CancellationToken);
         var result = await service.GenerateSepaPayoutAsync([new SepaPayoutSelection(Account, 4800m)], 10000m, Guid.NewGuid());
 
         rows.Should().ContainSingle().Which.HasDuplicateDocuments.Should().BeNull();
@@ -168,6 +168,7 @@ public class CreditorPayabilityTests
             [], "account", "asc", new SepaPayoutSettings(1m, null)).DuplicateCheckUnavailable.Should().BeTrue();
         result.Succeeded.Should().BeFalse();
         result.ErrorMessage.Should().Contain("cannot be ruled out");
+        result.ErrorMessage.Should().Be(rows[0].NotPayableReason);
     }
 
     [HumansFact]
@@ -175,11 +176,41 @@ public class CreditorPayabilityTests
     {
         // Martina's two 3.40 tolls: each line keeps its own document, nothing is flagged.
         _expenses.GetHoldedBookingsAsync(Arg.Any<CancellationToken>()).Returns([Booking("doc-a"), Booking("doc-b")]);
-        _client.ListPurchaseDocumentsAsync(Arg.Any<CancellationToken>()).Returns([Doc("doc-a", 4800m), Doc("doc-b", 4800m)]);
+        _holded.GetPurchaseDocumentsAsync(Arg.Any<CancellationToken>()).Returns(TestPurchaseMirror.Of([Doc("doc-a", 4800m), Doc("doc-b", 4800m)]));
 
-        var (rows, _) = await MakeService().ListCreditorAccountsAsync(TestContext.Current.CancellationToken);
+        var (rows, _, _) = await MakeService().ListCreditorAccountsAsync(TestContext.Current.CancellationToken);
 
         rows.Should().ContainSingle().Which.HasDuplicateDocuments.Should().BeFalse();
+    }
+
+    [HumansTheory]
+    [InlineData(0, -4800, "ES7921000813610123456789", "not bound")]
+    [InlineData(2, -4800, "ES7921000813610123456789", "bound to 2 members")]
+    [InlineData(1, 0, "ES7921000813610123456789", "nothing owed")]
+    [InlineData(1, 10, "ES7921000813610123456789", "nothing owed")]
+    [InlineData(1, -4800, null, "no IBAN")]
+    public async Task Row_AndPayout_ShareTheEligibilityRefusal(int bindingCount, int balance, string? iban, string reason)
+    {
+        _repo.GetCreditorContactsAsync(Arg.Any<CancellationToken>()).Returns(
+            Enumerable.Range(0, bindingCount).Select(_ => new HoldedCreditorContact
+            {
+                UserId = Guid.NewGuid(),
+                HoldedContactId = "c1",
+                SupplierAccountNum = Account,
+            }).ToList());
+        _holded.GetAccountBalancesAsync(Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<int, decimal> { [Account] = balance });
+        _holded.GetContactsAsync(Arg.Any<CancellationToken>()).Returns(TestContacts.Synced([
+            new HoldedContactDto { Id = "c1", Name = "Paul", SupplierAccountNum = Account, Iban = iban },
+        ]));
+        var service = MakeService();
+
+        var (rows, _, _) = await service.ListCreditorAccountsAsync(TestContext.Current.CancellationToken);
+        var result = await service.GenerateSepaPayoutAsync([new SepaPayoutSelection(Account, 1m)], 10000m, Guid.NewGuid());
+
+        rows.Should().ContainSingle().Which.NotPayableReason.Should().Contain(reason);
+        result.ErrorMessage.Should().Be(rows[0].NotPayableReason);
+        await _repo.DidNotReceiveWithAnyArgs().AddSepaPayoutAsync(default!, default!);
     }
 
     [HumansFact]

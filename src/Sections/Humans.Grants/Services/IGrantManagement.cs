@@ -1,6 +1,5 @@
 using Humans.Base.Interfaces;
 using Humans.Grants.Contracts;
-using Humans.Settings.Contracts;
 using NodaTime;
 
 namespace Humans.Grants.Services;
@@ -19,13 +18,6 @@ internal interface IGrantManagement : IGrantWrite, IApplicationService
     /// <summary>Europe/Madrid, the date expiry is checked against.</summary>
     LocalDate Today { get; }
 
-    /// <summary>Every program without an event id whose year has an event, and the event <c>grants.event-ids</c> gives it.</summary>
-    Task<IReadOnlyList<(Guid ProgramId, string ProgramName, int Year, EventSettingsInfo Event)>> GetEventIdPlanAsync(
-        CancellationToken ct = default);
-
-    /// <summary>Applies <see cref="GetEventIdPlanAsync"/>; returns the rows written. Idempotent.</summary>
-    Task<int> AssignProgramEventIdsAsync(CancellationToken ct = default);
-
     /// <summary>The program's year follows the chosen event, which must exist and not be deleted.</summary>
     Task<GrantMutationResult<Guid>> CreateProgramAsync(ProgramSave save, Guid actorUserId, CancellationToken ct = default);
     Task<GrantMutationResult> UpdateProgramAsync(Guid programId, ProgramSave save, Guid actorUserId, CancellationToken ct = default);
@@ -38,9 +30,9 @@ internal interface IGrantManagement : IGrantWrite, IApplicationService
         Guid programId, IReadOnlyList<Guid> userIds, LocalDate? expiresOn, Guid actorUserId,
         CancellationToken ct = default);
 
-    /// <summary>The optional reason is shown to the person.</summary>
-    Task<GrantMutationResult> RevokeGrantAsync(Guid grantId, string? reason, Guid actorUserId, CancellationToken ct = default);
+    /// <summary>The optional reason is shown to the person. Missing grants or grants outside the program return NotFound.</summary>
+    Task<GrantMutationResult> RevokeGrantAsync(Guid programId, Guid grantId, string? reason, Guid actorUserId, CancellationToken ct = default);
 
-    /// <summary>Live grants only.</summary>
-    Task<GrantMutationResult> ResendNoticeAsync(Guid grantId, Guid actorUserId, CancellationToken ct = default);
+    /// <summary>Live grants only. Missing grants or grants outside the program return NotFound.</summary>
+    Task<GrantMutationResult> ResendNoticeAsync(Guid programId, Guid grantId, Guid actorUserId, CancellationToken ct = default);
 }

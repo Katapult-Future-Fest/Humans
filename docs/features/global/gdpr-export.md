@@ -9,7 +9,6 @@
   src/Sections/Humans.Teams/**
   src/Sections/Humans.Auth/Services/RoleAssignmentService.cs
   src/Sections/Humans.Shifts/Services/ShiftSignupService.cs
-  src/Sections/Humans.Feedback/Services/FeedbackService.cs
   src/Sections/Humans.Notifications/Services/NotificationInboxService.cs
   src/Sections/Humans.Tickets/Services/TicketQueryService.cs
   src/Sections/Humans.Campaigns/Services/CampaignService.cs
@@ -95,8 +94,9 @@ change.
 The contributor named in that column is the type **registered** as
 `IUserDataContributor`, and whether that is a cached section's decorator or its inner
 service is the registering section's own call: `CachingEventService`,
-`CachingRideshareService` and `CachingWorkgroupService` bind the decorator, while Consent,
-Teams, Camps and Auth have decorators and bind the inner service. Whichever is registered
+`CachingRideshareService`, `CachingWorkgroupService`, `CachingTeamService`, `CachingCampService`
+and `CachingTicketQueryService` bind the decorator, while Consent and Auth have decorators and
+bind the inner service. Whichever is registered
 is the type that carries `ErasureDeclaration`.
 
 **The Article 17 roster is one wider than this table.** `MailerLiteGdprContributor`
@@ -113,7 +113,7 @@ section owns its own `DbContext` type, so no two contributors touch the same
 instance; how a given repository obtains its context varies — some take one by
 injection, some open one per call through `IDbContextFactory<T>` — and neither
 recreates the sharing. The hazard went with the shared context, and
-`design-rules.md` §8a records the reason as obsolete.
+`design-rules.md`, *Crosscuts, orchestrators and fan-out* records the reason as obsolete.
 
 Sequential is now a simplicity choice, and it stays: one contributor at a time
 keeps failure attribution and log order plain, and at our small scale an export
@@ -156,41 +156,37 @@ archived account and the survivor.
 | Section | Contributor | Shape |
 |---------|-------------|-------|
 | `Account` | `UserService` | Single object with user identity, display name, preferred language, lifecycle state, deletion request/scheduled/post-event-hold instants, created/last-login instants. |
-| `LegacyEventParticipations` | `UserService` | Array of `{ UserId, Year, Status, Source, DeclaredAt, CheckedInAt }` — the frozen Users `event_participations` rows for every id in the merge chain (live record: the `EventParticipations` slice). Retained on erasure. |
-| `UserEmails` | `UserService` | Array of `{ Email, IsVerified, IsOAuth, IsNotificationTarget, IsGoogle, GoogleEmailStatus, VerificationSentAt, CreatedAt, UpdatedAt, Visibility }` (`IsOAuth` is true when a provider is linked; `IsGoogle` / `GoogleEmailStatus` are the frozen legacy flags — the live record is the `WorkspaceIdentity` slice; key names are pinned for export stability). |
-| `Profile` | `UserService` | Single object with burner name, legal name, birthday (month/day only), city/country, lat/lng, bio, pronouns, contribution interests, board notes, the legacy membership tier (live tier: the `MembershipTier` slice), the legacy approval and consent check state (live review: the `ConsentReview` slice), suspension state, emergency contact, medical conditions, the legacy food columns (meal preference, allergies, intolerances — still held until the `cantina.profile-dietary` retirement drops them), created/updated instants. |
-| `MergedProfiles` | `UserService` | Array of `{ UserId, Profile }` for archived profiles in the transitive merge chain. Reuses the current profile shape, including retained dietary and medical data; requests under an archived ID resolve to the survivor first. |
+| `UserEmails` | `UserService` | Array of `{ Email, IsVerified, IsOAuth, IsNotificationTarget, VerificationSentAt, CreatedAt, UpdatedAt, Visibility }` (`IsOAuth` is true when a provider is linked; the Workspace identity is the `WorkspaceIdentity` slice). |
+| `Profile` | `UserService` | Single object with burner name, legal name, birthday (month/day only), city/country, lat/lng, bio, pronouns, contribution interests, board notes, suspension state, emergency contact, medical conditions, created/updated instants. Tier, consent review and food answers are the `MembershipTier`, `ConsentReview` and `DietaryProfile` slices. |
+| `MergedProfiles` | `UserService` | Array of `{ UserId, Profile }` for archived profiles in the transitive merge chain. Reuses the current profile shape, including retained medical data; requests under an archived ID resolve to the survivor first. |
 | `ContactFields` | `UserService` | Array of `{ FieldType, Label, Value, Visibility }`. |
 | `VolunteerHistory` | `UserService` | Array of `{ Date, EventName, Description, CreatedAt }`. |
 | `Languages` | `UserService` | Array of `{ LanguageCode, Proficiency }`. |
-| `LegacyCommunicationPreferences` | `UserService` | Array of `{ Category, OptedOut, InboxEnabled, SubscribedAt, UpdatedAt, UpdateSource }` — the frozen Users `communication_preferences` rows (live record: the `CommunicationPreferences` slice). Deleted on erasure. |
-| `CommunicationPreferences` | `CommunicationPreferenceService` (Email) | Array of `{ Category, OptedOut, InboxEnabled, SubscribedAt, UpdatedAt, UpdateSource }` — the effective preferences, the legacy Users row answering until the `email.communication-preferences` copy or a write replaces it. Deleted on erasure. |
-| `WorkspaceIdentity` | `WorkspaceIdentityService` (GoogleIntegration) | Single object `{ Email, Status }` — the member's effective Google Workspace identity (the legacy `UserEmails` flags answering until the `google.workspace-identities` copy runs); null when the member has no verified address. Erasure deletes the `google_workspace_identities` row. |
-| `EventParticipations` | `EventParticipationService` (Tickets) | Array of `{ Year, Status, Source, DeclaredAt, CheckedInAt }` covering every event-year the user has a participation record for (Ticketed / Attended / NoShow / NotAttending), the legacy Users row answering until the `tickets.event-participations` copy has run; requests under an archived ID resolve to the survivor. Retained on erasure. |
+| `CommunicationPreferences` | `CommunicationPreferenceService` (Email) | Array of `{ Category, OptedOut, InboxEnabled, SubscribedAt, UpdatedAt, UpdateSource }` — the effective preferences. Deleted on erasure. |
+| `WorkspaceIdentity` | `WorkspaceIdentityService` (GoogleIntegration) | Single object `{ Email, Status }` — the member's effective Google Workspace identity; null when the member has no verified address. Erasure deletes the `google_workspace_identities` row. |
+| `EventParticipations` | `EventParticipationService` (Tickets) | Array of `{ Year, Status, Source, DeclaredAt, CheckedInAt }` covering every event-year the user has a participation record for (Ticketed / Attended / NoShow / NotAttending); requests under an archived ID resolve to the survivor. Retained on erasure. |
 | `Applications` | `ApplicationDecisionService` | Array of tier application records with `StateHistory` inline. |
-| `MembershipTier` | `MembershipTierService` | Single object `{ Tier, GrantedAt, ExpiresAt, GrantedByApplicationId }`, or `{ Tier }` for a not-yet-copied legacy profile tier; null for a Volunteer. Retained on erasure (register of members). |
+| `MembershipTier` | `MembershipTierService` | Single object `{ Tier, GrantedAt, ExpiresAt, GrantedByApplicationId }`; null for a Volunteer. Retained on erasure (register of members). |
 | `Consents` | `ConsentService` | Array of `{ DocumentName, DocumentVersion, ExplicitConsent, ConsentedAt, IpAddress, UserAgent }`. |
 | `ConsentReminder` | `ConsentReminderService` | Array of `{ UserId, LastSentAt }` — when the re-consent reminder email last went to each id in the merge chain (survivor first); null when none. Erased in full. |
 | `ConsentReview` | `ConsentReviewService` | Array of `{ UserId, Status, CheckedAt, Notes, IsApproved, RejectionReason, RejectedAt }` — the Consent Coordinator's review rows for every id in the merge chain (survivor first); null when none. Erasure keeps status, dates, approval and reviewer ids and erases the notes and the rejection reason. |
-| `TeamMemberships` | `TeamService` | Array of `{ TeamName, Role, JoinedAt, LeftAt, TeamRoles[] }`. |
-| `TeamJoinRequests` | `TeamService` | Array of `{ TeamName, Status, Message, ReviewNotes, RequestedAt, ResolvedAt, StateHistory[] }` (`StateHistory` entries are `{ Status, ChangedAt, Notes }`). |
-| `TeamEarlyEntry` | `TeamService` | Array of `{ TeamName, ProjectName, EntryDate, GrantedAt }` — the user's team early-entry grants. |
+| `TeamMemberships` | `CachingTeamService` | Array of `{ TeamName, Role, JoinedAt, LeftAt, TeamRoles[] }`. |
+| `TeamJoinRequests` | `CachingTeamService` | Array of `{ TeamName, Status, Message, ReviewNotes, RequestedAt, ResolvedAt, StateHistory[] }` (`StateHistory` entries are `{ Status, ChangedAt, Notes }`). |
+| `TeamEarlyEntry` | `CachingTeamService` | Array of `{ TeamName, ProjectName, EntryDate, GrantedAt }` — the user's team early-entry grants. |
 | `RoleAssignments` | `RoleAssignmentService` | Array of `{ RoleName, ValidFrom, ValidTo }`. |
 | `ShiftSignups` | `ShiftSignupService` | Array of `{ EventName, Department, RotaName, DayOffset, IsAllDay, Status, Enrolled, StatusReason, CreatedAt, UpdatedAt, ReviewedAt }`. |
 | `VolunteerEventProfiles` | `ShiftSignupService` | Array of `{ Skills, Quirks, Languages, CreatedAt, UpdatedAt }` per-event profile records (dietary data is exported in `DietaryProfile`, medical in `Profile`). |
 | `GeneralAvailability` | `ShiftSignupService` | Array of `{ EventName, AvailableDayOffsets, UpdatedAt }`. |
 | `ShiftTagPreferences` | `ShiftSignupService` | Array of `{ TagName }`. |
 | `Events` | `CachingEventService` (delegates to `EventService`) | Single object with `{ SubmittedEvents: [{ Id, CampId, GuideSharedVenueId, CategoryId, Title, Description, LocationNote, Host, StartAt, DurationMinutes, IsRecurring, RecurrenceDays, PriorityRank, Status, SubmittedAt, LastUpdatedAt }], Favourites: [{ GuideEventId, DayOffset, CreatedAt }], Preference: { ExcludedCategorySlugs, UpdatedAt }, AdditionalPreferences: [{ UserId, ExcludedCategorySlugs, UpdatedAt }] }` — the events the human submitted, their favourites and category-exclusion preference; `Preference` is null when no preference row exists, and `AdditionalPreferences` holds preferences of archived accounts merged into this one. |
-| `FeedbackReports` | `FeedbackService` | Array of feedback reports with nested `Messages[]`. |
-| `FeedbackReplies` | `FeedbackService` | Array of `{ FeedbackReportId, Content, EmailEnqueuePending, CreatedAt }` — the user's replies on other people's reports. |
 | `Issues` | `IssuesService` | Array of `{ Title, Description, Category, Section, Status, PageUrl, UserAgent, AdditionalContext, CreatedAt, ResolvedAt, Comments: [{ Content, IsFromUser, CreatedAt }] }` — issues filed by the user including their comments. |
 | `IssueComments` | `IssuesService` | Array of `{ IssueId, Content, CreatedAt }` — the user's comments on other people's issues. |
 | `Notifications` | `NotificationInboxService` | Array of `{ Title, Body, ActionUrl, Priority, Source, CreatedAt, ReadAt, ResolvedAt }`. |
-| `TicketOrders` | `TicketQueryService` | Array of `{ BuyerName, BuyerEmail, TotalAmount, Currency, PaymentStatus, DiscountCode, PurchasedAt }`. |
-| `TicketAttendeeMatches` | `TicketQueryService` | Array of `{ AttendeeName, AttendeeEmail, TicketTypeName, Price, Status }`. |
+| `TicketOrders` | `CachingTicketQueryService` | Array of `{ BuyerName, BuyerEmail, TotalAmount, Currency, PaymentStatus, DiscountCode, PurchasedAt }`. |
+| `TicketAttendeeMatches` | `CachingTicketQueryService` | Array of `{ AttendeeName, AttendeeEmail, TicketTypeName, Price, Status }`. |
 | `CampaignGrants` | `CampaignService` | Array of `{ CampaignTitle, Code, AssignedAt, RedeemedAt, EmailStatus }`. |
-| `CampRoleAssignments` | `CampService` | Array of `{ CampSlug, SeasonYear, RoleName, AssignedAt, AssignedByUserId }`. |
-| `CampMemberships` | `CampService` | Array of `{ Id, CampSeasonId, CampSlug, SeasonYear, Status, RequestedAt, ConfirmedAt, ConfirmedByUserId, RemovedAt, RemovedByUserId, HasEarlyEntry }` — the human's camp member rows. Erased in full. |
+| `CampRoleAssignments` | `CachingCampService` | Array of `{ CampSlug, SeasonYear, RoleName, AssignedAt, AssignedByUserId }`. |
+| `CampMemberships` | `CachingCampService` | Array of `{ Id, CampSeasonId, CampSlug, SeasonYear, Status, RequestedAt, ConfirmedAt, ConfirmedByUserId, RemovedAt, RemovedByUserId, HasEarlyEntry }` — the human's camp member rows. Erased in full. |
 | `AccountMergeRequests` | `AccountMergeService` | Array of `{ Status, Role, CreatedAt, ResolvedAt }` (Role is "Target" or "Source"), covering every account in the resolved merge chain without duplicate requests. |
 | `AuditLog` | `AuditLogService` | Array of `{ Action, EntityType, OccurredAt, Role }` (Role is "Actor" or "Subject"). |
 | `BudgetAuditLog` | `BudgetService` | Array of `{ EntityType, FieldName, Description, OccurredAt }`. |
@@ -202,10 +198,12 @@ archived account and the survivor.
 | `GrantDecisions` | `GrantService` | Single object `{ ProgramsCreated[], ManagerOf[], ManagersNamed[], GrantsIssued[], GrantsRevoked[] }` — programs the human created or manages, managers they named (`{ Program, AddedAt }`), and grants they issued or revoked; null when none. Retained as the record of who decided (bare id, no longer resolves to a person once anonymized); manager rows are deleted. |
 | `ExpenseAuditLog` | `ExpenseReportService` | Single object `{ Entries: [{ Action, EntityType, EntityId, Description, OccurredAt }] }` covering all expense-related audit events (submit, endorse, approve, reject, IBAN set/remove/reveal, etc.); null when the user has no expense audit entries. |
 | `PaymentDetails` | `Finance.PaymentDetailsService` | Single object `{ Iban (masked) }` — the bank account the member is reimbursed to; null when none is on record. Erased in full. |
-| `DietaryProfile` | `Cantina.DietaryProfileService` | Single object `{ DietaryPreference, Allergies, AllergyOtherText, Intolerances, IntoleranceOtherText }` — the member's food answers (falls back to the legacy profile columns until copied); null when none. Never carries medical conditions. Erased in full. |
+| `DietaryProfile` | `Cantina.DietaryProfileService` | Single object `{ DietaryPreference, Allergies, AllergyOtherText, Intolerances, IntoleranceOtherText }` — the member's food answers; null when none. Never carries medical conditions. Erased in full. |
 | `HoldedCreditorAccount` | `Finance.Service` | Single object `{ SupplierAccountNum, HoldedContactId, Source }` — the requested account's Holded creditor account binding; null when no binding exists. |
 | `AdditionalHoldedCreditorAccounts` | `Finance.Service` | Array of `{ UserId, SupplierAccountNum, HoldedContactId, Source }` — bindings held by archived accounts merged into this one; null when there are none. Erased in full. |
-| `SepaPayouts` | `Finance.Service` | Array of `{ GeneratedAt, FileName, SupplierAccountNum, HoldedContactId, CreditorName, Iban (masked), Amount, BookedAt, HoldedBankMovementId, ReconciledAt }` — every SEPA credit transfer paid to the user, oldest first; empty when they have never been paid. Retained after erasure on the fiscal basis. |
+| `SepaPayouts` | `Finance.Service` | Array of `{ GeneratedAt, FileName, SupplierAccountNum, HoldedContactId, CreditorName, Iban (masked), Amount, BookedAt, HoldedBankMovementId, ReconciledAt, WithdrawnAt }` — every SEPA credit transfer paid to the user, oldest first; empty when they have never been paid. Retained after erasure on the fiscal basis. |
+| `CreditorLedger` | `Finance.Service` | Array of `{ AccountNum, Date, EntryNumber, Line, Type, Description, Debit, Credit, RunningBalance }` — the mirrored Holded journal lines of the member's creditor account(s); null when there are none, and withheld for an account another member is also bound to until an admin resolves the collision. Retained after erasure on the fiscal basis (the lines carry no user id, so they stop being linkable once the binding is erased). |
+| `StripePayments` | `Stripe.StripeMirrorService` | Array of `{ Account, Id, Type, Created, Amount, Currency, Description, CustomerName, CustomerEmail }` — every mirrored Stripe balance transaction whose buyer email is one of the member's verified addresses, oldest first; omitted when none match. Retained after erasure on the fiscal basis. |
 | `SurveyResponses` | `SurveyService` | Array of `{ Survey, SubmittedAt, Culture, Answers[] }` where each answer has `{ Question, SelectedLabels, GridSelections, GridSelectionLabels, RankedBallot, RankedBallotLabels, TextValue, RatingValue }`. |
 | `AuthoredSurveys` | `SurveyService` | Array of `{ Survey, Status, RejectionNote, CreatedAt, QuestionCount }` — surveys the human wrote, Drafts nobody else can see included, since authoring is open to any approved human. Retained after erasure with the authorship link dropped and the rejection note deleted. |
 | `SurveyInvitations` | `SurveyService` | Array of `{ Survey, InvitedAt, SentAt, EmailStatus, ReminderSentAt, Started, Completed }` — the invitation ledger, oldest first. Most responses are not identified, so for someone who was only invited, or who answered under completion tracking, this is the only survey record of theirs. Erased in full: the rows are deleted. |
@@ -214,8 +212,8 @@ archived account and the survivor.
 | `EmailOutbox` | `EmailOutboxService` | Array of `{ RecipientEmail, RecipientName, Subject, HtmlBody, TemplateName, Status, CreatedAt, SentAt }` — the same per-user outbox history the human reads at `/Email/Outbox`. |
 | `EmailOutboxMergedAccounts` | `EmailOutboxService` | Same shape as `EmailOutbox` — rows still keyed to archived accounts merged into this one (merges before peterdrier/Humans#1999), read from the chain Gdpr passes in; only present for a merged account. Erased in full. |
 | `BackdoorApiKeys` | `BackdoorApiKeyService` | Array of `{ Label, DisplayPrefix, CreatedAt, LastUsedAt, RevokedAt }` — the machine-API keys allocated to the human; null when they hold none. The stored hash is never exported: it is the credential itself. |
-| `RideshareTrips` | `CachingRideshareService` | Array of `{ Id, Year, Direction, MemberPlaceLabel, MemberLatitude, MemberLongitude, Waypoints[], DepartureDate, ExpectedDurationDays, OvernightPlan, VehicleType, SeatsOffered, LuggageCapacity, CapacityNote, Restrictions, WillingToDetour, CostSharing, CostNote, LinkedTripId, Status, CreatedAt, UpdatedAt }` — the human's ride offers, oldest first. |
-| `RideshareRequests` | `CachingRideshareService` | Array of `{ Id, Year, Direction, PickupPlaceLabel, PickupLatitude, PickupLongitude, DesiredDate, PartySize, LuggageLoad, CanContributeToFuel, Notes, Status, CreatedAt, UpdatedAt }` — the human's ride requests, oldest first. |
+| `RideshareTrips` | `CachingRideshareService` | Array of `{ Id, Year, EventSettingsId, Direction, MemberPlaceLabel, MemberLatitude, MemberLongitude, Waypoints[], DepartureDate, ExpectedDurationDays, OvernightPlan, VehicleType, SeatsOffered, LuggageCapacity, CapacityNote, Restrictions, WillingToDetour, CostSharing, CostNote, LinkedTripId, Status, CreatedAt, UpdatedAt }` — the human's ride offers, oldest first. |
+| `RideshareRequests` | `CachingRideshareService` | Array of `{ Id, Year, EventSettingsId, Direction, PickupPlaceLabel, PickupLatitude, PickupLongitude, DesiredDate, PartySize, LuggageLoad, CanContributeToFuel, Notes, Status, CreatedAt, UpdatedAt }` — the human's ride requests, oldest first. |
 | `RideshareInterests` | `CachingRideshareService` | Array of `{ Id, TripId, RequestId, Seats, Message, Status, CreatedAt, RespondedAt }` — interests the human expressed (as rider, or as driver answering a request), oldest first. |
 | `WorkgroupApplications` | `CachingWorkgroupService` | Array of `{ Workgroup, Status, Purpose, AppliedAt, RegisteredAt }` — the groups the human proposed. Retained after erasure with the applicant attribution dropped: a registered group outlives whoever proposed it. |
 | `WorkgroupMemberships` | `CachingWorkgroupService` | Array of `{ Workgroup, Role, Pending, JoinedAt, LeftAt }` — pending join requests included. Erased in full. |
@@ -318,7 +316,7 @@ that check can't: it discovers contributors by reflection over the same section
 assemblies the runtime composes itself from, and requires no category be
 claimed twice across the whole roster and no retention be left unexplained.
 
-Append-only entities per `design-rules.md` §12 (`consent_records`, `audit_log`,
+Append-only entities per `design-rules.md`, *Append-only entities* (`consent_records`, `audit_log`,
 `budget_audit_logs`, `camp_polygon_histories`, `application_state_history`,
 `team_join_request_state_history`) are not deleted — foreign keys are nulled or
 the row is re-pointed at the anonymized user rather than a separate tombstone

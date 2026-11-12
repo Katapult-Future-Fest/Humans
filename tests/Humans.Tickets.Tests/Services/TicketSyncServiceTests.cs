@@ -1,3 +1,4 @@
+using System.Transactions;
 using AwesomeAssertions;
 using Humans.Campaigns.Contracts;
 using Humans.Tickets.Data;
@@ -5,6 +6,9 @@ using Humans.Settings.Contracts;
 using Humans.Tickets.Contracts;
 using Humans.Tickets.Services;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NodaTime;
@@ -70,6 +74,123 @@ public sealed class TicketSyncServiceTests : TicketsTestHarness
             VendorEventId = string.Empty
         });
         SaveAll();
+    }
+
+    [HumansTheory]
+    [Xunit.InlineData(false)]
+    [Xunit.InlineData(true)]
+    public async Task FatalSyncFailure_DiagnosticSaveFailureRetainsOriginalException(bool requestAborted)
+    {
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(Xunit.TestContext.Current.CancellationToken);
+        Exception failure = requestAborted
+            ? new OperationCanceledException(cancellation.Token)
+            : new HttpRequestException("Vendor refused the sync", null, System.Net.HttpStatusCode.Forbidden);
+        var diagnosticFailure = new IOException("Cannot persist sync diagnostic");
+        var cursor = Clock.GetCurrentInstant() - Duration.FromDays(1);
+        var state = new TicketSyncState { Id = 1, LastSyncAt = cursor };
+        var repository = Substitute.For<ITicketRepository>();
+        repository.GetSyncStateAsync(Arg.Any<CancellationToken>()).Returns(state);
+        repository.PersistSyncStateAsync(Arg.Any<TicketSyncState>(), Arg.Any<CancellationToken>()).Returns(call =>
+        {
+            if (call.Arg<TicketSyncState>().SyncStatus == TicketSyncStatus.Error)
+            {
+                call.Arg<CancellationToken>().Should().Be(CancellationToken.None);
+                throw diagnosticFailure;
+            }
+            return Task.CompletedTask;
+        });
+        _vendorService.GetOrdersAsync(Arg.Any<Instant?>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(async Task<IReadOnlyList<VendorOrderDto>> (_) =>
+            {
+                if (requestAborted) await cancellation.CancelAsync();
+                throw failure;
+            });
+        var logger = new CapturingLogger<TicketSyncService>();
+        var service = new TicketSyncService(repository, new TicketTransferRepository(TicketsDbFactory),
+            _vendorService, _stripeService, Clock, Options.Create(new TicketVendorSettings
+            { EventId = "ev_test_123", ApiKey = "test_key" }), logger,
+            _userService, _participations, _campaignService, _shiftManagementService);
+
+        var observed = await Xunit.Record.ExceptionAsync(() => service.SyncOrdersAndAttendeesAsync(cancellation.Token));
+
+        observed.Should().BeSameAs(failure);
+        logger.Entries.Should().Contain(entry => entry.Level == LogLevel.Error && ReferenceEquals(entry.Exception, diagnosticFailure));
+        state.LastSyncAt.Should().Be(cursor);
+        state.LastError.Should().Be(failure.Message);
+        await repository.DidNotReceiveWithAnyArgs().UpsertOrdersAsync(default!);
+    }
+
+    [HumansTheory]
+    [Xunit.InlineData(false)]
+    [Xunit.InlineData(true)]
+    public async Task ReassignAsync_OrderAndTransferWritesShareATransaction(bool failTransferWrite)
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var from = Guid.NewGuid();
+        var to = Guid.NewGuid();
+        var order = MakePaidOrder(discountAmount: null, prices: [150m]);
+        order.MatchedUserId = from;
+        order.Attendees.Single().MatchedUserId = from;
+        TicketsDb.TicketOrders.Add(order);
+        await SaveAllAsync(ct);
+        var probe = new MergeTransactionProbe();
+        var options = new DbContextOptionsBuilder<TicketsDbContext>(
+                (DbContextOptions<TicketsDbContext>)TicketsDb.GetService<IDbContextOptions>())
+            .AddInterceptors(probe).Options;
+        var transferRepository = Substitute.For<ITicketTransferRepository>();
+        transferRepository.ReassignUserAsync(from, to, ct).Returns(_ =>
+        {
+            probe.Observe();
+            return failTransferWrite
+                ? Task.FromException(new IOException("transfer reassignment failed"))
+                : Task.CompletedTask;
+        });
+        var service = new TicketSyncService(
+            new TicketRepository(new TestDbContextFactory<TicketsDbContext>(options), Clock),
+            transferRepository, _vendorService, _stripeService, Clock,
+            Options.Create(new TicketVendorSettings()), NullLogger<TicketSyncService>.Instance,
+            _userService, _participations, _campaignService, _shiftManagementService);
+
+        if (failTransferWrite)
+        {
+            Func<Task> merge = () => service.ReassignAsync(from, to, Guid.NewGuid(), Clock.GetCurrentInstant(), ct);
+            await merge.Should().ThrowAsync<IOException>();
+        }
+        else
+        {
+            await service.ReassignAsync(from, to, Guid.NewGuid(), Clock.GetCurrentInstant(), ct);
+            await using var read = await TicketsDbFactory.CreateDbContextAsync(ct);
+            (await read.TicketOrders.SingleAsync(ct)).MatchedUserId.Should().Be(to);
+            (await read.TicketAttendees.SingleAsync(ct)).MatchedUserId.Should().Be(to);
+        }
+
+        probe.TransactionIds.Should().HaveCount(2).And.NotContainNulls();
+        probe.TransactionIds.Distinct(StringComparer.Ordinal).Should().ContainSingle();
+        probe.CompletedStatus.Should().Be(failTransferWrite ? TransactionStatus.Aborted : TransactionStatus.Committed);
+        Transaction.Current.Should().BeNull();
+        await transferRepository.Received(1).ReassignUserAsync(from, to, ct);
+    }
+
+    private sealed class MergeTransactionProbe : SaveChangesInterceptor
+    {
+        public List<string?> TransactionIds { get; } = [];
+        public TransactionStatus? CompletedStatus { get; private set; }
+
+        public void Observe()
+        {
+            var transaction = Transaction.Current;
+            if (TransactionIds.Count == 0 && transaction is not null)
+                transaction.TransactionCompleted += (_, completed) =>
+                    CompletedStatus = completed.Transaction!.TransactionInformation.Status;
+            TransactionIds.Add(transaction?.TransactionInformation.LocalIdentifier);
+        }
+
+        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            Observe();
+            return ValueTask.FromResult(result);
+        }
     }
 
     [HumansFact]

@@ -28,6 +28,7 @@ internal sealed class GovernanceBoardVotingController(
         var viewModel = new BoardVotingDashboardViewModel
         {
             BoardMembers = boardMembers
+                .OrderBy(m => m.DisplayName, StringComparer.OrdinalIgnoreCase)
                 .Select(m => new BoardVoteMemberViewModel
                 {
                     UserId = m.UserId
@@ -80,11 +81,8 @@ internal sealed class GovernanceBoardVotingController(
         {
             ApplicationId = application.ApplicationId,
             UserId = application.UserId,
-            Email = application.Email,
             FirstName = application.FirstName,
             LastName = application.LastName,
-            City = application.City,
-            CountryCode = application.CountryCode,
             MembershipTier = application.MembershipTier,
             Status = application.Status,
             ApplicationMotivation = application.Motivation,
@@ -115,7 +113,7 @@ internal sealed class GovernanceBoardVotingController(
     [Authorize(Policy = PolicyNames.BoardOnly)]
     public async Task<IActionResult> Vote(Guid applicationId, [BindRequired] VoteChoice vote, string? note)
     {
-        var currentUser = await GetCurrentUserInfoAsync();
+        var currentUser = await GetCurrentUserInfoAsync(HttpContext.RequestAborted);
         if (currentUser is null)
             return NotFound();
         if (!ModelState.IsValid)
@@ -158,7 +156,7 @@ internal sealed class GovernanceBoardVotingController(
     [Authorize(Policy = PolicyNames.AdminOnly)]
     public async Task<IActionResult> Finalize(BoardVotingFinalizeModel model)
     {
-        var currentUser = await GetCurrentUserInfoAsync();
+        var currentUser = await GetCurrentUserInfoAsync(HttpContext.RequestAborted);
         if (currentUser is null)
             return NotFound();
         if (!ModelState.IsValid)

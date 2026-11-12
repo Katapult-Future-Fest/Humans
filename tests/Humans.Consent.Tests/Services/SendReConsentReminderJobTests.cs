@@ -24,15 +24,15 @@ namespace Humans.Consent.Tests.Services;
 public sealed class SendReConsentReminderJobTests
 {
     [HumansTheory]
-    [InlineData("send", "en", "Reminder: 3 days to review updated documents")]
-    [InlineData("stamp", "en", "Reminder: 3 days to review updated documents")]
-    [InlineData("success", "en", "Reminder: 3 days to review updated documents")]
-    [InlineData("success", "es", "Recordatorio: 3 días para revisar documentos actualizados")]
-    [InlineData("success", "", "Reminder: 3 days to review updated documents")]
-    [InlineData("success", " ", "Reminder: 3 days to review updated documents")]
-    [InlineData("success", "not a culture!", "Reminder: 3 days to review updated documents")]
-    [InlineData("success", "fr-FR", "Reminder: 3 days to review updated documents")]
-    public async Task RecipientFailure_DoesNotPreventLaterRemindersOrHideJobFailure(string outcome, string language, string expectedSubject)
+    [InlineData("send", "en", "en")]
+    [InlineData("stamp", "en", "en")]
+    [InlineData("success", "en", "en")]
+    [InlineData("success", "es", "es")]
+    [InlineData("success", "", "en")]
+    [InlineData("success", " ", "en")]
+    [InlineData("success", "not a culture!", "en")]
+    [InlineData("success", "fr-FR", "en")]
+    public async Task RecipientFailure_DoesNotPreventLaterRemindersOrHideJobFailure(string outcome, string language, string expectedLanguage)
     {
         using var serverCulture = new CultureScope("fr");
         var now = Instant.FromUtc(2026, 10, 2, 4, 0);
@@ -74,6 +74,9 @@ public sealed class SendReConsentReminderJobTests
             metrics, NullLogger<SendReConsentReminderJob>.Instance, new FakeClock(now));
 
         var error = await Record.ExceptionAsync(() => job.ExecuteAsync(TestContext.Current.CancellationToken));
+        var expectedCulture = System.Globalization.CultureInfo.GetCultureInfo(expectedLanguage);
+        var expectedSubject = string.Format(expectedCulture, new System.Resources.ResourceManager(typeof(ConsentResource))
+            .GetString("Consent_Email_ReConsentReminder_Subject", expectedCulture)!, 3);
 
         await email.Received(1).SendAsync(
             Arg.Is<EmailMessage>(m => m.RecipientEmail == first.Email
@@ -99,6 +102,65 @@ public sealed class SendReConsentReminderJobTests
         }
         if (string.Equals(outcome, "send", StringComparison.Ordinal))
             await reminderRepo.DidNotReceive().UpsertAsync(first.Id, Arg.Any<Instant>(), Arg.Any<CancellationToken>());
+    }
+
+    [HumansTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task StampFailure_RetryReusesDeliveryId_AndNextCooldownCycleGetsANewOne(bool previouslyReminded)
+    {
+        var now = Instant.FromUtc(2026, 10, 2, 4, 0);
+        var clock = new FakeClock(now);
+        var member = MakeUser("member@example.com");
+        var membership = Substitute.For<IMembershipCalculator>();
+        membership.GetUsersRequiringStatusUpdateAsync(Arg.Any<CancellationToken>(), Arg.Any<Duration?>())
+            .Returns(new[] { member.Id });
+        var legal = Substitute.For<ILegalDocumentSyncManagement>();
+        legal.GetRequiredVersionsAsync(Arg.Any<CancellationToken>()).Returns([]);
+        var users = Substitute.For<IUserService>();
+        users.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<Guid, UserInfo> { [member.Id] = member });
+        var stamps = new List<ConsentReminder>();
+        if (previouslyReminded)
+            stamps.Add(new ConsentReminder { UserId = member.Id, LastSentAt = now - Duration.FromDays(14) });
+        var repo = Substitute.For<IConsentReminderRepository>();
+        repo.GetByUserIdsAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(_ => stamps.ToList());
+        var failStamp = true;
+        repo.UpsertAsync(member.Id, Arg.Any<Instant>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                if (failStamp)
+                {
+                    failStamp = false;
+                    return Task.FromException(new IOException("Stamp unavailable"));
+                }
+                stamps.Clear();
+                stamps.Add(new ConsentReminder { UserId = member.Id, LastSentAt = call.Arg<Instant>() });
+                return Task.CompletedTask;
+            });
+        var deliveries = new List<EmailMessage>();
+        var email = Substitute.For<IEmailService>();
+        email.When(sender => sender.SendAsync(Arg.Any<EmailMessage>(), Arg.Any<CancellationToken>()))
+            .Do(call => deliveries.Add(call.Arg<EmailMessage>()));
+        var job = new SendReConsentReminderJob(membership, legal, users, new ConsentReminderService(repo, users), email,
+            TestConsentEmails.Create(), Options.Create(new EmailSettings { ConsentReminderCooldownDays = 7 }),
+            Substitute.For<IHumansMetrics>(), NullLogger<SendReConsentReminderJob>.Instance, clock);
+        var action = () => job.ExecuteAsync(TestContext.Current.CancellationToken);
+
+        await action.Should().ThrowAsync<AggregateException>();
+        await action();
+        await action();
+
+        deliveries.Should().HaveCount(2);
+        deliveries[0].DeliveryId.Should().NotBeNull();
+        deliveries[1].DeliveryId.Should().Be(deliveries[0].DeliveryId);
+
+        clock.Advance(Duration.FromDays(8));
+        await action();
+
+        deliveries.Should().HaveCount(3);
+        deliveries[2].DeliveryId.Should().NotBeNull().And.NotBe(deliveries[0].DeliveryId!.Value);
     }
 
     [HumansFact]
@@ -136,7 +198,6 @@ public sealed class SendReConsentReminderJobTests
     {
         var user = new User { Id = Guid.NewGuid(), BurnerName = "Member" };
         return UserInfo.Create(user,
-            [new UserEmail { Id = Guid.NewGuid(), UserId = user.Id, Email = email, IsVerified = true, IsPrimary = true }],
-            [], [], null, []);
+            [new UserEmail { Id = Guid.NewGuid(), UserId = user.Id, Email = email, IsVerified = true, IsPrimary = true }], [], null);
     }
 }
