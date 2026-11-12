@@ -27,9 +27,7 @@ internal static class ProfileSummaryViewModelBuilder
         return new ProfileSummaryViewModel
         {
             UserId = info.Id,
-            DisplayName = info.BurnerName,
             Email = info.Email,
-            ProfilePictureUrl = info.ProfilePictureUrl,
             PreferredLanguage = info.PreferredLanguage,
             MembershipTier = tier.ToString(),
             MembershipStatus = info.IsSuspended ? "Suspended"
@@ -39,12 +37,15 @@ internal static class ProfileSummaryViewModelBuilder
             IsSuspended = info.IsSuspended,
             Teams = orderedMemberships.Where(m => !m.IsHidden).Select(m => m.TeamName).ToList(),
             HiddenTeams = orderedMemberships.Where(m => m.IsHidden).Select(m => m.TeamName).ToList(),
-            Languages = profile.Languages.Select(pl => new ProfileLanguageDisplayViewModel
-            {
-                LanguageCode = pl.LanguageCode,
-                LanguageName = LanguageCatalog.GetDisplayName(pl.LanguageCode),
-                Proficiency = pl.Proficiency
-            }).ToList(),
+            Languages = profile.Languages
+                .OrderByDescending(pl => pl.Proficiency)
+                .ThenBy(pl => pl.LanguageCode, StringComparer.OrdinalIgnoreCase)
+                .Select(pl => new ProfileLanguageDisplayViewModel
+                {
+                    LanguageCode = pl.LanguageCode,
+                    LanguageName = LanguageCatalog.GetDisplayName(pl.LanguageCode),
+                    Proficiency = pl.Proficiency
+                }).ToList(),
             CampName = camp?.Season?.Name,
             CampRoles = camp?.Roles ?? []
         };

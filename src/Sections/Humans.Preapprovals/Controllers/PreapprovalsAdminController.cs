@@ -20,7 +20,7 @@ namespace Humans.Preapprovals.Controllers;
 internal sealed class PreapprovalsAdminController(
     IPreapprovalManagement preapprovals,
     IUserService users,
-    IHoldedFinanceService finance,
+    IFinanceService finance,
     IStringLocalizer<PreapprovalsResource> localizer,
     IAuthorizationService authorization,
     IClock clock,
@@ -32,35 +32,37 @@ internal sealed class PreapprovalsAdminController(
     [HttpGet("")]
     public async Task<IActionResult> Index(CancellationToken ct)
     {
-        var (error, user) = await ResolveCurrentUserOrChallengeAsync(ct);
+        var (error, _) = await ResolveCurrentUserOrChallengeAsync(ct);
         if (error is not null) return error;
 
-        var canAdminister = PreapprovalsPolicyHandler.IsManagingRole(User);
-        var programs = await preapprovals.GetProgramsAsync(ct);
-        if (!canAdminister)
-            programs = programs.Where(p => p.IsManager(user.Id)).ToList();
+        var programs = new List<ProgramInfo>();
+        foreach (var program in await preapprovals.GetProgramsAsync(ct))
+        {
+            if ((await authorization.AuthorizeAsync(User, program, ProgramOperationRequirement.View)).Succeeded)
+                programs.Add(program);
+        }
         return View(new AdminIndexViewModel
         {
             Today = Today,
             Programs = programs.OrderBy(p => p.Status).ThenBy(p => p.ClaimBy).ToList(),
-            CanAdminister = canAdminister
+            CanAdminister = (await authorization.AuthorizeAsync(User, FinancePolicies.Manage)).Succeeded
         });
     }
 
     [HttpGet("New")]
+    [Authorize(Policy = FinancePolicies.Manage)]
     public async Task<IActionResult> New(CancellationToken ct)
     {
-        if (!PreapprovalsPolicyHandler.IsManagingRole(User)) return Forbid();
         return View("Form", await FillAsync(new ProgramFormViewModel { ClaimBy = Today.PlusMonths(6) }, ct));
     }
 
     [HttpPost("New")]
+    [Authorize(Policy = FinancePolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> New(ProgramFormViewModel model, CancellationToken ct)
     {
         var (error, user) = await ResolveCurrentUserOrChallengeAsync(ct);
         if (error is not null) return error;
-        if (!PreapprovalsPolicyHandler.IsManagingRole(User)) return Forbid();
         if (!ModelState.IsValid) return View("Form", await FillAsync(model, ct));
 
         var result = await preapprovals.CreateProgramAsync(model.ToSave(), user.Id, ct);
@@ -77,18 +79,15 @@ internal sealed class PreapprovalsAdminController(
     [HttpGet("{programId:guid}")]
     public async Task<IActionResult> Program(Guid programId, CancellationToken ct)
     {
-        var (program, forbidden) = await AuthorizedAsync(programId, ProgramOperationRequirement.Manage, ct);
+        var (program, forbidden) = await AuthorizedAsync(programId, ProgramOperationRequirement.View, ct);
         if (forbidden is not null) return forbidden;
 
-        var ids = program!.Grants.Select(g => g.BeneficiaryUserId)
-            .Concat(program.Grants.Select(g => g.DecidedByUserId).OfType<Guid>())
-            .Concat(program.ManagerUserIds).Distinct().ToList();
         return View(new AdminProgramViewModel
         {
-            Program = program,
+            Program = program!,
             Today = Today,
-            CanAdminister = PreapprovalsPolicyHandler.IsManagingRole(User),
-            People = await UserService.GetUserInfosAsync(ids, ct)
+            CanAdminister = (await authorization.AuthorizeAsync(User, program, ProgramOperationRequirement.Administer)).Succeeded,
+            CanManage = (await authorization.AuthorizeAsync(User, program, ProgramOperationRequirement.Manage)).Succeeded,
         });
     }
 
@@ -135,27 +134,27 @@ internal sealed class PreapprovalsAdminController(
     [ValidateAntiForgeryToken]
     public Task<IActionResult> IssueMany(Guid programId, Guid[] userIds, CancellationToken ct) =>
         ManageAsync(programId, actor => preapprovals.IssueManyAsync(programId, userIds, actor, ct),
-            $"{userIds.Distinct().Count()} pre-approvals issued", ct);
+            "Pre-approvals issued", ct);
 
     [HttpPost("{programId:guid}/Grants/{grantId:guid}/Approve")]
     [ValidateAntiForgeryToken]
     public Task<IActionResult> Approve(Guid programId, Guid grantId, decimal? amount, CancellationToken ct) =>
-        ManageAsync(programId, actor => preapprovals.ApproveAsync(grantId, amount, actor, ct), "Application approved", ct, grantId);
+        ManageAsync(programId, actor => preapprovals.ApproveAsync(programId, grantId, amount, actor, ct), "Application approved", ct, grantId);
 
     [HttpPost("{programId:guid}/Grants/{grantId:guid}/Decline")]
     [ValidateAntiForgeryToken]
     public Task<IActionResult> Decline(Guid programId, Guid grantId, string? note, CancellationToken ct) =>
-        ManageAsync(programId, actor => preapprovals.DeclineAsync(grantId, note, actor, ct), "Application declined", ct, grantId);
+        ManageAsync(programId, actor => preapprovals.DeclineAsync(programId, grantId, note, actor, ct), "Application declined", ct, grantId);
 
     [HttpPost("{programId:guid}/Grants/{grantId:guid}/Revoke")]
     [ValidateAntiForgeryToken]
     public Task<IActionResult> Revoke(Guid programId, Guid grantId, string? reason, CancellationToken ct) =>
-        ManageAsync(programId, actor => preapprovals.RevokeAsync(grantId, reason, actor, ct), "Pre-approval revoked", ct, grantId);
+        ManageAsync(programId, actor => preapprovals.RevokeAsync(programId, grantId, reason, actor, ct), "Pre-approval revoked", ct, grantId);
 
     [HttpPost("{programId:guid}/Grants/{grantId:guid}/Amount")]
     [ValidateAntiForgeryToken]
     public Task<IActionResult> Amount(Guid programId, Guid grantId, decimal amount, CancellationToken ct) =>
-        ManageAsync(programId, actor => preapprovals.ChangeAmountAsync(grantId, amount, actor, ct), "Amount changed", ct, grantId);
+        ManageAsync(programId, actor => preapprovals.ChangeAmountAsync(programId, grantId, amount, actor, ct), "Amount changed", ct, grantId);
 
     /// <summary>Loads the program and checks the operation against it; 404 and 403 as results.</summary>
     private async Task<(ProgramInfo? Program, IActionResult? Error)> AuthorizedAsync(
@@ -184,6 +183,7 @@ internal sealed class PreapprovalsAdminController(
         }
 
         var result = await act(user.Id);
+        if (result.Refusal is { Key: PreapprovalErrorKeys.NotFound }) return NotFound();
         if (result.Refusal is { } refusal)
         {
             logger.LogWarning("Preapprovals admin action on {ProgramId}: rule {Rule}", programId, refusal.Key);
@@ -203,7 +203,6 @@ internal sealed class PreapprovalsAdminController(
     private async Task<ProgramFormViewModel> FillAsync(ProgramFormViewModel model, CancellationToken ct)
     {
         model.Accounts = await finance.ListExpenseAccountsAsync(activeOnly: true, ct);
-        model.People = await UserService.GetUserInfosAsync(model.ManagerUserIds, ct);
         return model;
     }
 }

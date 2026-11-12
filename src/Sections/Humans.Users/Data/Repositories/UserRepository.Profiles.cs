@@ -142,18 +142,8 @@ internal sealed partial class UserRepository
 
         if (profile is not null)
         {
-            // GDPR Art. 9 health and diet data: deletion-only, because a merge must not drop it.
-            profile.DietaryPreference = null;
-            profile.Allergies = [];
-            profile.Intolerances = [];
-            profile.AllergyOtherText = null;
-            profile.IntoleranceOtherText = null;
+            // GDPR Art. 9 health data: deletion-only, because a merge must not drop it.
             profile.MedicalConditions = null;
-            profile.ConsentCheckNotes = null;
-            profile.RejectionReason = null;
-
-            // Deletion-only too: the merge fold keeps the source IBAN so the survivor can still be paid.
-            profile.Iban = null;
 
             var languages = await ctx.ProfileLanguages
                 .Where(pl => pl.ProfileId == profile.Id)
@@ -210,7 +200,7 @@ internal sealed partial class UserRepository
         return suspended;
     }
 
-    public async Task<(Guid ProfileId, string? ContentType, string? StorageKey)?> ReassignSubAggregatesToUserAsync(
+    public async Task ReassignSubAggregatesToUserAsync(
         Guid sourceUserId, Guid targetUserId, Instant updatedAt,
         CancellationToken ct = default)
     {
@@ -219,16 +209,12 @@ internal sealed partial class UserRepository
         var sourceProfile = await ctx.Profiles
             .FirstOrDefaultAsync(p => p.UserId == sourceUserId, ct);
         if (sourceProfile is null)
-            return null;
+            return;
 
         var targetProfile = await ctx.Profiles
             .FirstOrDefaultAsync(p => p.UserId == targetUserId, ct);
         if (targetProfile is null)
-            return null;
-
-        var previousPicture = (ProfileId: sourceProfile.Id,
-            ContentType: sourceProfile.ProfilePictureContentType,
-            StorageKey: sourceProfile.ProfilePictureStorageKey);
+            return;
 
         var sourceVolunteerHistory = await ctx.VolunteerHistoryEntries
             .Where(v => v.ProfileId == sourceProfile.Id)
@@ -308,7 +294,6 @@ internal sealed partial class UserRepository
         sourceProfile.UpdatedAt = updatedAt;
 
         await ctx.SaveChangesAsync(ct);
-        return previousPicture;
     }
 
     public async Task<bool> AnonymizeForDeletionByUserIdAsync(

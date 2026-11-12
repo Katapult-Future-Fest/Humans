@@ -56,16 +56,14 @@ public class ICalFeedServiceTests
         var info = UserInfo.Create(
             user: user,
             userEmails: [],
-            eventParticipations: [],
             externalLogins: [],
-            profile: null,
-            communicationPreferences: []);
+            profile: null);
         _users.GetUserInfoAsync(requestedId, Arg.Any<CancellationToken>())
             .Returns(new ValueTask<UserInfo?>(info));
     }
 
     [HumansFact]
-    public async Task GetFeedItemsAsync_MergesAndSortsByStart()
+    public async Task GetFeedItemsAsync_MergesContributors()
     {
         var early = Instant.FromUtc(2026, 7, 1, 10, 0);
         var late = Instant.FromUtc(2026, 7, 3, 10, 0);
@@ -76,8 +74,7 @@ public class ICalFeedServiceTests
         var items = await service.GetFeedItemsAsync(Guid.NewGuid(), TestContext.Current.CancellationToken);
 
         items.Should().HaveCount(2);
-        items[0].Uid.Should().Be("a@x");
-        items[1].Uid.Should().Be("b@x");
+        items.Select(i => i.Uid).Should().BeEquivalentTo(["a@x", "b@x"]);
     }
 
     [HumansTheory]
@@ -176,12 +173,7 @@ public class ICalFeedServiceTests
     }
 
     [HumansTheory]
-    [InlineData("en")]
-    [InlineData("es")]
-    [InlineData("de")]
-    [InlineData("it")]
-    [InlineData("fr")]
-    [InlineData("ca")]
+    [MemberData(nameof(SupportedCultures.All), MemberType = typeof(SupportedCultures))]
     public async Task GetFeedIcsAsync_ValidToken_SerializesItemsAsUtcVEvents(string language)
     {
         var userId = Guid.NewGuid();
@@ -193,6 +185,7 @@ public class ICalFeedServiceTests
         {
             await Task.Yield();
             return [
+                MakeItem("later@humans.nobodies.team", "Events", Instant.FromUtc(2026, 7, 3, 8, 0)),
                 MakeItem("shift-1@humans.nobodies.team", "Shifts", Instant.FromUtc(2026, 7, 2, 8, 0))
                     with { Summary = $"Owner language {CultureInfo.CurrentUICulture.Name}" },
             ];
@@ -215,7 +208,46 @@ public class ICalFeedServiceTests
 
         // Round-trips through the same library calendar clients use.
         var parsed = Ical.Net.Calendar.Load(ics);
-        parsed!.Events.Should().HaveCount(1);
+        parsed!.Events.Select(e => e.Uid).Should().Equal("shift-1@humans.nobodies.team", "later@humans.nobodies.team");
+    }
+
+    [HumansFact]
+    public async Task GetFeedIcsAsync_RepeatingItem_IsOneSeriesInItsOwnZone()
+    {
+        var userId = Guid.NewGuid();
+        var token = Guid.NewGuid();
+        StubUser(userId, icalToken: token);
+        var start = Instant.FromUtc(2026, 6, 2, 17, 0);
+        var item = MakeItem("wg@humans.nobodies.team", "Workgroups", start) with { RecurrenceRule = "FREQ=WEEKLY;COUNT=3", RecurrenceTimezone = "Europe/Madrid" };
+        var service = CreateService(new FakeContributor(item));
+
+        var ics = await service.GetFeedIcsAsync(userId, token, TestContext.Current.CancellationToken);
+
+        ics.Should().Contain("DTSTART;TZID=Europe/Madrid:20260602T190000");
+        ics.Should().Contain("RRULE:FREQ=WEEKLY;COUNT=3");
+        Ical.Net.Calendar.Load(ics)!.Events.Should().ContainSingle();
+    }
+
+    [HumansFact]
+    public async Task GetFeedIcsAsync_LocationUrl_IsAGoogleConferenceLeadsTheDescriptionAndFillsAnEmptyLocation()
+    {
+        var userId = Guid.NewGuid();
+        var token = Guid.NewGuid();
+        StubUser(userId, icalToken: token);
+        const string url = "https://meet.example.org/abc";
+        var start = Instant.FromUtc(2026, 6, 2, 17, 0);
+        var service = CreateService(new FakeContributor(
+            MakeItem("a@x", "Workgroups", start) with { Description = "Agenda", Location = "Room 1", LocationUrl = url },
+            MakeItem("b@x", "Workgroups", start.Plus(Duration.FromHours(2))) with { Description = null, Location = null, LocationUrl = url }));
+
+        var ics = await service.GetFeedIcsAsync(userId, token, TestContext.Current.CancellationToken);
+
+        ics.Should().Contain($"X-GOOGLE-CONFERENCE:{url}");
+        var events = Ical.Net.Calendar.Load(ics!)!.Events;
+        events[0]!.Description.Should().Be($"{url}\n\nAgenda");
+        events[0]!.Location.Should().Be("Room 1");
+        events[1]!.Description.Should().Be(url);
+        events[1]!.Location.Should().Be(url);
     }
 
     [HumansFact]

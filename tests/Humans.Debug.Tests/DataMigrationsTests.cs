@@ -109,11 +109,14 @@ public class DataMigrationsTests
     [HumansFact]
     public async Task Screen_lists_the_reports()
     {
+        var original = _migrations.Migrations().Single();
+        _migrations.Additional = [original with { Key = "zz.alpha", Section = "Alpha" }, original with { Key = "aa.fake" }];
         var result = await Controller(_actorId).Index(Ct);
 
-        result.Should().BeOfType<ViewResult>()
-            .Which.Model.Should().BeAssignableTo<IReadOnlyList<DataMigrationReport>>()
-            .Which.Should().ContainSingle(r => string.Equals(r.Migration.Key, Key, StringComparison.Ordinal) && r.Status.Pending == 2);
+        var reports = result.Should().BeOfType<ViewResult>()
+            .Which.Model.Should().BeAssignableTo<IReadOnlyList<DataMigrationReport>>().Which;
+        reports.Select(report => report.Migration.Key).Should().Equal("zz.alpha", "aa.fake", Key);
+        reports.Should().ContainSingle(r => string.Equals(r.Migration.Key, Key, StringComparison.Ordinal) && r.Status.Pending == 2);
     }
 
     [HumansFact]
@@ -154,6 +157,8 @@ public class DataMigrationsTests
     [HumansFact]
     public async Task Endpoint_publishes_keys_counts_and_done_but_never_row_data()
     {
+        var original = _migrations.Migrations().Single();
+        _migrations.Additional = [original with { Key = "zz.alpha", Section = "Alpha" }, original with { Key = "aa.fake" }];
         var http = new DefaultHttpContext { RequestServices = _services };
         http.Response.Body = new MemoryStream();
 
@@ -165,7 +170,11 @@ public class DataMigrationsTests
 
         using var json = JsonDocument.Parse(body);
         json.RootElement.EnumerateObject().Select(p => p.Name).Should().Equal("version", "migrations");
-        var migration = json.RootElement.GetProperty("migrations").EnumerateArray().Should().ContainSingle().Subject;
+        var migrations = json.RootElement.GetProperty("migrations").EnumerateArray().ToList();
+        migrations.Select(migration => migration.GetProperty("key").GetString()).Should().Equal("zz.alpha", "aa.fake", Key);
+        foreach (var item in migrations)
+            item.EnumerateObject().Select(property => property.Name).Should().Equal("key", "pending", "done");
+        var migration = migrations.Single(item => string.Equals(item.GetProperty("key").GetString(), Key, StringComparison.Ordinal));
         migration.EnumerateObject().Select(p => p.Name).Should().Equal("key", "pending", "done");
         migration.GetProperty("key").GetString().Should().Be(Key);
         migration.GetProperty("pending").GetInt32().Should().Be(2);
@@ -182,7 +191,69 @@ public class DataMigrationsTests
             .Single(e => string.Equals(e.RoutePattern.RawText, "/api/data-migrations", StringComparison.Ordinal));
     }
 
-    private DataMigrationsController Controller(Guid? actorId)
+    [HumansTheory]
+    [Xunit.InlineData(AccountScenario.Merged)]
+    [Xunit.InlineData(AccountScenario.Missing)]
+    [Xunit.InlineData(AccountScenario.Cancelled)]
+    public async Task Apply_resolves_account_before_invoking_migration(AccountScenario account)
+    {
+        var users = Substitute.For<IUserService>();
+        var survivor = Guid.NewGuid();
+        using var request = new CancellationTokenSource();
+        users.GetUserInfoAsync(_actorId, Arg.Any<CancellationToken>()).Returns(call =>
+        {
+            call.Arg<CancellationToken>().Should().Be(request.Token);
+            call.Arg<CancellationToken>().ThrowIfCancellationRequested();
+            return new ValueTask<UserInfo?>(account == AccountScenario.Missing ? null :
+                UserInfo.Create(new User { Id = survivor }, [], [], null));
+        });
+        var controller = Controller(_actorId, users);
+        controller.HttpContext.RequestAborted = request.Token;
+        if (account == AccountScenario.Cancelled)
+            await request.CancelAsync();
+        var apply = () => controller.Apply(Key, request.Token);
+
+        if (account == AccountScenario.Cancelled)
+            await apply.Should().ThrowAsync<OperationCanceledException>();
+        else if (account == AccountScenario.Missing)
+            (await apply()).Should().BeOfType<UnauthorizedResult>();
+        else
+        {
+            (await apply()).Should().BeOfType<RedirectToActionResult>();
+            _migrations.LastActor.Should().Be(survivor);
+            await _audit.Received(1).LogAsync(DebugAuditActions.DataMigrationApplied,
+                "DataMigration", Guid.Empty, Arg.Any<string>(), survivor);
+            return;
+        }
+
+        _migrations.ApplyCalls.Should().Be(0);
+        _audit.ReceivedCalls().Should().BeEmpty();
+        _pending.Should().HaveCount(2);
+    }
+
+    [HumansFact]
+    public async Task Widget_gallery_stops_loading_when_account_lookup_is_cancelled()
+    {
+        var users = Substitute.For<IUserService>();
+        using var request = new CancellationTokenSource();
+        users.GetUserInfoAsync(_actorId, Arg.Any<CancellationToken>()).Returns(call =>
+        {
+            call.Arg<CancellationToken>().ThrowIfCancellationRequested();
+            return new ValueTask<UserInfo?>(UserInfo.Create(new User { Id = _actorId }, [], [], null));
+        });
+        var controller = new WidgetGalleryController(users)
+        {
+            ControllerContext = Controller(_actorId).ControllerContext,
+        };
+        controller.HttpContext.RequestAborted = request.Token;
+        await request.CancelAsync();
+
+        var load = () => controller.Index();
+
+        await load.Should().ThrowAsync<OperationCanceledException>();
+    }
+
+    private DataMigrationsController Controller(Guid? actorId, IUserService? users = null)
     {
         var claims = actorId is { } id ? [new Claim(ClaimTypes.NameIdentifier, id.ToString())] : Array.Empty<Claim>();
         var http = new DefaultHttpContext
@@ -190,7 +261,14 @@ public class DataMigrationsTests
             User = new ClaimsPrincipal(new ClaimsIdentity(claims, "Test")),
             RequestServices = _services,
         };
-        return new DataMigrationsController(Substitute.For<IUserService>(), Service)
+        if (users is null)
+        {
+            users = Substitute.For<IUserService>();
+            if (actorId is { } knownId)
+                users.GetUserInfoAsync(knownId, Arg.Any<CancellationToken>())
+                    .Returns(UserInfo.Create(new User { Id = knownId }, [], [], null));
+        }
+        return new DataMigrationsController(users, Service)
         {
             ControllerContext = new ControllerContext { HttpContext = http },
             TempData = new TempDataDictionary(http, Substitute.For<ITempDataProvider>()),
@@ -203,6 +281,7 @@ public class DataMigrationsTests
     {
         public int ApplyCalls { get; private set; }
         public Guid? LastActor { get; private set; }
+        public IReadOnlyList<DataMigration> Additional { get; set; } = [];
 
         public IEnumerable<DataMigration> Migrations() =>
         [
@@ -217,6 +296,7 @@ public class DataMigrationsTests
                     pending.Clear();
                     return Task.FromResult(written);
                 }),
+            .. Additional,
         ];
     }
 }

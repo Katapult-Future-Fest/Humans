@@ -11,24 +11,16 @@ internal static class UserInfoFactory
     public static UserInfo Create(
         User user,
         IReadOnlyList<UserEmail> userEmails,
-        IReadOnlyList<EventParticipation> eventParticipations,
         IReadOnlyList<(string Provider, string ProviderKey)> externalLogins,
         Profile? profile,
         IReadOnlyList<ContactField> contactFields,
         IReadOnlyList<ProfileLanguage> profileLanguages,
-        IReadOnlyList<VolunteerHistoryEntry> volunteerHistory,
-        IReadOnlyList<CommunicationPreference> communicationPreferences) =>
+        IReadOnlyList<VolunteerHistoryEntry> volunteerHistory) =>
         UserInfo.Create(
             user,
             userEmails,
-            eventParticipations,
             externalLogins,
-            ToProfileInfo(profile, contactFields, profileLanguages, volunteerHistory),
-            communicationPreferences
-                .Select(c => new LegacyCommunicationPreferenceInfo(
-                    c.Id, c.Category, c.OptedOut, c.InboxEnabled,
-                    c.UpdatedAt, c.UpdateSource, c.SubscribedAt))
-                .ToList());
+            ToProfileInfo(profile, contactFields, profileLanguages, volunteerHistory));
 
     private static ProfileInfo? ToProfileInfo(
         Profile? profile,
@@ -40,19 +32,15 @@ internal static class UserInfoFactory
             return null;
 
         var contactFieldInfos = contactFields
-            .OrderBy(c => c.DisplayOrder)
             .Select(c => new ContactFieldInfo(
                 c.Id, c.FieldType, c.CustomLabel, c.Value, c.Visibility, c.DisplayOrder))
             .ToList();
 
         var languageInfos = profileLanguages
-            .OrderByDescending(l => l.Proficiency)
-            .ThenBy(l => l.LanguageCode, StringComparer.OrdinalIgnoreCase)
             .Select(l => new ProfileLanguageInfo(l.Id, l.LanguageCode, l.Proficiency))
             .ToList();
 
         var volunteerHistoryInfos = volunteerHistory
-            .OrderByDescending(v => v.Date)
             .Select(v => new VolunteerHistoryInfo(v.Id, v.Date, v.EventName, v.Description))
             .ToList();
 
@@ -73,7 +61,6 @@ internal static class UserInfoFactory
             EmergencyContactName: profile.EmergencyContactName,
             EmergencyContactPhone: profile.EmergencyContactPhone,
             EmergencyContactRelationship: profile.EmergencyContactRelationship,
-            MedicalConditions: profile.MedicalConditions,
             HasCustomPicture: profile.ProfilePictureContentType is not null,
             ProfilePictureContentType: profile.ProfilePictureContentType,
             CreatedAt: profile.CreatedAt,
@@ -81,15 +68,6 @@ internal static class UserInfoFactory
             AdminNotes: profile.AdminNotes,
             ContributionInterests: profile.ContributionInterests,
             BoardNotes: profile.BoardNotes,
-            Iban: profile.Iban,
-            IsApproved: profile.IsApproved,
-            ConsentCheckStatus: profile.ConsentCheckStatus,
-            ConsentCheckAt: profile.ConsentCheckAt,
-            ConsentCheckedByUserId: profile.ConsentCheckedByUserId,
-            ConsentCheckNotes: profile.ConsentCheckNotes,
-            RejectionReason: profile.RejectionReason,
-            RejectedAt: profile.RejectedAt,
-            RejectedByUserId: profile.RejectedByUserId,
             NoPriorBurnExperience: profile.NoPriorBurnExperience,
             ContactFields: contactFieldInfos,
             Languages: languageInfos,

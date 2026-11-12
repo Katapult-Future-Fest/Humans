@@ -10,7 +10,7 @@ namespace Humans.Web.Services;
 /// The first path segment of <c>ReturnUrl</c> is matched (case-insensitively) against
 /// <see cref="Segments"/>; each entry has a <c>LinkPreview_{Segment}_Title</c> and
 /// <c>LinkPreview_{Segment}_Description</c> key in SharedResource. Adding a top-level route
-/// means adding it here plus the two keys in all six cultures. Only local URLs match; nothing
+/// means adding it here plus the two keys in all supported cultures. Only local URLs match; nothing
 /// about the target beyond its area ever reaches the preview.
 /// </remarks>
 public static class LoginLinkPreview
@@ -19,7 +19,7 @@ public static class LoginLinkPreview
     public static readonly IReadOnlyList<string> Segments =
     [
         "About", "Agent", "Barrios", "Budget", "Calendar", "Camp", "Camps", "Cantina",
-        "CityPlanning", "Consent", "Events", "Expenses", "Feedback", "Finance", "Gate",
+        "CityPlanning", "Consent", "Events", "Expenses", "Finance", "Gate",
         "Governance", "Guide", "Issues", "Legal", "Notifications", "Profile", "Rideshare",
         "Search", "Settings", "Shifts", "Store", "Survey", "Teams", "Tickets", "Tour",
         "Welcome", "Workgroups"

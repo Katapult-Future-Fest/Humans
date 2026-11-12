@@ -57,11 +57,11 @@ Not every multi-step cross-repository orchestration needs one, though. `AccountM
 ## Cross-Section FK Columns
 
 <!-- wheat: docs/plans/2026-06-13-q3-transition-plan.md §FK-cut carve-out -->
-A bare `Guid` cross-section FK column gets no index for free. EF auto-created `IX_<table>_<column>` for each cross-section relationship and removed it along with the constraint in nobodies-collective/Humans#992, so any cross-section FK column a query filters or sorts on needs an explicit `HasIndex(...)` in its configuration — `CampMemberConfiguration`, `CampaignGrantConfiguration`, `BudgetAuditLogConfiguration` and `FeedbackReportConfiguration` are the pattern. A missing index here is a production regression that no test surfaces.
+A bare `Guid` cross-section FK column gets no index for free. EF auto-created `IX_<table>_<column>` for each cross-section relationship and removed it along with the constraint in nobodies-collective/Humans#992, so any cross-section FK column a query filters or sorts on needs an explicit `HasIndex(...)` in its configuration — `CampMemberConfiguration`, `CampaignGrantConfiguration` and `BudgetAuditLogConfiguration` are the pattern. A missing index here is a production regression that no test surfaces.
 
 ## Caching
 
-See [`design-rules.md`](design-rules.md) §15 for the structured caching pattern (caching decorator owning a `TrackedCache` / `ConcurrentDictionary`; §4–§5 there describe the retired store + decorator predecessor).
+See [`design-rules.md`, *Section caching pattern*](design-rules.md#section-caching-pattern) for the structured caching pattern (caching decorator owning a `TrackedCache` / `ConcurrentDictionary`).
 
 Two controller-level rules still apply at this layer:
 
@@ -72,12 +72,12 @@ Do not add speculative caching because something "might be slow." At this projec
 
 ## Authorization
 
-See [`design-rules.md`](design-rules.md) §11 for the resource-based authorization pattern and handler inventory.
+See [`design-rules.md`, *Authorization*](design-rules.md#authorization) for the resource-based authorization pattern; each section lists its handlers in its `Docs/<Section>.md`.
 
 Two general rules apply at this layer:
 
 1. Web boundary protection for routes/pages/API endpoints via `[Authorize]` attributes or resource-based authorization handlers.
-2. Service/domain enforcement when violating the rule would create invalid state or bypass workflow policy — but service methods are otherwise auth-free; they trust the caller. The only auth exception is the §11 full-Admin destructive-delete guard.
+2. Service/domain enforcement when violating the rule would create invalid state or bypass workflow policy — but service methods are otherwise auth-free; they trust the caller. The only auth exception is the full-Admin destructive-delete guard (`design-rules.md`, *Authorization*).
 
 Do not rely on hidden buttons or view-only checks for anything important.
 
@@ -95,7 +95,7 @@ These are heuristics, not laws — a clearer name that violates one of them beat
 
 ## Integration
 
-External systems stay behind an interface in the owning section's `Contracts` (project or folder) with the implementation in that section's `Services/` — `IHoldedClient` in `Humans.Holded.Contracts`, the client in `Humans.Holded/Services/`; same shape for Google, Stripe, TicketTailor, MailerLite and Email.
+External systems stay behind an interface in the owning section's `Contracts` (project or folder) with the implementation in that section's `Services/` — Holded's `IHoldedService` and `IHoldedWrite` in `Humans.Holded.Contracts`, the raw `IHoldedClient` internal in `Humans.Holded/Services/`; same shape for Google, Stripe, TicketTailor, MailerLite and Email.
 
 Do not leak raw provider concerns through multiple layers.
 
@@ -166,14 +166,14 @@ Promote a partial to a view component when any of these apply:
 
 Keep as a partial when the rendering is genuinely pure (badges, alerts, validation script tags, language chooser, role/dietary badges driven from a model already loaded by the page).
 
-**Caching at this scale:** view components must **not** inject or use `IMemoryCache` — a documented project rule ([`../../memory/code/viewcomponent-no-cache.md`](../../memory/code/viewcomponent-no-cache.md)), upheld by review rather than tooling: a dedicated analyzer is described in [`roslyn-analysis.md`](roslyn-analysis.md) §"View components may not inject `IMemoryCache`" but is **not yet built** (`Current coverage: none`). When a view component renders an aggregate count that warrants a short cache, the cache lives inline in the owning service (1–2 minute TTL) and that service owns invalidation on writes that affect the aggregate; the view component is a thin pass-through. (The admin-nav pill counts work this way — each is a `PillCount` delegate on the owning section's `ISectionAdminNav` contribution, resolved by `AdminNavItems` for `AdminSidebarViewComponent` and `AdminTabsViewComponent`, and the delegate only calls that section's service interface. The short cache lives in the owning service: the voting count inside `ApplicationDecisionService`, the feedback count inside `FeedbackService`.)
+**Caching at this scale:** view components must **not** inject or use `IMemoryCache` — a documented project rule ([`../../memory/code/viewcomponent-no-cache.md`](../../memory/code/viewcomponent-no-cache.md)), upheld by review rather than tooling: a dedicated analyzer is described in [`roslyn-analysis.md`](roslyn-analysis.md) §"View components may not inject `IMemoryCache`" but is **not yet built** (`Current coverage: none`). When a view component renders an aggregate count that warrants a short cache, the cache lives inline in the owning service (1–2 minute TTL) and that service owns invalidation on writes that affect the aggregate; the view component is a thin pass-through. (The admin-nav pill counts work this way — each is a `PillCount` delegate on the owning section's `ISectionAdminNav` contribution, resolved by `AdminNavItems` for `AdminSidebarViewComponent` and `AdminTabsViewComponent`, and the delegate only calls that section's service interface. The short cache lives in the owning service, e.g. the voting count inside `ApplicationDecisionService`.)
 
 **Conventions:**
 
 - Class: `{Name}ViewComponent.cs` under `ViewComponents/` — of `Humans.Base` if the component is section-agnostic, of the owning section project if it is not, `Humans.Web` otherwise. Section-project view components are discovered by `SectionViewComponentFeatureProvider`.
 - View: `Views/Shared/Components/{Name}/Default.cshtml`
 - ViewModel: `{Name}ViewModel.cs` under `Models/`
-- Invocation: `<vc:{kebab-name} param="…">` tag helper, or `Component.InvokeAsync<T>(...)`/`InvokeAsync(typeof(T), args)` for the internal/cross-section cases (HUM0036 bans invoking by string name, design-rules §8b)
+- Invocation: `<vc:{kebab-name} param="…">` tag helper, or `Component.InvokeAsync<T>(...)`/`InvokeAsync(typeof(T), args)` for the internal/cross-section cases (HUM0036 bans invoking by string name, design-rules.md, *Crosscuts, orchestrators and fan-out*)
 - Responsive table+card pairs render both layouts and toggle via `d-none d-md-block` / `d-md-none` rather than branching per device.
 - authorization tag helpers for role-based visibility
 
@@ -185,7 +185,7 @@ Client-side JavaScript with `fetch()` is appropriate for:
 
 - **Autocomplete/search inputs** that need instant feedback on keystrokes (profile search, member search, volunteer search, shift volunteer search)
 - **Dynamic form field population** that responds to parent field changes (team Google resource dropdown)
-- **Progressive enhancement** for inline actions that avoid full page reloads (notification dismiss/mark-read, feedback detail panel loading)
+- **Progressive enhancement** for inline actions that avoid full page reloads (notification dismiss/mark-read)
 - **Utility behaviors** that are not page content (timezone detection, notification popup, profile popover on hover)
 - **Interactive maps** whose whole surface is a client-rendered canvas driven by a JSON API (the city-planning barrio, container and overview maps; the rideshare board)
 
@@ -205,7 +205,6 @@ All pages are server-rendered with Razor. The following use `fetch()` for the sp
 | `Humans.Shifts/Views/ShiftAdmin/Index.cshtml` | Shift volunteer search + tag creation | Search input + inline action |
 | `Humans.Shifts/wwwroot/js/shifts.js` | Day-signup toggle without reload | Progressive enhancement |
 | `Humans.Notifications/Views/Notifications/Index.cshtml` | Dismiss/mark-read without reload | Progressive enhancement |
-| `Humans.Feedback/Views/Feedback/Index.cshtml` | Master-detail panel loading | Progressive enhancement |
 | `Humans.Issues/Views/Issues/Index.cshtml` | Master-detail panel loaded via Razor partial (`?partial=true`) | Partial-via-AJAX |
 | `Humans.GoogleIntegration/Views/Google/Sync.cshtml` | Tab content loaded via Razor partial (slow Google API) | Partial-via-AJAX |
 | `Humans.Scanner/wwwroot/js/scanner/tickets.js` (`Views/Scanner/Tickets.cshtml`) | Ticket card loaded via Razor partial (`_TicketCard`) on barcode hit | Partial-via-AJAX |
@@ -213,7 +212,7 @@ All pages are server-rendered with Razor. The following use `fetch()` for the sp
 | `Humans.Users/Views/Profile/Edit.cshtml` | Burner-name collision count on keystroke | Search input |
 | `Humans.Email/Views/CommunicationPreferences/Index.cshtml` | Per-preference toggle POST without reload | Progressive enhancement |
 | `Humans.Email/Views/GuestAccount/CommunicationPreferences.cshtml` | Same toggles on the tokenless guest page | Progressive enhancement |
-| `Humans.Agent/Views/Shared/Components/HelpWidget/Default.cshtml` (`<vc:help-widget>`) | In-place feedback submit without leaving the page | Progressive enhancement |
+| `Humans.Agent/Views/Shared/Components/HelpWidget/Default.cshtml` (`<vc:help-widget>`) | In-place issue submit without leaving the page | Progressive enhancement |
 | `Humans.Agent/wwwroot/js/agent/widget.js` | Streamed answer from `/Agent/Ask` (SSE) | Progressive enhancement |
 | `Humans.CityPlanning/wwwroot/js/city-planning/**` | Barrio, container and overview maps read and write `/api/city-planning/*` | Interactive map |
 | `Humans.Rideshare/wwwroot/js/rideshare/board.js` (`Views/Rideshare/Index.cshtml`) | Rideshare board map reads its GeoJSON feed from `RideshareApi` | Interactive map |
@@ -233,10 +232,12 @@ Editing the picker's visible text immediately clears its hidden selected user id
 <!-- wheat: docs/superpowers/specs/2026-06-10-table-component-design.md -->
 Every list table renders through `TableModel.For(rows).Column(...).Build()` (`Humans.Base.Models.Tables`) + `<partial name="_Table" model="table" />` (`Humans.Base/Views/Shared/_Table.cshtml`) — never a hand-authored `<table>`. One column model drives sorting, filtering, and formatting instead of each view re-inventing them.
 
-- **Formats** (`CellFormat`): `Text` (default, null → em-dash), `Date`/`DateTime` (via the date-formatting home above), `Currency`/`Number` (`N2`/`#,##0.##`, no currency symbol — Peter's call), `EnumBadge` (via `EnumBadgeMap`, unmapped values fall back to `bg-secondary`), `BoolIcon`, `Template` (escape hatch for `<vc:>`/`asp-*` cells).
-- **`EnumBadgeMap`** is the single enum→badge-color registry — views never inline a `switch` for badge color. A section in its own project pushes its enum rows in via `Section.Register` (`Humans.Base` cannot name a moved section's enum — see `memory/architecture/base-ui-registries-are-section-populated.md`); un-moved sections' enums are hardcoded in the map's literal.
+- **Formats** (`CellFormat`): `Text` (default, null → em-dash), `Date`/`DateTime` (via the date-formatting home above; `Date` also takes a NodaTime `LocalDate`), `Currency`/`Number` (`N2`/`#,##0.##`, no currency symbol — Peter's call), `EnumBadge` (via `EnumBadgeMap`, unmapped values fall back to `bg-secondary`), `BoolIcon`, `Template` (escape hatch for `<vc:>`/`asp-*` cells).
+- **`EnumBadgeMap`** is the single enum→badge-color registry — views never inline a `switch` for badge color. A section in its own project pushes its enum rows in via `Section.Register` (`Humans.Base` cannot name a moved section's enum — see `memory/architecture/base-ui-registries-are-section-populated.md`); un-moved sections' enums are hardcoded in the map's literal. Outside tables, render an enum status with `<status-badge value="@x.Status" />` (Widget Gallery) — it reads `EnumBadgeMap` and the enum's localized display, so no view or helper owns a badge colour.
 - Clickable rows navigate only on an unmodified primary click on ordinary row content. Nested links and controls keep their own actions; modified or already-handled clicks never navigate the row.
-- **Client mode** (default) sorts/filters in-browser via the `site.js` `data-sortable-table` engine. Sorting moves only the table body’s own rows, preserving nested tables. Auto sorting treats a column as numeric only when every normalized value is a complete finite number; mixed columns and labels beginning with digits use text ordering. Auto-populated dropdowns retain every distinct nonblank label except the empty-value em dash, including labels such as `constructor`; **server mode** (`.ServerMode(...)`) emits sort-link/filter-form query params for controller-driven paging — same column declarations either way.
+- **Client mode** (default) sorts/filters in-browser via the `site.js` `data-sortable-table` engine. Sorting moves only the table body’s own rows, preserving nested tables. Auto sorting treats a column as numeric only when every nonblank normalized value is a complete finite number; mixed columns and labels beginning with digits use text ordering. Auto-populated dropdowns retain every distinct nonblank label except the empty-value em dash, including labels such as `constructor`; **server mode** (`.ServerMode(...)`) emits sort-link/filter-form query params for controller-driven paging — same column declarations either way.
+- Reach for `.Link(header, text, href)`, `.Human(header, userId, link, layout)` and the `Code()` option before a `Template`; a template is for genuinely custom cells (action buttons, several badges), named for its column. A `Template` column sorts by its rendered text unless it passes `sortBy:`. The sort value is written into the page, so never sort a `<vc:human>` cell by a stored name. `.RowData(name, value)` adds a `data-{name}` attribute to each row for page scripts that filter rows.
+- Table filter buttons, the All option, text placeholders and column labels use `SharedResource` in all supported cultures. Column headers and caller-supplied filter content stay owned by their sections. The shared pager also localizes its Previous/Next links and navigation label.
 - Column declaration lives in the view (a code block), not the controller: custom cells need Razor (`<vc:human>`, `Url.Action`); splitting a column list from its templates across two files was rejected as the alternative.
 
 ## Testing
@@ -303,7 +304,7 @@ Stop and reconsider when a change introduces any of these:
 - a `.Include()` that navigates across a domain boundary (Profile → User, Team → Profile, Camp → Profile, etc.)
 - a repository method that takes or returns another domain's type
 - a repository method that returns `IQueryable<T>`
-- inline `IMemoryCache.GetOrCreateAsync` caching canonical domain data inside a service method instead of the §15 caching decorator (short-TTL request-acceleration counts are the sanctioned exception)
+- inline `IMemoryCache.GetOrCreateAsync` caching canonical domain data inside a service method instead of the caching decorator (`design-rules.md`, *Section caching pattern*) (short-TTL request-acceleration counts are the sanctioned exception)
 - a cache is added without a clear invalidation owner
 - a cross-domain nav property being added to an entity (e.g., `TeamMember.User`)
 

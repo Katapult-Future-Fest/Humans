@@ -5,7 +5,7 @@
 Project: `src/Sections/Humans.Backdoor` — service under `Services/`,
 repository under `Data/`. **DbContext:** `BackdoorDbContext`.
 `BackdoorApiKeyRepository` injects `IDbContextFactory<BackdoorDbContext>`
-directly (Singleton, §15b). Owns `backdoor_api_keys`.
+directly (Singleton, per design-rules.md, *Section caching pattern*). Owns `backdoor_api_keys`.
 
 ### BackdoorApiKeyService (Scoped)
 
@@ -26,10 +26,10 @@ Cross-section calls via `IRoleAssignmentService` (Admin/Board eligibility),
 `IUserMerge` (folds an eliminated account's keys onto the survivor).
 
 The `/api/backdoor/*` machine APIs that serve another section (`agent`,
-`issues`, `feedback`, `store`, `surveys`, `finance`, `notifications`) are thin controller orchestrators over that
+`issues`, `store`, `surveys`, `finance`, `notifications`) are thin controller orchestrators over that
 section's contracts interface (`IAgentTranscriptRead`, `IIssueTriage`,
-`IFeedbackTriage`, `IStoreAccountingRead`, `ISurveyAnalysisRead`,
-`IExpenseReportService`, `IHoldedFinanceService`, `IBudgetService`, `INotificationInboxRead`) — Backdoor's own repository is
+`IStoreAccountingRead`, `ISurveyAnalysisRead`,
+`IExpenseReportService`, `IFinanceService`, `IBudgetService`, `INotificationInboxRead`) — Backdoor's own repository is
 never touched by them, and they carry no `###` heading here since each is
 documented in the section that owns the interface. `logs` alone reads
 `InMemoryLogSink` from `Humans.Base` and owns no data either.

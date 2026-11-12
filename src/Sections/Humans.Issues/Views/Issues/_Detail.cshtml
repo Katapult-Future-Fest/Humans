@@ -13,7 +13,7 @@
                     @Model.Title
                 </h4>
                 <div class="d-flex gap-2 align-items-center flex-wrap">
-                    <span class="badge @IssuePresentation.StatusPillClass(Model.Status)">@Localizer.EnumDisplay(Model.Status)</span>
+                    <status-badge value="@Model.Status" localizer="@Localizer" />
                     <span class="badge bg-light text-muted border">@Localizer.EnumDisplay(Model.Category)</span>
                     <span class="badge bg-light text-muted border">@Model.AreaLabel</span>
                 </div>
@@ -45,7 +45,7 @@
 
             @if (Model.Thread.Count == 0)
             {
-                <p class="text-muted small">@Localizer["Issue_NoActivity"]</p>
+                <empty-state class="small">@Localizer["Issue_NoActivity"]</empty-state>
             }
 
             @foreach (var ev in Model.Thread)
@@ -55,7 +55,7 @@
                     <div class="issue-comment border-start ps-3 mb-3 @(ev.ActorIsReporter ? "border-info" : "border-secondary")">
                         <div class="d-flex justify-content-between small text-muted">
                             <span>
-                                <strong>@ev.ActorName</strong>
+                                <strong><vc:human user-id="@(ev.ActorUserId ?? Guid.Empty)" link="None" /></strong>
                                 @if (ev.ActorIsReporter)
                                 {
                                     <span class="badge bg-info bg-opacity-25 text-info-emphasis ms-1" style="font-size: 0.65rem;">@Localizer["Issue_Reporter"]</span>
@@ -70,7 +70,16 @@
                 {
                     <div class="issue-audit text-muted small mb-2">
                         <i class="fa-solid fa-circle-info fa-xs me-1"></i>
-                        <strong>@(ev.ActorName ?? Localizer["Issues_SystemActor"].Value)</strong>
+                        <strong>
+                            @if (ev.ActorUserId is { } actorUserId)
+                            {
+                                <vc:human user-id="@actorUserId" link="None" />
+                            }
+                            else
+                            {
+                                @Localizer["Issues_SystemActor"]
+                            }
+                        </strong>
                         @ev.Description
                         <span class="ms-1">· @ev.At.ToDateTime()</span>
                     </div>
@@ -132,7 +141,7 @@
                     {
                         <form asp-action="UpdateStatus" asp-route-id="@Model.Id" method="post" class="d-inline">
                             @Html.AntiForgeryToken()
-                            <select name="Status" class="form-select form-select-sm detail-auto-submit">
+                            <select name="Status" class="form-select form-select-sm js-auto-submit">
                                 @foreach (var s in Enum.GetValues<IssueStatus>())
                                 {
                                     if (Model.Status == s)
@@ -149,7 +158,7 @@
                     }
                     else
                     {
-                        <span class="badge @IssuePresentation.StatusPillClass(Model.Status)">@Localizer.EnumDisplay(Model.Status)</span>
+                        <status-badge value="@Model.Status" localizer="@Localizer" />
                     }
                 </dd>
 
@@ -162,7 +171,7 @@
                     {
                         <form asp-action="UpdateSection" asp-route-id="@Model.Id" method="post" class="d-inline">
                             @Html.AntiForgeryToken()
-                            <select name="Section" class="form-select form-select-sm detail-auto-submit">
+                            <select name="Section" class="form-select form-select-sm js-auto-submit">
                                 <option value="">@Localizer["Issue_Unspecified"]</option>
                                 @foreach (var kvp in Routing.AreaLabelResourceKeys.OrderBy(p => Localizer[p.Value].Value, StringComparer.CurrentCultureIgnoreCase))
                                 {
@@ -195,7 +204,7 @@
                     {
                         <form asp-action="UpdateAssignee" asp-route-id="@Model.Id" method="post" class="d-inline">
                             @Html.AntiForgeryToken()
-                            <select name="AssigneeUserId" class="form-select form-select-sm detail-auto-submit">
+                            <select name="AssigneeUserId" class="form-select form-select-sm js-auto-submit">
                                 <option value="">@Localizer["Issue_Unassigned"]</option>
                                 @foreach (var a in Model.AssigneeOptions)
                                 {
@@ -231,7 +240,7 @@
                                 <span class="input-group-text">#</span>
                                 <input type="text" inputmode="numeric" pattern="[0-9]*"
                                        name="GitHubIssueNumber" value="@Model.GitHubIssueNumber"
-                                       class="form-control form-control-sm detail-auto-submit" placeholder="—" />
+                                       class="form-control form-control-sm js-auto-submit" placeholder="—" />
                             </div>
                         </form>
                     }
@@ -262,9 +271,9 @@
                     <dt class="col-5">@Localizer["Issue_Resolved"]</dt>
                     <dd class="col-7">
                         @Model.ResolvedAt.Value.ToDate()
-                        @if (!string.IsNullOrEmpty(Model.ResolvedByName))
+                        @if (Model.ResolvedByUserId is { } resolverId)
                         {
-                            <div class="text-muted">@Localizer["Issue_ResolvedBy"] @Model.ResolvedByName</div>
+                            <div class="text-muted">@Localizer["Issue_ResolvedBy"] <vc:human user-id="@resolverId" link="None" /></div>
                         }
                     </dd>
                 }

@@ -2,24 +2,21 @@
 @using Humans.Base.Models.Tables
 @using Microsoft.AspNetCore.Html
 @{
-    ViewData["Title"] = "Holded Account Provisioning";
+    ViewData["Title"] = "Holded Account Map";
     var blockStart = (int)ViewBag.BlockStart;
     var toAddRows = Model.Rows.Where(r => r.State == "ToAdd").ToList();
     var hasToAdd = toAddRows.Count > 0;
 }
 
-<div class="d-flex justify-content-between align-items-center mb-4">
-    <h1 class="mb-0">Holded Account Provisioning</h1>
-    <div class="d-flex gap-2">
-        <a href="/Holded" class="btn btn-outline-secondary"
-           title="Ledger mirror status, sync buttons and the full account list live on the Holded admin screen.">
-            <i class="fa-solid fa-rotate me-1"></i>Holded sync
-        </a>
-        <a asp-controller="BudgetAdmin" asp-action="Index" class="btn btn-outline-secondary">
-            <i class="fa-solid fa-arrow-left me-1"></i>Back to Finance
-        </a>
-    </div>
-</div>
+<page-header title="Holded Account Map">
+    <a href="/Holded" class="btn btn-outline-secondary"
+       title="Ledger mirror status, sync buttons and the full account list live on the Holded admin screen.">
+        <i class="fa-solid fa-rotate me-1"></i>Holded sync
+    </a>
+    <a asp-controller="BudgetAdmin" asp-action="Index" class="btn btn-outline-secondary">
+        <i class="fa-solid fa-arrow-left me-1"></i>Back to Finance
+    </a>
+</page-header>
 
 
 <div class="alert alert-info mb-4">
@@ -95,8 +92,6 @@
             }
             <span class="badge @badgeClass">@item.State</span>
         </text>;
-        Func<HoldedProvisioningRow, IHtmlContent> tagCell =
-            @<text><code class="small">@item.Tag</code></text>;
         Func<HoldedProvisioningRow, IHtmlContent> notesCell = @<text>
             @if (string.Equals(item.State, "Orphan", StringComparison.Ordinal))
             {
@@ -113,11 +108,42 @@
             .Template("State", stateCell)
             .Column("Existing #", r => r.ExistingAccountNum, c => c.End())
             .Column("Proposed #", r => r.ProposedAccountNum, c => c.End())
-            .Template("Tag", tagCell)
+            .Column("Tag", r => r.Tag, o => o.Code().Css("small"))
             .Template("Notes", notesCell)
             .Build();
     }
     <partial name="_Table" model="planTable" />
+</div>
+
+@{
+    var managed = (IReadOnlyList<Humans.Finance.Models.HoldedManagedAccountVm>)ViewBag.ManagedAccounts;
+}
+<div class="card mt-4">
+    <div class="card-header">
+        <i class="fa-solid fa-folder-tree me-1"></i>Managed accounts
+        <span class="badge bg-secondary ms-2">@managed.Count rows</span>
+    </div>
+    @if (managed.Count == 0)
+    {
+        <div class="card-body small"><empty-state class="mb-0">No expense accounts created outside the budget map yet.</empty-state></div>
+    }
+    else
+    {
+            Func<Humans.Finance.Models.HoldedManagedAccountVm, IHtmlContent> sinceCell = @<text>@item.CreatedAt.ToDate()</text>;
+            var managedTable = TableModel.For(managed)
+                .Link("Account", r => r.AccountNumber, r => Url.Action("Account", "Holded", new { number = r.AccountNumber }), o => o.Code())
+                .Column("Label", r => r.Label)
+                .Column("Holded id", r => r.AccountId, o => o.Css("text-muted small"))
+                .Column("Active", r => r.IsActive ? "Yes" : "Retired")
+                .Template("Since", sinceCell, sortBy: m => m.CreatedAt)
+                .Css("align-middle")
+                .Build();
+        <partial name="_Table" model="managedTable" />
+        <div class="card-footer text-muted small">
+            Expense accounts created for workgroups and programs rather than budget categories. A document booked
+            to one counts as matched but toward no budget category.
+        </div>
+    }
 </div>
 
 <script>

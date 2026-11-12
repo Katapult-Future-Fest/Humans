@@ -62,6 +62,12 @@ registration is wrapped by
 decorator inheriting `TrackedCache<Guid, TeamReadSnapshot>`); it exposes the
 cross-section read surface as `ITeamService`.
 
+### TeamGoogleGroupMemberships (internal, composed by TeamService)
+
+Reads Teams' active team aggregates through `ITeamRepository.GetAllActiveAsync` to
+calculate expected Google Group members. No cross-section reads, writes or DI registration.
+`TeamService.GetExpectedAsync` retains the existing source contract and delegates here.
+
 ### TeamService (Scoped — wrapped by CachingTeamService Singleton decorator)
 
 Repository: `ITeamRepository`.
@@ -146,3 +152,45 @@ registered in `Section.Register`) — builds one sample per template via
 ---
 
 
+
+### TeamPageContent (internal, owned by TeamService)
+
+Repository: `ITeamRepository`. Updates the owning team row’s page content, calls to
+action, public-page flags and timestamps; audits successful writes through
+`IAuditLogService`. Shares its safe URL predicate with `TeamPageSummaryMapper`.
+No separate DI registration or cache; the existing management facade and caching
+decorator remain the entry point.
+
+### TeamDataExport (internal, owned by TeamService)
+
+Repository: `ITeamRepository`. Builds the GDPR export slices (`TeamMemberships`,
+`TeamJoinRequests`, `TeamEarlyEntry`) behind `TeamService`'s `IUserDataContributor` path.
+Read-only; no DI registration, no cache.
+
+| Table | R/W |
+|-------|-----|
+| TeamMembers | R (per account in the merge chain) |
+| TeamRoleAssignments | R (loaded with the membership) |
+| TeamRoleDefinitions | R (loaded with the assignment) |
+| TeamJoinRequests | R |
+| TeamJoinRequestStateHistories | R (loaded with the request) |
+| TeamEarlyEntryGrants | R |
+| Teams | R (team behind each row, with its parents) |
+
+Cross-section call via `IUserService` (merge chain), lazy-resolved through `IServiceProvider`.
+
+### TeamSnapshotReader (internal, owned by TeamService)
+
+Repository: `ITeamRepository`. Admin team list and the team tree/summary snapshots. Read-only; no DI
+registration. No cache of its own — the caching decorator serves the cross-section reads.
+
+| Table | R/W |
+|-------|-----|
+| Teams | R |
+| TeamMembers | R (active members) |
+| TeamJoinRequests | R (pending counts per team) |
+| TeamRoleDefinitions | R |
+| TeamRoleAssignments | R (active management-role holders) |
+
+Cross-section calls via `IShiftService` (pending shift counts per team) and, lazy-resolved through
+`IServiceProvider`, `IUserService` and `ITeamResourceService` (linked Google resources).

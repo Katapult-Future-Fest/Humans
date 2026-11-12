@@ -110,6 +110,8 @@ Closed results are visible to every logged-in member, roster or not; Volunteers 
 
 Every state change and every ballot event is in the audit log (crosscut). Automation (auto-close, emails) leaves entries under the job actor: the lapse close writes `AssemblyVoteClosed`, each T-24h reminder batch writes `AssemblyVoteRemindersSent` with the number actually delivered, and a retried opening email writes `AssemblyVoteOpened` with the number of members the first send missed — the Admin's own open entry is about their transition and cannot show that the job reached members hours later. Eligibility is re-read per recipient as the batch goes out — the roster row's ballot, the vote's own status and its current deadline — so a member who voted while the batch was running is skipped from that point on, and a stop, cancel or extend mid-batch ends it instead of mailing the rest a deadline the vote no longer has (an extended vote is reminded again once the new deadline comes into range). The read and the send are two steps with no transaction across Governance and Email, so a ballot cast in between still gets the reminder; the link lands on a page showing the ballot, and closing that window would mean a transaction spanning two sections, which nothing here has.
 
+The hourly sweep reports recipient delivery failures after attempting the remaining opening-email retries and reminders and finishing its lapse/recovery work. Successful sends remain stamped and audited; failed recipients retry with the same delivery identity. Initial opening notices stay best effort after the state transition, and requested cancellation propagates.
+
 ## Why not Surveys
 
 Daniel's Surveys section already carries an **Asociado vote** mode with ranked-choice counting (nobodies-collective/Humans#1151, #1157, #1585). It was the right tool for the 2027 event-date decision and stays. It is the wrong base for binding association votes, for reasons that are structural, not cosmetic:
@@ -201,7 +203,7 @@ All tables in `GovernanceDbContext`, prefix `assembly_`.
 
 ### AssemblyBallotHistory
 
-**Table:** `assembly_ballot_history`. Append-only (repository exposes Add and Get only, design-rules §12).
+**Table:** `assembly_ballot_history`. Append-only (repository exposes Add and Get only, design-rules.md, *Append-only entities*).
 
 | Property | Type | Notes |
 |---|---|---|
@@ -254,7 +256,7 @@ Draft ──open (Admin)──▶ Open ──ClosesAt reached / Stop (Admin)─�
 
 ## Routing
 
-All member-facing routes are localized (six cultures). Admin routes are exempt.
+All member-facing routes are localized (all supported cultures). Admin routes are exempt.
 
 | Route | Policy | Purpose |
 |---|---|---|
@@ -293,6 +295,7 @@ Board members are de facto Asociados: they are on the official roster whether or
 - Only roster rows with `IsOfficial = true` contribute to the official result; indicative ballots are tallied separately and never merged.
 - The roster is written exactly once, at open, from Governance's own `applications` (active Approved Asociado / Colaborador terms), the active Board role holders via `IRoleAssignmentService.GetActiveUserIdsInRoleAsync` (official), and the Volunteers team for `AllMembers`; it is never recomputed. A person appearing in more than one source gets one row, official if any source is official.
 - A ballot can be cast or changed only while `Status = Open` and `now < ClosesAt`, by the roster member it belongs to. One ballot per roster row; changes bump `Revision` and append history; nothing is ever deleted.
+- List ordering is presentation-owned: member list Open-first then latest closing, admin list latest closing, member task entries latest closing.
 - Content (`Title`, `OfficialText`, options, `Kind`, `RequiredMajority`, audiences, disclosure) is immutable once Open.
 - No read path returns per-option counts, rankings, or any ballot content for an Open vote except `Peek`, and `Peek` always writes its audit entry and peek row in the same unit of work as the read.
 - The audit entry for a ballot event names actor and vote, never the choice. The choice lives only in `assembly_ballots` / `assembly_ballot_history`.
@@ -321,15 +324,17 @@ Board members are de facto Asociados: they are on the official roster whether or
 - **Close (any path):** stamps `ClosedAt`, computes and stores the result, resolves the open-vote notification via `INotificationAutoResolve.ResolveBySourceKeyAsync`, audits `AssemblyVoteClosed` / `AssemblyVoteStopped` (job actor via the `jobName` overload of `IAuditLogService.LogAsync` when the hourly `governance-assembly-vote-lapse` job in `ISectionJobs` does it). Any earlier request that sees the deadline passed closes inline before serving.
 - **Peek:** peek row + audit `AssemblyVotePeeked`, on an open vote only. A peek request that arrives once the vote is closed writes nothing and redirects to the ordinary results page, so the page's "this peek has been recorded" notice is never shown over an unlogged read.
 - **Ballots list (post-close):** audit `AssemblyBallotsViewed`.
+- **Mail reachability:** null, empty and whitespace-only notification addresses are skipped. Opening and reminder rows stay unstamped, allowing later sweeps to retry after an address becomes available.
+
 - **Reminder:** 24h before `ClosesAt`, the clock and the vote both re-read per recipient, one email to roster members with no ballot (`GovernanceEmails.AssemblyVoteReminder`), stamped on the roster row (`ReminderSentAt`) so it never repeats for one deadline — and the stamp is written only while the vote still closes at the time the email named, so an extension landing mid-send leaves the row unstamped for the next sweep rather than standing for a deadline the member was never told; sent by the same hourly job as the lapse sweep. An accepted extension clears the stamps written up to that moment, so the roster is reminded once more when the new deadline comes into range; a later stamp is left alone, because a sweep still running reads the new deadline per recipient and is announcing that one already. Decided 2026-09-10: keep.
 - **GDPR export:** `IUserDataContributor` contributes the member's roster rows, current ballots and history under a new export key it declares as `AssemblyVoteService.AssemblyVotes`. Actor-side data (drafted/opened/closed votes, peeks) goes in a second slice, `AssemblyVoteService.AssemblyVoteActions`, and is declared as retained: the acta names the closer and the results page publishes the early-view list.
-- **Duplicate accounts:** a merge leaves assembly-vote roster rows and ballots exactly where they are. One human enrolled on a roster twice, and casting two ballots, is a defect in the vote itself, and re-pointing or collapsing the rows would destroy the only record that it happened. Nothing becomes unreachable, because every member-facing read walks the chain instead: `AssemblyVoteService.EffectiveRosterAsync` resolves the viewer to their own roster row or to one left on an account merged into theirs — a row that already carries a ballot wins over every other candidate, the viewer's own included, so a human holding two rows on one vote amends the ballot they cast rather than casting a second, and rows are considered in id order so two reads never disagree. So the survivor of a merge can still see the vote, cast and amend the ballot the frozen roster granted them; and the GDPR export unions `UserInfo.MergedUserIds`, the same chain erasure already follows. Mail follows the same chain: `RecipientsAsync` resolves every roster row's user id through `GetUserInfosAsync`, groups the rows by the resolved human, and mails once — so a row left on a tombstone reaches the survivor, and a human holding two rows on one vote gets one email with both rows stamped.
+- **Duplicate accounts:** a merge leaves assembly-vote roster rows and ballots exactly where they are. One human enrolled on a roster twice, and casting two ballots, is a defect in the vote itself, and re-pointing or collapsing the rows would destroy the only record that it happened. Nothing becomes unreachable, because every member-facing read walks the chain instead: `AssemblyVoteMemberWorkflow.EffectiveRosterAsync` resolves the viewer to their own roster row or to one left on an account merged into theirs — a row that already carries a ballot wins over every other candidate, the viewer's own included, so a human holding two rows on one vote amends the ballot they cast rather than casting a second, and rows are considered in id order so two reads never disagree. So the survivor of a merge can still see the vote, cast and amend the ballot the frozen roster granted them; and the GDPR export unions `UserInfo.MergedUserIds`, the same chain erasure already follows. Mail follows the same chain: `RecipientsAsync` resolves every roster row's user id through `GetUserInfosAsync`, groups the rows by the resolved human, and mails once — so a row left on a tombstone reaches the survivor, and a human holding two rows on one vote gets one email with both rows stamped.
 - **Art. 17 erasure:** roster `UserId` → null (tombstone keeps counts and the stored result valid); ballot and history rows are retained unlinked, because the vote is a legal record of the association (Art. 17(3)(b) / (e)). Declared as partial retention in the section's `ErasureDeclaration`.
 - **Account merge (`IUserMerge`):** roster rows and ballots do **not** re-FK from source to target — they record who was entitled when the vote opened and what that entitlement produced, not who holds the account today. Every vote the merged-away account was rostered on gets an audit entry naming that id, so the Board can see the merge found the row and left it standing. The vote's own actor columns (`CreatedByUserId`, `OpenedByUserId`, `ClosedByUserId`) and `assembly_vote_peeks.AdminUserId` do move, so the acta and the published peek list keep naming the surviving human instead of a tombstone.
 
 ## Cross-section dependencies
 
-- **Users:** `IUserService` for names, preferred language, active state; `IUserEmailService` for the notification address.
+- **Users:** `IUserService` for names, preferred language, active state and the notification address.
 - **Auth:** `IRoleAssignmentService.GetActiveUserIdsInRoleAsync(RoleNames.Board)` for the Board members on the official roster (already a Governance dependency).
 - **Teams:** `ITeamService` for the Volunteers team membership (`AllMembers` indicative audience).
 - **Email:** `IEmailService.SendAsync` + `GovernanceEmails` messages (opened, reminder, cancelled).
@@ -364,7 +369,7 @@ Anything not listed is the implementer's call within this spec.
 
 - `memory/architecture/governance-scope.md` is updated in this PR to add assembly votes to Governance's scope.
 - Update `Docs/Governance.md` (Concepts, Data Model, Routing, Actors, Invariants, Triggers) and `Docs/data-access.md`, `Docs/authorization.md` in the implementation commit.
-- Six-culture resx for every member-facing string; admin pages exempt.
+- Resx in every supported culture for every member-facing string; admin pages exempt.
 - One migration on `GovernanceDbContext`.
 - Tests under `tests/Humans.Governance.Tests`: roster snapshot, embargo (no content on any Open read), peek audits, ballot change bumps revision and appends history, official/indicative separation, YesNo verdicts (tie, TwoThirds boundary), IRV rounds incl. exhausted ballots and both tie-break steps, lapse closes without the job, no reopen, erasure tombstone keeps the stored result.
 

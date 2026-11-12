@@ -1,7 +1,6 @@
 using Humans.Base.Attributes;
 using Humans.Base.Controllers;
 using System.Security.Claims;
-using Humans.Consent;
 using Humans.Consent.Contracts;
 using Humans.Users.Contracts;
 using Humans.Settings.Contracts;
@@ -12,7 +11,6 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Microsoft.Extensions.Localization;
-using NodaTime;
 
 namespace Humans.Onboarding.Controllers;
 
@@ -27,11 +25,8 @@ internal sealed class OnboardingWidgetController(
     IShiftService shiftMgmt,
     ISettingsService settingsService,
     IShiftView shiftView,
-    IConsentSubmission consents,
     IOnboardingService onboardingService,
-    IClock clock,
     IStringLocalizer<OnboardingResource> localizer,
-    IStringLocalizer<ConsentResource> consentLocalizer,
     ILogger<OnboardingWidgetController> logger) : HumansControllerBase(userService)
 {
     private readonly IUserService _userService = userService;
@@ -121,17 +116,15 @@ internal sealed class OnboardingWidgetController(
         if (es is null)
             return View(OnboardingShiftsStepBuilder.BuildEmpty(priority ?? string.Empty));
 
-        // Stats line needs full event-wide set; priorityOnly:false then filter in builder.
+        var userId = (await GetCurrentUserInfoAsync(ct))?.Id ?? CurrentUserId();
+        // The full event-wide set: the builder's stats line needs it, and it filters for display.
         var urgentShifts = await shiftMgmt.GetBrowseShiftsAsync(new ShiftBrowseQuery(
             es.Id,
-            Flags: ShiftBrowseQueryFlags.IncludeSignups), ct);
-        var userId = (await GetCurrentUserInfoAsync(ct))?.Id ?? CurrentUserId();
+            Flags: ShiftBrowseQueryFlags.IncludeSignups, ViewerUserId: userId), ct);
         var userShiftView = await shiftView.GetUserAsync(userId, ct);
         var (shiftIds, statuses) = ShiftSignupHelper.ResolveActiveStatuses(userShiftView.Signups);
-        // Onboarding viewers are never privileged, so the early-entry lock applies once the close has passed.
-        var earlyEntryClosed = es.IsEarlyEntryClosed(clock.GetCurrentInstant());
         var vm = OnboardingShiftsStepBuilder.Build(
-            es, urgentShifts, shiftIds, statuses, priority ?? string.Empty, earlyEntryClosed);
+            es, urgentShifts, shiftIds, statuses, priority ?? string.Empty);
         return View(vm);
     }
 
@@ -140,7 +133,7 @@ internal sealed class OnboardingWidgetController(
     public async Task<IActionResult> SignUp(Guid shiftId)
     {
         var userId = CurrentUserId();
-        var result = await signupService.SignUpAsync(userId, shiftId, actorUserId: userId);
+        var result = await signupService.SignUpAsync(userId, shiftId);
         if (!result.Success)
         {
             SetError(result.Error ?? localizer["Onboarding_ShiftsSignUpFailed"].Value);
@@ -202,60 +195,13 @@ internal sealed class OnboardingWidgetController(
             return RedirectToAction("Index", "Home");
         }
 
-        // Non-null by the outcome contract on NextConsentStepData.
-        var next = step.Next!;
-        var vm = new ConsentsStepViewModel
+        return View(new ConsentsStepViewModel
         {
-            DocumentVersionId = next.DocumentVersionId,
-            DocumentName = next.DocumentName,
-            VersionNumber = next.VersionNumber,
-            Content = new Dictionary<string, string>(next.Content, StringComparer.Ordinal),
-            ChangesSummary = next.ChangesSummary,
+            // Non-null by the outcome contract on NextConsentStepData.
+            Document = step.Next!,
             CurrentIndex = step.CurrentIndex,
             TotalRequired = step.TotalRequired,
-        };
-        return View(vm);
-    }
-
-    [HttpPost]
-    [ValidateAntiForgeryToken]
-    public async Task<IActionResult> SignConsent(Guid documentVersionId, bool explicitConsent, CancellationToken ct)
-    {
-        if (!explicitConsent)
-        {
-            SetError(consentLocalizer["Consent_MustCheck"].Value);
-            return RedirectToAction(nameof(Consents));
-        }
-
-        var userId = CurrentUserId();
-
-        // Same gate as GET, against a stale-page or back-button POST.
-        if (await IsNameMissingAsync(userId, ct))
-            return RedirectToNamesForStub();
-
-        var ipAddress = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
-        var userAgent = Request.Headers.UserAgent.ToString();
-
-        var result = await consents.SubmitConsentAsync(
-            userId, documentVersionId, explicitConsent: true, ipAddress, userAgent, ct);
-
-        if (result.Success)
-            await onboardingService.ConsentSignedAsync(userId, ct);
-
-        if (!result.Success)
-        {
-            switch (result.ErrorKey)
-            {
-                case "StubProfile":
-                    return RedirectToNamesForStub();
-                case "AlreadyConsented":
-                    SetInfo(consentLocalizer["Consent_AlreadyConsented"].Value);
-                    break;
-            }
-        }
-
-        // Always dispatch: after the final consent it routes Home instead of stranding the user here.
-        return RedirectToAction(nameof(Index));
+        });
     }
 
     // HasRequiredNameFields, not State == Stub: catches Active profiles with blank names.
@@ -267,7 +213,7 @@ internal sealed class OnboardingWidgetController(
 
     private IActionResult RedirectToNamesForStub()
     {
-        SetInfo(consentLocalizer["Consent_StubProfile_AddName"].Value);
+        SetInfo(localizer["Onboarding_StubProfile_AddName"].Value);
         return RedirectToAction(nameof(Names));
     }
 }

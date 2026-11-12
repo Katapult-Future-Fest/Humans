@@ -1,6 +1,5 @@
 using AwesomeAssertions;
 using NodaTime;
-using NodaTime.Testing;
 using Humans.Users.Contracts;
 using Xunit;
 
@@ -39,96 +38,4 @@ public class ProfileTests
 
         profile.FullName.Should().Be("John");
     }
-
-    [HumansFact]
-    public void NewProfile_ShouldDefaultToVolunteerTier()
-    {
-        var profile = CreateProfile();
-
-        profile.MembershipTier.Should().Be(LegacyMembershipTier.Volunteer);
-    }
-
-    [HumansFact]
-    public void NewProfile_ShouldHaveNullConsentCheckStatus()
-    {
-        var profile = CreateProfile();
-
-        profile.ConsentCheckStatus.Should().BeNull();
-    }
-
-    [HumansTheory]
-    [InlineData(LegacyConsentCheckStatus.Pending)]
-    [InlineData(LegacyConsentCheckStatus.Cleared)]
-    [InlineData(LegacyConsentCheckStatus.Flagged)]
-    public void Profile_CanSetConsentCheckStatus(LegacyConsentCheckStatus status)
-    {
-        var profile = CreateProfile();
-
-        profile.ConsentCheckStatus = status;
-
-        profile.ConsentCheckStatus.Should().Be(status);
-    }
-
-    [HumansFact]
-    public void Profile_ConsentCheckCleared_SetsRelatedFields()
-    {
-        var profile = CreateProfile();
-        var clock = new FakeClock(Instant.FromUtc(2026, 2, 15, 10, 0));
-        var coordinatorId = Guid.NewGuid();
-
-        profile.ConsentCheckStatus = LegacyConsentCheckStatus.Cleared;
-        profile.ConsentCheckAt = clock.GetCurrentInstant();
-        profile.ConsentCheckedByUserId = coordinatorId;
-        profile.ConsentCheckNotes = "Looks good";
-
-        profile.ConsentCheckStatus.Should().Be(LegacyConsentCheckStatus.Cleared);
-        profile.ConsentCheckAt.Should().NotBeNull();
-        profile.ConsentCheckedByUserId.Should().Be(coordinatorId);
-        profile.ConsentCheckNotes.Should().Be("Looks good");
-    }
-
-    [HumansFact]
-    public void Profile_Rejection_SetsRelatedFields()
-    {
-        var profile = CreateProfile();
-        var clock = new FakeClock(Instant.FromUtc(2026, 2, 15, 10, 0));
-        var adminId = Guid.NewGuid();
-
-        profile.RejectionReason = "Safety concern";
-        profile.RejectedAt = clock.GetCurrentInstant();
-        profile.RejectedByUserId = adminId;
-
-        profile.RejectionReason.Should().Be("Safety concern");
-        profile.RejectedAt.Should().NotBeNull();
-        profile.RejectedByUserId.Should().Be(adminId);
-    }
-
-    [HumansTheory]
-    [InlineData(0)]
-    [InlineData(1)]
-    [InlineData(2)]
-    public void Profile_CanSetMembershipTier(int value)
-    {
-        var profile = CreateProfile();
-
-        var tier = (LegacyMembershipTier)value;
-        profile.MembershipTier = tier;
-
-        profile.MembershipTier.Should().Be(tier);
-    }
-
-    private static Profile CreateProfile()
-    {
-        return new Profile
-        {
-            Id = Guid.NewGuid(),
-            UserId = Guid.NewGuid(),
-            FirstName = "Test",
-            LastName = "User",
-            IsApproved = true,
-            CreatedAt = SystemClock.Instance.GetCurrentInstant(),
-            UpdatedAt = SystemClock.Instance.GetCurrentInstant()
-        };
-    }
-
 }

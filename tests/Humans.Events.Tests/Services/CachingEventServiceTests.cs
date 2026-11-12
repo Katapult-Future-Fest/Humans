@@ -42,6 +42,73 @@ public sealed class CachingEventServiceTests
     }
 
     [HumansTheory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task Population_CannotRestoreAnEventRemovedByAMember(bool fullRefresh, bool resubmit)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var before = Approved("Existing event");
+        SeedApproved(before);
+        if (fullRefresh) await _service.WarmAllAsync(ct);
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var pending = new TaskCompletionSource<IReadOnlyList<ApprovedEventView>>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _inner.GetApprovedEventsAsync(null, null, null, null, Arg.Any<IReadOnlyList<string>>(), ct)
+            .Returns(async _ => { started.SetResult(); return await pending.Task.WaitAsync(ct); });
+        var population = fullRefresh
+            ? _service.EraseForUserAsync(Guid.NewGuid(), ct)
+            : _service.WarmAllAsync(ct);
+        await started.Task.WaitAsync(ct);
+        _inner.UpdateAndResubmitAsync(before.Id, Arg.Any<EventEdit>(), ct).Returns(new EventSaveResult());
+        Task change = resubmit
+            ? _service.UpdateAndResubmitAsync(before.Id,
+                new EventEdit(before.CategoryId, null, "Edited", "Description", before.StartAt, 60, null, null, false, null, null), ct)
+            : _service.WithdrawEventAsync(before.Id, ct);
+        pending.SetResult([before]);
+
+        await Task.WhenAll(population, change).WaitAsync(ct);
+
+        (await _service.GetApprovedEventByIdAsync(before.Id, ct)).Should().BeNull();
+        (await _service.GetApprovedEventsAsync(null, null, null, null, [], ct)).Should().BeEmpty();
+    }
+
+    [HumansFact]
+    public async Task CachedRead_WaitsForTheRunningProjectionRefresh()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var before = Approved("Existing event");
+        SeedApproved(before);
+        await _service.WarmAllAsync(ct);
+        var survivor = Guid.NewGuid();
+        var after = before with { SubmitterUserId = survivor };
+        var pending = new TaskCompletionSource<IReadOnlyList<ApprovedEventView>>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _inner.GetApprovedEventsAsync(null, null, null, null, Arg.Any<IReadOnlyList<string>>(), ct).Returns(pending.Task);
+        var refresh = _service.ReassignAsync(before.SubmitterUserId, survivor, Guid.NewGuid(), before.StartAt, ct);
+        var read = _service.GetApprovedEventByIdAsync(before.Id, ct);
+        pending.SetResult([after]);
+
+        await refresh.WaitAsync(ct);
+
+        (await read.WaitAsync(ct))!.SubmitterUserId.Should().Be(survivor);
+    }
+
+    [HumansFact]
+    public async Task FailedColdLoad_ReleasesTheCoordinatorForTheNextRead()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var failure = new IOException("Categories unavailable");
+        _inner.GetAllCategoriesAsync(ct).Returns(Task.FromException<IReadOnlyList<EventCategoryManageInfo>>(failure));
+        var read = () => _service.GetActiveCategoriesAsync(ct);
+        (await read.Should().ThrowAsync<IOException>()).Which.Should().BeSameAs(failure);
+        _inner.GetAllCategoriesAsync(ct).Returns((IReadOnlyList<EventCategoryManageInfo>)[]);
+        var fresh = Approved("Recovered");
+        SeedApproved(fresh);
+
+        (await _service.GetApprovedEventByIdAsync(fresh.Id, ct).WaitAsync(ct)).Should().Be(fresh);
+    }
+
+    [HumansTheory]
     [InlineData(true)]
     [InlineData(false)]
     public async Task Resubmission_OnlyEvictsApprovedEvent_WhenSaved(bool refused)
@@ -143,17 +210,21 @@ public sealed class CachingEventServiceTests
         exact.Should().BeGreaterThan(contains);
     }
 
-    [HumansFact]
-    public async Task SearchAsync_HonoursTheLimit()
+    [HumansTheory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public async Task SearchAsync_LimitKeepsTheHighestScoringMatches(int max)
     {
-        SeedApproved(
-            Approved("Alpha Sunset"),
-            Approved("Beta Sunset"),
-            Approved("Gamma Sunset"));
+        var exact = Approved("Sunset");
+        var prefix = Approved("Sunset Yoga");
+        var contains = Approved("Morning Sunset");
+        SeedApproved(Approved("Aardvark", "Sunset"), contains, prefix, exact);
 
-        var hits = await _service.SearchAsync("Sunset", 2, TestContext.Current.CancellationToken);
+        var hits = await _service.SearchAsync("Sunset", max, TestContext.Current.CancellationToken);
 
-        hits.Should().HaveCount(2);
+        hits.Select(hit => hit.EventId).Should().BeEquivalentTo(
+            new[] { exact.Id, prefix.Id, contains.Id }.Take(max));
     }
 
     [HumansFact]

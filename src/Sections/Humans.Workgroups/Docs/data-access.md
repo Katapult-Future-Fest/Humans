@@ -1,14 +1,13 @@
 <!-- freshness:triggers
   src/Sections/Humans.Workgroups/**
   tests/Humans.Workgroups.Tests/**
-  src/Sections/Humans.Users.Contracts/IUserService.cs
-  src/Sections/Humans.Users.Contracts/IUserEmailService.cs
+  src/Humans.Base/Users/IUserService.cs
   src/Sections/Humans.Auth/Contracts/IRoleAssignmentService.cs
   src/Sections/Humans.Settings/Contracts/ISettingsService.cs
   src/Sections/Humans.GoogleIntegration/Contracts/IGoogleSyncService.cs
   src/Sections/Humans.Surveys/Contracts/ISurveyAnalysisRead.cs
-  src/Sections/Humans.Finance.Contracts/IHoldedFinanceWrite.cs
-  src/Sections/Humans.Holded/Contracts/IHoldedClient.cs
+  src/Sections/Humans.Finance.Contracts/IFinanceWrite.cs
+  src/Sections/Humans.Holded/Contracts/IHoldedService.cs
 -->
 
 # Workgroups — Data Access
@@ -50,9 +49,9 @@ Repository: `IWorkgroupRepository`.
 | workgroup_document_comments | R/W |
 | workgroups_settings | R/W |
 
-Cross-section calls: `IUserService`, `IUserEmailService`, `IRoleAssignmentService`,
-`ISettingsService` (legacy root read only), `IGoogleSyncService`, `IGoogleSyncWrite`, `IHoldedFinanceWrite`,
-`IHoldedClient`, `INotificationService`, `IEmailService`, the section's own
+Cross-section calls: `IUserService`, `IRoleAssignmentService`,
+`ISettingsService` (legacy root read only), `IGoogleSyncService`, `IGoogleSyncWrite`, `IFinanceWrite`,
+`IHoldedService`, `INotificationService`, `IEmailService`, the section's own
 `WorkgroupsEmails` builder, `IAuditLogService`, `ISurveyAnalysisRead`, `IClock` (NodaTime).
 The inner service has no `IMemoryCache`. `ITeamService` is used by
 `WorkgroupsController` and `WorkgroupDriveAccessSource` (Board membership), not the service.
@@ -91,8 +90,41 @@ cache.
 - `WorkgroupDriveAccessSource` (`Services/Contributors/`) implements
   `IGoogleDriveAccessSource` the same way, plus `IUserService`/`ITeamService` for
   the root folder's reader list.
+- `WorkgroupGoogleGroupSource` (`Services/Contributors/`) implements
+  `IGoogleGroupMembershipSource` the same way, for each group's optional email group.
 
-Neither owns a table or touches `WorkgroupsDbContext` directly — both go through
+None owns a table or touches `WorkgroupsDbContext` directly — all go through
 `IWorkgroupService`, consistent with "repository is the only DbContext caller."
 
 ---
+
+### WorkgroupRegisterReader (internal, owned by WorkgroupService)
+
+Repository: `IWorkgroupRepository`. Reads the register graph or an individual
+workgroup and projects members, meetings, logs, documents and comments. Shares
+those projections and the safe Discord-link predicate with existing mutation
+guards. No writes, cache or separate DI registration.
+
+### WorkgroupDataExport (internal, owned by WorkgroupService)
+
+Repository: `IWorkgroupRepository`. Builds the GDPR export slices (`WorkgroupApplications`,
+`WorkgroupMemberships`, `WorkgroupLogEntries`, `WorkgroupMeetings`, `WorkgroupDocuments`,
+`WorkgroupComments`) from the member's own rows (`GetRowsForUserAsync`). Read-only; no DI
+registration, no cache, no cross-section calls.
+
+| Table | R/W |
+|-------|-----|
+| workgroups | R (applications the member filed) |
+| workgroup_members | R |
+| workgroup_log_entries | R |
+| workgroup_meetings | R |
+| workgroup_documents | R |
+| workgroup_document_comments | R |
+
+### WorkgroupNotices (internal, owned by WorkgroupService)
+
+No repository. Sends the workgroup application, decision and membership notifications and
+emails, and returns the successful dispatches for the rhythm audit. Cross-section calls via
+`IUserService`, `IRoleAssignmentService` (recipients), `INotificationService` (in-app, inbox
+preferences applied there), `IEmailService` and the section's `WorkgroupsEmails` builder. Not
+DI-registered. No DB access, no cache.

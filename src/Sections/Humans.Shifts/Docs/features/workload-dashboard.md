@@ -24,7 +24,7 @@ Asked by Peter for the 2026 cycle. Combines **shift-based** workload (Confirmed 
 
 ### US-WL.1: Admin Sees Per-Person Workload
 
-**As an** Admin / ShiftsNoInfo / ShiftsAdmin
+**As an** Admin / Board / ShiftsNoInfo / ShiftsAdmin
 **I want to** see every volunteer with shift signups or role assignments, with their hours split by period and Pending count
 **So that** I can identify volunteers nearing burnout and volunteers who have queued work but no approved work
 
@@ -38,7 +38,7 @@ Asked by Peter for the 2026 cycle. Combines **shift-based** workload (Confirmed 
 
 ### US-WL.2: Admin Sees Per-Rota Coverage
 
-**As an** Admin / ShiftsNoInfo / ShiftsAdmin
+**As an** Admin / Board / ShiftsNoInfo / ShiftsAdmin
 **I want to** see every rota with shifts in the active event, with planned/filled slots and hours, coverage %, and Pending count
 **So that** I can find rotas that still need fills
 
@@ -53,7 +53,7 @@ Asked by Peter for the 2026 cycle. Combines **shift-based** workload (Confirmed 
 
 ### US-WL.3: Admin Sees Per-Department Roll-Up
 
-**As an** Admin / ShiftsNoInfo / ShiftsAdmin
+**As an** Admin / Board / ShiftsNoInfo / ShiftsAdmin
 **I want to** see every department with planned vs filled slots and hours, plus coverage %
 **So that** I can find departments that are under-staffed at the planning level
 
@@ -94,19 +94,19 @@ The admin workload view includes every shift on every rota in the active event �
 
 | Route | Purpose | Auth |
 |---|---|---|
-| `GET /Shifts/Admin/Workload` | Workload dashboard (three tabs) | `ShiftsPolicies.Manage` (Admin / ShiftsNoInfo / ShiftsAdmin) |
+| `GET /Shifts/Admin/Workload` | Workload dashboard (tabbed) | `ShiftsPolicies.Read` (Admin / Board / ShiftsNoInfo / ShiftsAdmin) |
 
 Lives under `/Shifts/Admin/*` per `memory/architecture/no-admin-url-section.md`. Surfaced in the admin sidebar under the "Shifts" group.
 
 ## Authorization
 
-Gated to `ShiftsPolicies.Manage` at the controller — same narrow policy that controls the privileged sub-panels on the existing `/Shifts/Dashboard`. Department coordinators do **not** see this view (they have per-department visibility on `/Shifts/Dashboard` already).
+Gated to `ShiftsPolicies.Read` at the controller — the same policy that controls the privileged sub-panels on the existing `/Shifts/Dashboard`. Department coordinators do **not** see this view (they have per-department visibility on `/Shifts/Dashboard` already).
 
 ## Architecture
 
 `WorkloadService` lives in `Humans.Shifts.Services` — read-only, no DbSet writes. Reads per-rota shift + signup rows through `IShiftRowView.GetRotasAsync`; uses `IShiftManagementRepository` only for the active-event lookup and an inlined distinct over `GetEventShiftsAsync` to derive the set of rota ids to walk (no new interface method — see `memory/architecture/interface-method-additions-are-debt.md`). Cross-section name stitching via `ITeamService.GetTeamsAsync` and `IUserService.GetUserInfosAsync`. Role hours come from `ITeamService.GetTeamsAsync` — the cached `TeamInfo` projection already carries each team's role definitions (with `EstimatedHours`, `RolePeriod`, `SlotCount`) and assignment holder ids, so no new cross-section method was added.
 
-**Cache:** No service-level cache. Source data lives in the Shifts-section per-rota cache owned by `CachingShiftViewService` (§15 Option B at the section level). Signup / shift / rota mutations evict the affected rota cache entries through `CachingShiftViewService`, so workload totals stay consistent without a parallel cache key. The aggregation itself is microsecond-scale CPU work over a few hundred rotas at our scale.
+**Cache:** No service-level cache. Source data lives in the Shifts-section per-rota cache owned by `CachingShiftViewService` (a section-level caching decorator per `design-rules.md`, *Section caching pattern*). Signup / shift / rota mutations evict the affected rota cache entries through `CachingShiftViewService`, so workload totals stay consistent without a parallel cache key. The aggregation itself is microsecond-scale CPU work over a few hundred rotas at our scale.
 
 **Display sort:** The service returns unsorted lists; `ShiftWorkloadAdminController.Index` applies the default ordering before passing the report to the view. Per `memory/architecture/display-sort-in-controllers.md` — sorting in the service would leak presentation into the data layer.
 

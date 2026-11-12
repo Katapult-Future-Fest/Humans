@@ -51,6 +51,7 @@ public sealed class IssuesServiceTests
 
     private readonly FakeClock Clock = new(Instant.FromUtc(2026, 4, 29, 12, 0));
     private readonly IAuditLogService AuditLog = Substitute.For<IAuditLogService>();
+    private readonly IAuditViewerService AuditViewer = Substitute.For<IAuditViewerService>();
     private readonly InMemoryFileStorage FileStorage = new();
 
     /// <summary>
@@ -67,7 +68,6 @@ public sealed class IssuesServiceTests
     private readonly IssuesEmails _emailMessages;
     private readonly List<string> _renderedEmailCultures = [];
     private readonly IUserService _userService;
-    private readonly IUserEmailService _userEmailService;
     private readonly IRoleAssignmentService _roleService;
     private readonly INotificationEmitter _notificationService;
     private readonly INotificationAutoResolve _notificationInbox;
@@ -88,26 +88,14 @@ public sealed class IssuesServiceTests
         });
         _emailService = Substitute.For<IEmailService>();
         _emailMessages = TestIssuesEmails.Create(culture => _renderedEmailCultures.Add(culture));
-        AuditLog
-            .GetFilteredEntriesAsync(
-                Arg.Any<IReadOnlyList<AuditActionDefinition>>(), Arg.Any<string?>(), Arg.Any<Guid?>(), Arg.Any<Guid?>(),
+        AuditViewer
+            .GetFilteredAsync(
+                Arg.Any<string?>(), Arg.Any<Guid?>(), Arg.Any<Guid?>(), Arg.Any<IReadOnlyList<string>?>(),
                 Arg.Any<int>(), Arg.Any<CancellationToken>())
-            .Returns(Task.FromResult<IReadOnlyList<AuditLogEntrySnapshot>>([]));
+            .Returns(Task.FromResult<IReadOnlyList<AuditEvent>>([]));
 
 
         _userService = NewRegistryBackedUserService();
-
-        _userEmailService = Substitute.For<IUserEmailService>();
-        _userEmailService
-            .GetNotificationTargetEmailsAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(call =>
-            {
-                var ids = (IReadOnlyCollection<Guid>)call[0]!;
-                IReadOnlyDictionary<Guid, string> dict = Db.Users
-                    .Where(u => ids.Contains(u.Id) && u.Email != null)
-                    .ToDictionary(u => u.Id, u => u.Email!);
-                return Task.FromResult(dict);
-            });
 
         _roleService = Substitute.For<IRoleAssignmentService>();
         _roleService
@@ -122,8 +110,8 @@ public sealed class IssuesServiceTests
         _repository = new IssuesRepository(new TestDbContextFactory<IssuesDbContext>(issuesDbOptions));
 
         _service = new IssuesApplicationService(
-            _repository, _userService, _userEmailService, _roleService,
-            _emailService, _emailMessages, _notificationService, _notificationInbox, AuditLog,
+            _repository, _userService, _roleService,
+            _emailService, _emailMessages, _notificationService, _notificationInbox, AuditLog, AuditViewer,
             Clock, FileStorage, SectionCatalog, Domain.TestIssueQueues.Shipped(),
             _logger);
     }
@@ -161,10 +149,8 @@ public sealed class IssuesServiceTests
             : UserInfo.Create(
                 user: user,
                 userEmails: [],
-                eventParticipations: [],
                 externalLogins: [],
-                profile: UserFixtures.Profile(burnerName: user.BurnerName ?? "", firstName: "Test", lastName: "User"),
-                communicationPreferences: []);
+                profile: UserFixtures.Profile(burnerName: user.BurnerName ?? "", firstName: "Test", lastName: "User"));
     }
 
     private User SeedUser(Guid? id = null, string displayName = "Test User")
@@ -305,9 +291,9 @@ public sealed class IssuesServiceTests
 
         await _service.GetThreadAsync(issueId, Admin, TestContext.Current.CancellationToken);
 
-        await AuditLog.Received().GetFilteredEntriesAsync(
-            Arg.Is<IReadOnlyList<AuditActionDefinition>>(a => a.Contains(IssuesAuditActions.IssueCreated)),
+        await AuditViewer.Received().GetFilteredAsync(
             Arg.Any<string?>(), issueId, Arg.Any<Guid?>(),
+            Arg.Is<IReadOnlyList<string>?>(a => a != null && a.Contains(IssuesAuditActions.IssueCreated.Name)),
             Arg.Any<int>(), Arg.Any<CancellationToken>());
     }
 
@@ -320,12 +306,12 @@ public sealed class IssuesServiceTests
         await Db.SaveChangesAsync(TestContext.Current.CancellationToken);
 
         var auditAt = Clock.GetCurrentInstant() + Duration.FromMinutes(1);
-        AuditLog.GetFilteredEntriesAsync(
-                Arg.Any<IReadOnlyList<AuditActionDefinition>>(), Arg.Any<string?>(), issueId, Arg.Any<Guid?>(),
+        AuditViewer.GetFilteredAsync(
+                Arg.Any<string?>(), issueId, Arg.Any<Guid?>(), Arg.Any<IReadOnlyList<string>?>(),
                 Arg.Any<int>(), Arg.Any<CancellationToken>())
-            .Returns(Task.FromResult<IReadOnlyList<AuditLogEntrySnapshot>>(
-            [new(Guid.NewGuid(), IssuesAuditActions.IssueGitHubLinked.Name, nameof(Issue), issueId,
-                "GitHub link: 123", auditAt, null, null, null)]));
+            .Returns(Task.FromResult<IReadOnlyList<AuditEvent>>(
+            [new(Guid.NewGuid(), auditAt, IssuesAuditActions.IssueGitHubLinked, null, null, nameof(Issue), issueId,
+                null, null, null, null, null, null, null, "GitHub link: 123")]));
 
         await _service.PostCommentAsync(
             issueId, Admin, commenterId, "A comment", ct: TestContext.Current.CancellationToken);
@@ -437,8 +423,8 @@ public sealed class IssuesServiceTests
             var failure = new IOException("Issue persistence failed");
             repo.AddIssueAsync(Arg.Any<Issue>(), Arg.Any<CancellationToken>()).Returns(Task.FromException(failure));
             var service = new IssuesApplicationService(
-                repo, _userService, _userEmailService, _roleService,
-                _emailService, _emailMessages, _notificationService, _notificationInbox, AuditLog,
+                repo, _userService, _roleService,
+                _emailService, _emailMessages, _notificationService, _notificationInbox, AuditLog, AuditViewer,
                 Clock, _fileStorage, SectionCatalog, Domain.TestIssueQueues.Shipped(), _logger);
             using var content = new MemoryStream([1, 2, 3]);
             var screenshot = new FormFile(content, 0, content.Length, "Screenshot", "shot.png")
@@ -485,8 +471,8 @@ public sealed class IssuesServiceTests
                 ? Task.FromException<Issue?>(new IOException("Verification unavailable"))
                 : _repository.GetByIdAsync(call.ArgAt<Guid>(0), CancellationToken.None));
         var service = new IssuesApplicationService(
-            repo, _userService, _userEmailService, _roleService,
-            _emailService, _emailMessages, _notificationService, _notificationInbox, AuditLog,
+            repo, _userService, _roleService,
+            _emailService, _emailMessages, _notificationService, _notificationInbox, AuditLog, AuditViewer,
             Clock, FileStorage, SectionCatalog, Domain.TestIssueQueues.Shipped(), _logger);
         var screenshot = PngUpload([1, 2, 3]);
 
@@ -680,6 +666,70 @@ public sealed class IssuesServiceTests
         ((IReadOnlyList<Guid>)notice[4]!).Should().Equal(handler.Id);
     }
 
+    [HumansTheory]
+    [InlineData("Submit", false)]
+    [InlineData("Submit", true)]
+    [InlineData("Comment", false)]
+    [InlineData("Comment", true)]
+    public async Task SavedIssueNotice_RoleLookupFailuresPreserveMutationAndRemainingRecipients(
+        string operation, bool allRolesFail)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var reporter = SeedUser(displayName: "Reporter");
+        var handler = SeedUser(displayName: "Handler");
+        var assignee = SeedUser(displayName: "Assignee");
+        var failure = new IOException("Queue role lookup failed");
+        _roleService.GetActiveUserIdsInRoleAsync(TicketsRoles.TicketsAdmin, Arg.Any<CancellationToken>())
+            .Returns(Task.FromException<IReadOnlyList<Guid>>(failure));
+        _roleService.GetActiveUserIdsInRoleAsync(RoleNames.Board, Arg.Any<CancellationToken>())
+            .Returns(allRolesFail ? Task.FromException<IReadOnlyList<Guid>>(failure)
+                : Task.FromResult<IReadOnlyList<Guid>>([handler.Id]));
+
+        Guid issueId;
+        if (operation is "Submit")
+        {
+            var submitted = await _service.SubmitIssueAsync(reporter.Id, IssueCategory.Bug, "Title", "Details",
+                "Scanner", null, null, null, null, ct: ct);
+            issueId = submitted.Issue!.Id;
+        }
+        else
+        {
+            issueId = await SeedIssueRowAsync(reporter.Id, IssueStatus.Open, "Title", "Scanner");
+            var issue = (await _repository.GetByIdAsync(issueId, ct))!;
+            issue.AssigneeUserId = assignee.Id;
+            await _repository.SaveTrackedIssueAsync(issue, ct);
+            var posted = await _service.PostCommentAsync(issueId, new IssueViewer(reporter.Id, []),
+                reporter.Id, "An update", ct: ct);
+            posted.Comment.Should().NotBeNull();
+        }
+
+        var stored = (await _repository.GetByIdAsync(issueId, ct))!;
+        stored.ReporterUserId.Should().Be(reporter.Id);
+        if (operation is "Comment") stored.Comments.Should().ContainSingle().Which.Content.Should().Be("An update");
+        var expectedRecipients = new List<Guid>();
+        if (!allRolesFail) expectedRecipients.Add(handler.Id);
+        if (operation is "Comment") expectedRecipients.Add(assignee.Id);
+        var notices = _notificationService.ReceivedCalls().ToList();
+        if (expectedRecipients.Count == 0) notices.Should().BeEmpty();
+        else
+        {
+            var notice = notices.Should().ContainSingle().Subject.GetArguments();
+            ((IReadOnlyList<Guid>)notice[4]!).Should().BeEquivalentTo(expectedRecipients);
+            notice[0].Should().Be(operation is "Submit"
+                ? IssuesNotificationSources.IssueSubmitted : IssuesNotificationSources.IssueComment);
+        }
+        await _roleService.Received(1).GetActiveUserIdsInRoleAsync(RoleNames.Board, CancellationToken.None);
+        _logger.ReceivedCalls().Count(call => string.Equals(call.GetMethodInfo().Name, "Log", StringComparison.Ordinal)
+            && (LogLevel)call.GetArguments()[0]! == LogLevel.Error
+            && ReferenceEquals(call.GetArguments()[3], failure)).Should().Be(allRolesFail ? 2 : 1);
+    }
+
+    private static string Notice(string culture, string key, params object[] arguments)
+    {
+        var info = System.Globalization.CultureInfo.GetCultureInfo(culture);
+        return string.Format(info, new System.Resources.ResourceManager(typeof(IssuesResource)).GetString(key, info)!, arguments);
+    }
+
     public static TheoryData<NotificationSourceDefinition> FanoutNoticeSources => new(
         IssuesNotificationSources.IssueSubmitted,
         IssuesNotificationSources.IssueComment,
@@ -739,7 +789,7 @@ public sealed class IssuesServiceTests
         arguments[0].Should().Be(source);
         ((IReadOnlyList<Guid>)arguments[4]!).Should().Equal(second.Id);
         arguments[6].Should().Be($"/Issues/{issueId}");
-        arguments[7].Should().Be("Voir le sujet");
+        arguments[7].Should().Be(Notice("fr", "Issue_Notice_Open"));
     }
 
     [HumansTheory]
@@ -781,15 +831,15 @@ public sealed class IssuesServiceTests
         }
 
         var args = _notificationService.ReceivedCalls().Should().ContainSingle().Subject.GetArguments();
-        var titlePrefix = source.Name switch
+        var titleKey = source.Name switch
         {
-            nameof(IssuesNotificationSources.IssueSubmitted) => "Se presentó un asunto nuevo: ",
-            nameof(IssuesNotificationSources.IssueComment) => "Nuevo comentario sobre el asunto: ",
-            nameof(IssuesNotificationSources.IssueStatusChanged) => "El estado del asunto cambió: ",
-            nameof(IssuesNotificationSources.IssueAssigned) => "Se te asignó un asunto: ",
+            nameof(IssuesNotificationSources.IssueSubmitted) => "Issue_Notice_SubmittedTitle",
+            nameof(IssuesNotificationSources.IssueComment) => "Issue_Notice_CommentTitle",
+            nameof(IssuesNotificationSources.IssueStatusChanged) => "Issue_Notice_StatusChangedTitle",
+            nameof(IssuesNotificationSources.IssueAssigned) => "Issue_Notice_AssignedTitle",
             _ => throw new ArgumentOutOfRangeException(nameof(source))
         };
-        args[3].Should().Be(titlePrefix + title);
+        args[3].Should().Be(Notice("es", titleKey, title));
         var resources = new System.Resources.ResourceManager(typeof(IssuesResource));
         var culture = System.Globalization.CultureInfo.GetCultureInfo("es");
         args[5].Should().Be(source == IssuesNotificationSources.IssueStatusChanged
@@ -922,7 +972,7 @@ public sealed class IssuesServiceTests
 
     [HumansTheory]
     [InlineData("name")]
-    [InlineData("address")]
+    [InlineData("template")]
     [InlineData("enqueue")]
     public async Task HandlerReply_EmailFailureStillNotifiesAndResolvesTheSavedReply(string failure)
     {
@@ -934,15 +984,17 @@ public sealed class IssuesServiceTests
         if (string.Equals(failure, "name", StringComparison.Ordinal))
             _userService.GetUserInfoAsync(reporterId, Arg.Any<CancellationToken>())
                 .Returns(_ => ValueTask.FromException<UserInfo?>(error));
-        else if (string.Equals(failure, "address", StringComparison.Ordinal))
-            _userEmailService.GetNotificationTargetEmailsAsync(
-                    Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-                .Returns(Task.FromException<IReadOnlyDictionary<Guid, string>>(error));
-        else
+        else if (string.Equals(failure, "enqueue", StringComparison.Ordinal))
             _emailService.SendAsync(Arg.Any<EmailMessage>(), Arg.Any<CancellationToken>())
                 .Returns(Task.FromException(error));
 
-        var result = await _service.PostCommentAsync(issueId, Admin, Admin.UserId, "Fixed this",
+        var service = string.Equals(failure, "template", StringComparison.Ordinal)
+            ? new IssuesApplicationService(
+                _repository, _userService, _roleService, _emailService,
+                TestIssuesEmails.Create(_ => throw error), _notificationService, _notificationInbox,
+                AuditLog, AuditViewer, Clock, FileStorage, SectionCatalog, Domain.TestIssueQueues.Shipped(), _logger)
+            : _service;
+        var result = await service.PostCommentAsync(issueId, Admin, Admin.UserId, "Fixed this",
             resolveOnPost: true, ct: TestContext.Current.CancellationToken);
 
         result.Comment.Should().NotBeNull();
@@ -1163,12 +1215,12 @@ public sealed class IssuesServiceTests
         var repo = Substitute.For<IIssuesRepository>();
         var issue = new Issue { Id = Guid.NewGuid(), Status = IssueStatus.Open, Section = "Tickets" };
         var failure = new InvalidOperationException("Required persistence property not found.");
-        repo.FindForMutationAsync(issue.Id, Arg.Any<CancellationToken>()).Returns(_ => failDuringLookup
+        repo.GetByIdAsync(issue.Id, Arg.Any<CancellationToken>()).Returns(_ => failDuringLookup
             ? Task.FromException<Issue?>(failure) : Task.FromResult<Issue?>(issue));
         repo.SaveTrackedIssueAsync(issue, Arg.Any<CancellationToken>()).Returns(Task.FromException(failure));
         var service = new IssuesApplicationService(
-            repo, _userService, _userEmailService, _roleService,
-            _emailService, _emailMessages, _notificationService, _notificationInbox, AuditLog,
+            repo, _userService, _roleService,
+            _emailService, _emailMessages, _notificationService, _notificationInbox, AuditLog, AuditViewer,
             Clock, FileStorage, SectionCatalog, Domain.TestIssueQueues.Shipped(), _logger);
         var ct = TestContext.Current.CancellationToken;
         var assignee = SeedUser();
@@ -1199,11 +1251,11 @@ public sealed class IssuesServiceTests
         var snapshot = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
         var repo = Substitute.For<IIssuesRepository>();
         var issue = new Issue { Id = Guid.NewGuid(), ReporterUserId = Admin.UserId, Status = IssueStatus.Open };
-        repo.FindForMutationAsync(issue.Id, ct).Returns(issue);
+        repo.GetByIdAsync(issue.Id, ct).Returns(issue);
         repo.CountActionableAsync(null, null, ct).Returns(snapshot.Task, Task.FromResult(0));
         var service = new IssuesApplicationService(
-            repo, _userService, _userEmailService, _roleService,
-            _emailService, _emailMessages, _notificationService, _notificationInbox, AuditLog,
+            repo, _userService, _roleService,
+            _emailService, _emailMessages, _notificationService, _notificationInbox, AuditLog, AuditViewer,
             Clock, FileStorage, SectionCatalog, Domain.TestIssueQueues.Shipped(), _logger);
 
         var beforeWrite = service.GetActionableCountForViewerAsync(Admin, ct);
@@ -1229,7 +1281,7 @@ public sealed class IssuesServiceTests
         var handler = SeedUser();
         var assignee = SeedUser();
         var repo = Substitute.For<IIssuesRepository>();
-        repo.FindForMutationAsync(issueId, request.Token).Returns(issue);
+        repo.GetByIdAsync(issueId, request.Token).Returns(issue);
         repo.AddIssueAsync(Arg.Any<Issue>(), request.Token).Returns(async call =>
         {
             issue = call.Arg<Issue>();
@@ -1264,8 +1316,8 @@ public sealed class IssuesServiceTests
         var reporter = new IssueViewer(reporterId, []);
         (await _service.GetActionableCountForViewerAsync(reporter, ct)).Should().Be(1);
         var service = new IssuesApplicationService(
-            repo, _userService, _userEmailService, _roleService,
-            _emailService, _emailMessages, _notificationService, _notificationInbox, AuditLog,
+            repo, _userService, _roleService,
+            _emailService, _emailMessages, _notificationService, _notificationInbox, AuditLog, AuditViewer,
             Clock, FileStorage, SectionCatalog, Domain.TestIssueQueues.Shipped(), _logger);
 
         switch (operation)
@@ -1436,11 +1488,11 @@ public sealed class IssuesServiceTests
             IssuesNotificationSources.IssueAssigned,
             NotificationClass.Actionable,
             NotificationPriority.Normal,
-            Arg.Is<string>(title => title == "Se te asignó un asunto: Title"),
+            Arg.Is<string>(title => title == Notice("es", "Issue_Notice_AssignedTitle", "Title")),
             Arg.Is<IReadOnlyList<Guid>>(ids => ids.Contains(newAssigneeId)),
             Arg.Any<string?>(),
             Arg.Any<string?>(),
-            Arg.Is<string?>(label => label == "Ver asunto"),
+            Arg.Is<string?>(label => label == Notice("es", "Issue_Notice_Open")),
             Arg.Any<string?>(),
             Arg.Any<string?>(),
             Arg.Any<CancellationToken>());
@@ -2338,8 +2390,8 @@ public sealed class IssuesServiceTests
         _fileStorage.DeleteAsync(key, Arg.Any<CancellationToken>()).Returns(_ =>
             ++attempts == 1 ? Task.FromException(new IOException("Storage unavailable")) : Task.CompletedTask);
         var service = new IssuesApplicationService(
-            _repository, _userService, _userEmailService, _roleService,
-            _emailService, _emailMessages, _notificationService, _notificationInbox, AuditLog,
+            _repository, _userService, _roleService,
+            _emailService, _emailMessages, _notificationService, _notificationInbox, AuditLog, AuditViewer,
             Clock, _fileStorage, SectionCatalog, Domain.TestIssueQueues.Shipped(), _logger);
 
         var erase = () => service.EraseForUserAsync(reporterId, Ct);
@@ -2367,8 +2419,8 @@ public sealed class IssuesServiceTests
             throw new IOException("Screenshot storage unavailable");
         });
         var service = new IssuesApplicationService(
-            _repository, _userService, _userEmailService, _roleService,
-            _emailService, _emailMessages, _notificationService, _notificationInbox, AuditLog,
+            _repository, _userService, _roleService,
+            _emailService, _emailMessages, _notificationService, _notificationInbox, AuditLog, AuditViewer,
             Clock, _fileStorage, SectionCatalog, Domain.TestIssueQueues.Shipped(), _logger);
 
         (await service.PurgeExpiredAsync(Ct)).Should().Be(1);
@@ -2377,6 +2429,92 @@ public sealed class IssuesServiceTests
         rowRemovedAtCleanup.Should().BeTrue();
         cleanupToken.Should().Be(CancellationToken.None);
         await _fileStorage.Received(1).DeleteAsync(key, CancellationToken.None);
+    }
+
+    [HumansTheory]
+    [InlineData("before")]
+    [InlineData("after")]
+    [InlineData("verification")]
+    [InlineData("storage")]
+    public async Task PurgeExpiredAsync_LostAcknowledgement_CleansOnlyConfirmedDeletedScreenshots(string failureStage)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var options = NewSectionDbOptions<IssuesDbContext>();
+        var first = Guid.NewGuid();
+        var second = Guid.NewGuid();
+        var live = Guid.NewGuid();
+        var firstKey = $"uploads/issues/{first}/shot.png";
+        var secondKey = $"uploads/issues/{second}/shot.png";
+        var liveKey = $"uploads/issues/{live}/shot.png";
+        var old = Clock.GetCurrentInstant() - Duration.FromDays(200);
+        await using (var seed = new IssuesDbContext(options))
+        {
+            foreach (var (id, key) in new[] { (first, firstKey), (second, secondKey), (live, liveKey) })
+                seed.Issues.Add(new Issue
+                {
+                    Id = id,
+                    ReporterUserId = Guid.NewGuid(),
+                    Category = IssueCategory.Bug,
+                    Title = "Retention",
+                    Description = "Test",
+                    CreatedAt = old,
+                    UpdatedAt = old,
+                    Status = id == live ? IssueStatus.Open : IssueStatus.Resolved,
+                    ResolvedAt = id == live ? null : old,
+                    ScreenshotStoragePath = key,
+                });
+            await seed.SaveChangesAsync(ct);
+        }
+        var failure = new IOException("Retention save failed");
+        var failingOptions = new DbContextOptionsBuilder<IssuesDbContext>(options)
+            .AddInterceptors(new FailRetentionSave(failure, string.Equals(failureStage, "before", StringComparison.Ordinal))).Options;
+        var inner = new IssuesRepository(new TestDbContextFactory<IssuesDbContext>(failingOptions));
+        var repo = Substitute.For<IIssuesRepository>();
+        repo.GetExpiredTerminalAsync(Arg.Any<Instant>(), Arg.Any<CancellationToken>())
+            .Returns(call => inner.GetExpiredTerminalAsync(call.Arg<Instant>(), call.Arg<CancellationToken>()));
+        repo.DeleteByIdsAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(call => inner.DeleteByIdsAsync(call.Arg<IReadOnlyCollection<Guid>>(), call.Arg<CancellationToken>()));
+        repo.GetByIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns(call =>
+        {
+            call.Arg<CancellationToken>().Should().Be(CancellationToken.None);
+            return call.Arg<Guid>() == first && string.Equals(failureStage, "verification", StringComparison.Ordinal)
+                ? Task.FromException<Issue?>(new IOException("Verification unavailable"))
+                : inner.GetByIdAsync(call.Arg<Guid>(), call.Arg<CancellationToken>());
+        });
+        var files = new HashSet<string>(StringComparer.Ordinal) { firstKey, secondKey, liveKey };
+        var storage = Substitute.For<IFileStorage>();
+        storage.DeleteAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns(call =>
+        {
+            call.Arg<CancellationToken>().Should().Be(CancellationToken.None);
+            if (string.Equals(failureStage, "storage", StringComparison.Ordinal) && string.Equals(call.Arg<string>(), firstKey, StringComparison.Ordinal))
+                throw new IOException("Storage unavailable");
+            files.Remove(call.Arg<string>());
+            return Task.CompletedTask;
+        });
+        var service = new IssuesApplicationService(repo, _userService, _roleService,
+            _emailService, _emailMessages, _notificationService, _notificationInbox, AuditLog, AuditViewer,
+            Clock, storage, SectionCatalog, Domain.TestIssueQueues.Shipped(), _logger);
+
+        var purge = () => service.PurgeExpiredAsync(ct);
+        (await purge.Should().ThrowAsync<IOException>()).Which.Should().BeSameAs(failure);
+
+        files.Contains(firstKey).Should().Be(failureStage is "before" or "verification" or "storage");
+        files.Contains(secondKey).Should().Be(string.Equals(failureStage, "before", StringComparison.Ordinal));
+        files.Should().Contain(liveKey);
+        await using var verify = new IssuesDbContext(options);
+        (await verify.Issues.CountAsync(ct)).Should().Be(string.Equals(failureStage, "before", StringComparison.Ordinal) ? 3 : 1);
+    }
+
+    private sealed class FailRetentionSave(Exception failure, bool beforeCommit) : SaveChangesInterceptor
+    {
+        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(DbContextEventData eventData,
+            InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            if (beforeCommit) throw failure;
+            return ValueTask.FromResult(result);
+        }
+        public override ValueTask<int> SavedChangesAsync(SaveChangesCompletedEventData eventData,
+            int result, CancellationToken cancellationToken = default) => throw failure;
     }
 
     [HumansFact]
@@ -2659,6 +2797,66 @@ public sealed class IssuesServiceTests
 
         var stored = await _issuesDb.Issues.AsNoTracking().SingleAsync(i => i.Id == issueId, TestContext.Current.CancellationToken);
         stored.AssigneeUserId.Should().Be(survivorId);
+    }
+
+    [HumansTheory]
+    [InlineData("Submit")]
+    [InlineData("Comment")]
+    [InlineData("Status")]
+    [InlineData("Assigned")]
+    public async Task IssueNotices_ExcludeTheResolvedActorAcrossMergeAliases(string operation)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (archivedId, issueId) = await SeedIssueAsync(IssueStatus.Open);
+        var survivor = SeedUser(displayName: "Survivor");
+        StubResolution(archivedId, survivor.Id);
+        _roleService.GetActiveUserIdsInRoleAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult<IReadOnlyList<Guid>>([survivor.Id]));
+        if (operation is not "Assigned")
+        {
+            var issue = (await _repository.GetByIdAsync(issueId, ct))!;
+            issue.AssigneeUserId = survivor.Id;
+            await _repository.SaveTrackedIssueAsync(issue, ct);
+        }
+
+        switch (operation)
+        {
+            case "Submit":
+                (await _service.SubmitIssueAsync(archivedId, IssueCategory.Bug, "New issue", "Details",
+                    null, null, null, null, null, ct: ct)).Issue.Should().NotBeNull();
+                break;
+            case "Comment":
+                (await _service.PostCommentAsync(issueId, Admin, archivedId, "An update", ct: ct)).Comment.Should().NotBeNull();
+                break;
+            case "Status":
+                (await _service.UpdateStatusAsync(issueId, Admin, IssueStatus.InProgress, archivedId, ct)).Succeeded.Should().BeTrue();
+                break;
+            default:
+                (await _service.UpdateAssigneeAsync(issueId, Admin, survivor.Id, archivedId, ct)).Succeeded.Should().BeTrue();
+                break;
+        }
+
+        _notificationService.ReceivedCalls().Should().BeEmpty("the actor and recipient resolve to the same human");
+    }
+
+    [HumansFact]
+    public async Task IssueSubmittedNotice_ResolvesAndDeduplicatesQueueHandlersBeforeLanguageGrouping()
+    {
+        var reporter = SeedUser(displayName: "Reporter");
+        var archived = SeedUser(displayName: "Archived handler");
+        var survivor = SeedUser(displayName: "Surviving handler");
+        survivor.PreferredLanguage = "es";
+        StubResolution(archived.Id, survivor.Id);
+        _roleService.GetActiveUserIdsInRoleAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult<IReadOnlyList<Guid>>([archived.Id, survivor.Id]));
+
+        var result = await _service.SubmitIssueAsync(reporter.Id, IssueCategory.Bug, "Title", "Details",
+            null, null, null, null, null, ct: TestContext.Current.CancellationToken);
+
+        var notice = _notificationService.ReceivedCalls().Should().ContainSingle().Subject.GetArguments();
+        ((IReadOnlyList<Guid>)notice[4]!).Should().ContainSingle().Which.Should().Be(survivor.Id);
+        notice[3].Should().Be(Notice("es", "Issue_Notice_SubmittedTitle", "Title"));
+        notice[9].Should().Be(result.Issue!.Id.ToString());
     }
 
     /// <summary>Makes the registry-backed user service resolve <paramref name="archived"/> forward.</summary>

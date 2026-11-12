@@ -85,10 +85,11 @@
   <data name="Cantina_Dietary_Intolerance_Lactose" xml:space="preserve"><value>Laktose</value></data>
   <data name="Cantina_Dietary_AllergyOther_Required" xml:space="preserve"><value>Bitte beschreibe die andere Allergie.</value></data>
   <data name="Cantina_Dietary_IntoleranceOther_Required" xml:space="preserve"><value>Bitte beschreibe die andere Unverträglichkeit.</value></data>
-  <data name="Cantina_Dietary_BreadcrumbNavigation" xml:space="preserve"><value>Navigationspfad</value></data>
   <data name="Cantina_Dietary_PageTitle" xml:space="preserve"><value>Ernährungsangaben</value></data>
   <data name="Cantina_Dietary_Saved" xml:space="preserve"><value>Deine Ernährungsangaben wurden gespeichert.</value></data>
   <data name="Cantina_Dietary_SaveFailed" xml:space="preserve"><value>Die Ernährungsangaben konnten nicht gespeichert werden.</value></data>
+  <data name="Cantina_Dietary_PreferenceTooLong" xml:space="preserve"><value>Die Ernährungspräferenz darf höchstens 200 Zeichen enthalten.</value></data>
+  <data name="Cantina_Dietary_OtherTextTooLong" xml:space="preserve"><value>Die Angaben zu sonstigen Allergien oder Unverträglichkeiten dürfen höchstens 500 Zeichen enthalten.</value></data>
   <data name="Cantina_Dietary_LoadFailed" xml:space="preserve"><value>Die Ernährungsangaben konnten nicht geladen werden.</value></data>
   <data name="Cantina_Dietary_OptionalHint" xml:space="preserve"><value>Freiwillig. Es hilft der Kantine, die Mahlzeiten für lange Schichten zu planen, und hat nie Einfluss auf deine Schichtanmeldungen.</value></data>
   <data name="Cantina_Dietary_DeclineButton" xml:space="preserve"><value>Ich möchte nicht antworten</value></data>
@@ -97,7 +98,4 @@
   <data name="Cantina_Roster_RevealHealth" xml:space="preserve"><value>Allergien und Unverträglichkeiten anzeigen</value></data>
   <data name="Cantina_Roster_HealthHidden" xml:space="preserve"><value>Die Angaben zu Allergien und Unverträglichkeiten sind ausgeblendet. Das Anzeigen wird im Audit-Log festgehalten.</value></data>
   <data name="Cantina_Roster_RevealHealthNote" xml:space="preserve"><value>Das Anzeigen wird im Audit-Log festgehalten.</value></data>
-  <data name="Cantina_Dietary_RevealsTitle" xml:space="preserve"><value>Wer das angesehen hat</value></data>
-  <data name="Cantina_Dietary_RevealsEmpty" xml:space="preserve"><value>Niemand hat deine Angaben zu Allergien und Unverträglichkeiten angesehen.</value></data>
-  <data name="Cantina_Dietary_RevealedBy" xml:space="preserve"><value>Angesehen von</value></data>
 </root>

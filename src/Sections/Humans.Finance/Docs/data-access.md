@@ -8,28 +8,29 @@ Folder: `src/Sections/Humans.Finance/Services/` (namespace
 `Repository` (`src/Sections/Humans.Finance/Data/Repository.cs`, implements
 `IHoldedRepository`) injects `IDbContextFactory<FinanceDbContext>` directly
 — a distinct context from `ExpensesDbContext` and from
-`HoldedDbContext`. Owns `HoldedExpenseDocs`,
-`HoldedCategoryMap`, `HoldedDocSyncStates`, `HoldedCreditorContacts`,
-`HoldedManagedAccounts`, `SepaPayoutFiles`, `SepaPayoutTransfers`.
+`HoldedDbContext`. Owns
+`HoldedCategoryMap`, `HoldedCreditorContacts`,
+`HoldedManagedAccounts`, `SepaPayoutFiles`, `SepaPayoutTransfers`. `HoldedExpenseDocs` and
+`HoldedDocSyncStates` are still mapped but unread and unwritten since the purchase-document mirror
+moved to Holded; dropping them is its own PR (`no-drops-until-prod-verified`).
 `PaymentDetailsRepository` (`Data/PaymentDetailsRepository.cs`, implements
 `IPaymentDetailsRepository`) owns `PaymentDetails` (`finance_payment_details`) on the same context.
 
 The ledger mirror (`HoldedLedgerLines` and its sync state, chart-of-accounts
-cache, and API call-metering log) is owned by the
+cache, and API call-metering log) and the purchase-document mirror are owned by the
 [Holded](../../Humans.Holded/Docs/data-access.md) section
 (`IHoldedMirrorRepository` / `HoldedDbContext`), not Finance. Finance owns
 Holded-account **provisioning** (mapping budget categories to Holded
-expense accounts, `HoldedCategoryMap`), purchase-**document** sync and
-category/tag matching (`HoldedExpenseDocs`, via `HoldedMatcher`), and the
+expense accounts, `HoldedCategoryMap`), category/tag **attribution** of the
+purchase documents Holded mirrors (`HoldedMatcher`, computed on read), and the
 creditor-**contact binding** surface (`HoldedCreditorContacts` — user ↔
 Holded supplier-account bindings, including an at-most-one-member
 collision guard).
 
-Sync-state reads return the persisted singleton or an unsaved Idle default; only `SaveDocSyncStateAsync` inserts or updates `HoldedDocSyncStates`.
 
 ### SepaBankBooking (section-internal)
 
-Composed by `Service` using `IHoldedRepository`, `IHoldedClient`, `IClock`,
+Composed by `Service` using `IHoldedRepository`, `IHoldedService`, `IHoldedWrite`, `IClock`,
 a singleton `TrackedCache<string, Dictionary<string, int>>` for sweep failure
 counts, `IAuditLogService` and `IOptions<SepaOptions>`. Owns the manual
 and scheduled bank-booking workflow: reads creditor bindings and payout rows,
@@ -37,14 +38,18 @@ updates booking/payment-reference/reconciliation columns on `SepaPayoutTransfers
 and calls Holded through its contract. Its shared booking gate covers all entry
 points. No provisioning, Budget or email dependency.
 
-### HoldedDocumentSync (section-internal)
+### HoldedCategoryAccounts (section-internal, composed by `Service`)
 
-Composed by `Service` using `IHoldedRepository`, `IHoldedClient`, `IClock`
-and the facade's logger. Owns purchase-document fetching and matching,
-`HoldedExpenseDocs` snapshot replacement and `HoldedDocSyncStates` writes. Reads the
-category map and managed-account registry, and the mirror itself to find documents whose
-notes it lacks (one `GetPurchaseDocumentAsync` each); no Budget, user or email dependency.
-The internal `IHoldedFinanceManagement.SyncAsync` entry point delegates here; its callers are Finance's own `HoldedDocSyncJob` (nightly) and `FinanceController.RunHoldedSync` (manual), never another section. The facade passes its duplicate-document check in, run over the fetched documents before the snapshot is written (it reads `IExpenseHoldedBookingService`, which the sync itself never does).
+Repository: `IHoldedRepository` (shared with its owner). Provisions Holded expense accounts for
+the active budget year's categories and records the mapping; not DI-registered.
+
+| Table | R/W |
+|-------|-----|
+| HoldedCategoryMap | R/W (`GetCategoryMapAsync`, `AddCategoryMapAsync`) |
+
+Cross-section calls via `IBudgetService` (active-year categories), `IHoldedService` (chart of
+accounts mirror) and `IHoldedWrite` (`EnsureExpenseAccountAsync`), plus `IAuditLogService` and
+`IClock`. No cache.
 
 ### CashFlowService (Scoped, section-internal)
 
@@ -53,6 +58,37 @@ No repository, no tables, no cache. Computes `/Finance/CashFlow` from
 `VatRate` and `ExpectedDate`) and `ITicketService.GetTicketOrdersAsync` (paid
 orders' gross revenue for the runway). Injected by `FinanceController` only.
 
+### FinanceOverviewService (Scoped, section-internal)
+
+No repository, no tables, no cache. Composes `/Finance` from the Holded ledger
+mirror through `IHoldedService` (`GetLedgerSyncedAtAsync`, `GetAccountBalancesAsync`, `GetChartAsync`,
+`GetLedgerLinesAsync` for the 472/477/4751 tax accounts), this section's own `IFinanceService`
+(`ListCreditorAccountsAsync`, `GetExpenseReconAsync` and `GetActualsForYearAsync`),
+`IExpenseReportService.GetReviewQueueAsync`, `IBudgetService`, `CashFlowService` and
+`IPleoService.GetWalletBalanceAsync` (the Pleo card). Injected by `FinanceController` only.
+
+### PleoBooking (Scoped, section-internal) · PleoBookingState, PleoBookingRunner (Singleton)
+
+No repository, no tables, no cache. Orchestrates Pleo → Holded: reads
+`IPleoService.GetSettledEntriesAsync` / `GetWalletBalanceAsync`, the 57200003
+and 57200001 lines, balances and chart through `IHoldedService`, re-pulls 57200003
+with `IHoldedService.SyncAccountLedgerAsync` before and after a run, and posts
+through `IHoldedWrite.PostJournalEntryAsync`. `PleoBookingState` holds the
+current/last run; `PleoBookingRunner` runs `BookAsync` in its own scope off the
+request. Injected by `FinanceController` only.
+
+### SepaBookingRunner (Singleton, section-internal)
+
+No repository, no tables. Runs one `/Finance/Sepa` booking at a time through
+`IFinanceAdminService` in its own scope off the request, and holds the current/last
+run for the page. Injected by `FinanceController` only.
+
+### CreditorMatchService (Scoped, section-internal)
+
+No repository, no tables, no cache. Matches Holded creditor ledger lines against
+expense reports for `/Finance` via `IHoldedService.GetLedgerLinesAsync` and
+`IExpenseReportService.GetReviewQueueAsync`. Injected by `FinanceController` only.
+
 ### Service (Scoped)
 
 Repository: `IHoldedRepository`.
@@ -60,36 +96,31 @@ Repository: `IHoldedRepository`.
 | Table | R/W |
 |-------|-----|
 | HoldedCategoryMap | R/W |
-| HoldedExpenseDocs | R/W |
 | HoldedCreditorContacts | R/W (creditor-contact bindings per user) |
-| HoldedDocSyncStates | R/W |
 | SepaPayoutFiles | R/W (append-only writes; read joined for the Article 15 export and for `/Finance/Sepa`) |
-| SepaPayoutTransfers | R/W (appended at generation, `HoldedContactId` captured from the binding at that point; the booking columns are updated only by the composed `SepaBankBooking` owner — `SaveSepaTransferBookingAsync` (`BookedAt`/`BookedByUserId`/`HoldedBankMovementId`/`ReconciledAt`/`HoldedPaymentRefs`), `SaveSepaTransferPaymentRefsAsync` (`HoldedPaymentRefs` only, a run that posted and then stopped), `MarkSepaTransferReconciledAsync` (`ReconciledAt` only, a later reconcile pass); the one other update is `SaveSepaTransferWithdrawnAsync` (`WithdrawnAt`/`WithdrawnByUserId` only, a transfer the bank cancelled, written by the facade's `WithdrawSepaTransferAsync`). Read per user for the Article 15 export and flattened with the file for `/Finance/Sepa`) |
+| SepaPayoutTransfers | R/W (appended at generation, `HoldedContactId` captured from the binding at that point; the booking columns are updated only by the composed `SepaBankBooking` owner — `SaveSepaTransferBookingAsync` (`BookedAt`/`BookedByUserId`/`HoldedBankMovementId`/`ReconciledAt`/`HoldedPaymentRefs`), `SaveSepaTransferPaymentRefsAsync` (`HoldedPaymentRefs` only, a run that posted and then stopped), `MarkSepaTransferReconciledAsync` (`ReconciledAt` only, a later reconcile pass); the one other update is `SaveSepaTransfersWithdrawnAsync` (`WithdrawnAt`/`WithdrawnByUserId` only, a transfer the bank cancelled or a whole rejected file, written by the facade's `WithdrawSepaTransferAsync` and `CancelSepaFileAsync`). Read per user for the Article 15 export and flattened with the file for `/Finance/Sepa`) |
 
 Cross-section calls via `IBudgetService` (`budget` in the ctor), `IHoldedService` (the Holded section's
-ledger-mirror read surface — `holded` in the ctor; ledger-line /
-account-balance reads for creditor status, ledger, and account listing),
-`IHoldedClient` (Holded's `Contracts/` folder — purchase-document / contact / expense-account
-API calls, plus `PayPurchaseDocumentAsync` for SEPA booking), `IAuditLogService`
+mirror read surface — `holded` in the ctor; ledger-line /
+account-balance reads for creditor status, ledger, and account listing, and the purchase-document
+mirror for actuals, the unmatched queue and expense recon),
+`IHoldedWrite` (Holded's write face: creditor contacts, expense accounts, purchase documents,
+`PayPurchaseDocumentAsync`, bank reconcile, journal entries), `IExpenseHoldedBookingService`
+(Expenses — linked expense lines, DTOs only), `IPaymentDetailsManagement` (IBAN), `IAuditLogService`
 (one entry per SEPA credit transfer generated, and one per transfer booked), and
-`IUserService` / `IUserEmailService` / `IEmailService` (the payout-generated and
+`IUserService` / `IEmailService` (the payout-generated and
 payout-withdrawn notification to each creditor, through the section's `FinanceEmails` builder).
-Implements `IHoldedFinanceManagement` (the public `IHoldedFinanceService` and `IHoldedFinanceWrite`), `IHoldedFinanceAdminService`
-and `IUserDataContributor`.
-Injects `IMemoryCache` for the 2-minute Holded contact-list entry
-(`CacheKeys.HoldedContacts`) and `IOptions<SepaOptions>` for the organisation's
-SEPA identity.
+Implements the public `IFinanceService` and `IFinanceWrite` (their IBAN members delegate to
+`IPaymentDetailsManagement`), the internal `IFinanceAdminService` and `IUserDataContributor`.
+Injects `IOptions<SepaOptions>` for the organisation's SEPA identity and the singleton
+`TrackedCache<string, Dictionary<string, int>>` (`CacheKeys.SepaStuckBankLines`, held by the composed
+`SepaBankBooking`) for sweep failure counts. No `IMemoryCache`; Holded contacts are read from the
+Holded mirror through `IHoldedService.GetContactsAsync`.
 
-`IHoldedFinanceAdminService` (`Services/IHoldedFinanceAdminService.cs`) is
-**internal** — the `/Finance/Holded` connector index is this section's own
-screen, so its read model is not cross-section surface; the same shape as the
-Holded section's `IHoldedAdminService`. `GetConnectorOverviewAsync` reads `HoldedDocSyncStates`,
-`HoldedCategoryMap`, `HoldedExpenseDocs` (via `GetAllDocsAsync` — the
-unmatched and matched-for-year reads are each a filtered slice and neither
-composes into "all docs") and `HoldedCreditorContacts`, plus
-`IBudgetService` for category names. **No `IHoldedClient` call** — the
-index must not inherit the connector's 30 s timeout
-(nobodies-collective/Humans#976, #1000). `GetProvisioningPlanAsync` /
+`IFinanceAdminService` (`Services/IFinanceAdminService.cs`) is
+**internal** — Finance's own screens' read models, not cross-section surface.
+`GetManagedAccountsAsync` (`/Finance/HoldedAccounts`) reads `HoldedManagedAccounts`.
+`GetProvisioningPlanAsync` /
 `ProvisionAsync` (`/Finance/HoldedAccounts`) and `SetCreditorContactAsync` /
 `ClearCreditorContactAsync` (Bind and Unbind on `/Finance/Creditors`) live here
 too: no other section calls them. The SEPA methods,
@@ -101,29 +132,28 @@ screens, so also not cross-section surface. `BookSepaTransferAsync` is marked
 `[ExternalWrite]` and takes no `CancellationToken`: it posts payments to Holded
 and has to finish once it has started
 ([`cancellation-token-propagation`](../../../../memory/architecture/cancellation-token-propagation.md)).
-It calls the Holded section's `IHoldedClient.ListBankMovementsAsync` (find and
-match the bank line), `ListAccountingAccountsAsync` (live balance),
-`ListLedgerEntriesAsync` (what is already posted, by tag) and
-`ReconcileBankMovementAsync` (nobodies-collective/Humans#1185), alongside the
-existing `PayPurchaseDocumentAsync` / `PostLedgerEntryAsync` / `ListPurchaseDocumentsAsync`.
-`WithdrawSepaTransferAsync`, `GetHoldedDuplicatesAsync` and `RemoveHoldedDuplicatesAsync`
-(`[ExternalWrite]`, no token) serve `POST /Finance/Sepa/Withdraw` and
+Reads go sync-then-mirror through `IHoldedService`:
+`SyncBankMovementsAsync` / `GetBankMovementsAsync` (find and match the bank line; `GET /Finance/Sepa`
+reads the mirror without syncing), `SyncAccountLedgerAsync` / `GetLedgerLinesAsync` (balance and what
+is already posted) and `SyncPurchaseDocumentsAsync` / `GetPurchaseDocumentsAsync` (open documents).
+Writes go through `IHoldedWrite`: `PayPurchaseDocumentAsync`, `ReconcileBankMovementAsync` and
+`PostJournalEntryAsync` (nobodies-collective/Humans#1185).
+`WithdrawSepaTransferAsync`, `CancelSepaFileAsync`, `GetHoldedDuplicatesAsync` and `RemoveHoldedDuplicatesAsync`
+(`[ExternalWrite]`, no token) serve `POST /Finance/Sepa/Withdraw`, `/Finance/Sepa/CancelFile` and
 `/Finance/HoldedDuplicates`; the duplicate check reads the linked expense lines
 through `IExpenseHoldedBookingService.GetHoldedBookingsAsync` (Expenses, DTOs only) and
-deletes through `IHoldedClient.DeletePurchaseDocumentAsync` / `DeleteContactAsync`.
-`GetExpenseReconAsync` (public, `IHoldedFinanceService`; `/Finance/ExpenseRecon`, the
-`/Finance/Creditors` banner, `ExpenseReconJob` and Backdoor) reads `HoldedDocSyncStates`,
-`HoldedExpenseDocs`, `HoldedCreditorContacts` and `SepaPayoutTransfers`, plus
-`IExpenseHoldedBookingService.GetHoldedReconLinesAsync`, `IHoldedService.GetAccountBalancesAsync`
-and `IUserService.GetUserInfosAsync`. **No `IHoldedClient` call, no write.**
+deletes through `IHoldedWrite.DeletePurchaseDocumentByIdAsync` / `DeleteContactAsync`.
+`GetExpenseReconAsync` (public, `IFinanceService`; `/Finance/ExpenseRecon`, the
+`/Finance/Creditors` banner, `ExpenseReconJob` and Backdoor) reads `HoldedCreditorContacts` and `SepaPayoutTransfers`, plus
+`IExpenseHoldedBookingService.GetHoldedReconLinesAsync`, `IHoldedService.GetLedgerSyncedAtAsync`,
+`GetAccountBalancesAsync` and `GetLedgerLinesAsync` (every creditor-range account), `IHoldedService.GetContactsAsync`
+(the contact mirror `/Finance/Creditors` also reads — which account each bound contact is on), and
+`IUserService.GetUserInfosAsync`. **No write.**
 
-`ISepaBankBooking.RunAsync` (`Humans.Finance.Contracts`, public — the Hangfire
-job needs a public concrete type but must not take the internal
-`IHoldedFinanceAdminService`, the same seam `IHoldedNightlySync` is for Holded's `HoldedSyncJob`) is
-the bank-line sweep: books every unbooked transfer whose Sabadell line has
-appeared, and retries the reconcile for every booked-but-unreconciled one.
-Also `[ExternalWrite]`. `SepaBankBookingJob` (`Jobs/`) is its Hangfire shim,
-registered in `Section.cs`, cron `17 */2 * * *`.
+`RunSepaBookingSweepAsync` (also `[ExternalWrite]`) is the bank-line sweep: books every unbooked
+transfer whose Sabadell line has appeared, and retries the reconcile for every booked-but-unreconciled
+one. `SepaBankBookingJob` (`Jobs/`, internal, on `IFinanceAdminService`) is its Hangfire shim, registered in `Section.cs`, cron
+`17 */2 * * *`.
 
 ### PaymentDetailsService (Scoped)
 
@@ -133,13 +163,11 @@ Repository: `IPaymentDetailsRepository`.
 |-------|-----|
 | PaymentDetails (`finance_payment_details`) | R/W — one row per member, keyed by `UserId` (bare id, no FK). A null `Iban` records a removal. |
 
-Implements the public `IFinanceService` (`GetIbanAsync`) and `IFinanceWrite` (`SetIbanAsync`), both
-called by Expenses; the internal `IPaymentDetailsManagement` (`RevealIbanAsync` for
-`PaymentDetailsAdminController`, and the `finance.iban-to-payment-details` copy for
-`ISectionDataMigrations`); `IUserDataContributor` (slice `PaymentDetails`, masked IBAN; erasure
+Implements the internal `IPaymentDetailsManagement` (`GetIbanAsync` / `SetIbanAsync`, reached by Expenses
+through `Service`'s `IFinanceService` / `IFinanceWrite`, and `RevealIbanAsync` for
+`PaymentDetailsAdminController`); `IUserDataContributor` (slice `PaymentDetails`, masked IBAN; erasure
 deletes the row) and `IUserMerge` (the survivor's IBAN wins, else the source's row moves).
-Cross-section calls: `IUserService` (merge-chain resolution, the user-exists check, and the
-`[Obsolete]` `ProfileInfo.Iban` read fallback until the copy is done in production) and
+Cross-section calls: `IUserService` (merge-chain resolution and the user-exists check) and
 `IAuditLogService` (`IbanReveal`). Uncached: each read is one keyed row.
 
 `PaymentDetailsViewComponent` (the Payment Details card, contributed to `/Users/Admin/{id}` by

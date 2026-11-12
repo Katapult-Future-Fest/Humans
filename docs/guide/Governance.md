@@ -44,7 +44,7 @@ Both tiers run on synchronized 2-year terms that expire on December 31 of the cu
 - `/Governance/Votes/{id}/Results` — the result, once the vote has closed. `Results.csv` is the same numbers as a download.
 - `/Governance/Votes/Admin` — every vote in every state, including drafts (Board and Admin).
 - `/Auth/Admin/Roles` — paginated list of all role assignments, filterable by role (Users Admin, Board or Admin).
-- `/Auth/Admin/{id}/Roles/Add` and `/Auth/Admin/{id}/Roles/{roleId}/End` — assign and end role assignments on a specific human (Board, UsersAdmin, and Admin).
+- `/Auth/Admin/{id}/Roles/Add` and `/Auth/Admin/{id}/Roles/{roleId}/End` — assign and end role assignments on a specific human (Users Admin and Admin).
 
 ## As a Volunteer
 
@@ -83,7 +83,7 @@ When the Board opens a vote, everyone entitled to take part gets an email in the
 
 Who is entitled is decided **at the moment the vote opens**, and never changes afterwards. Every current Asociado and every active Board member is on that roster with an **official** ballot — Board members count as Asociados here whatever their profile tier says. Depending on the motion, Colaboradores and sometimes all active Volunteers are invited too, with an **indicative** ballot that is labelled as such everywhere it appears and is never counted in the official result. If your tier changes while the vote is running, your place on the roster does not.
 
-The motion is written in all six languages. One of them is marked as the **official** text — that is the binding wording, and the others are labelled as translations of it.
+The motion is written in all supported languages. One of them is marked as the **official** text — that is the binding wording, and the others are labelled as translations of it.
 
 A vote is either a straight **yes / no / abstain**, or a **ranked choice** where you put the options in your order of preference. Either way you can come back and change your ballot as many times as you like until the vote closes; the page shows you your own history of changes. Abstaining counts toward turnout but is neither for nor against.
 
@@ -103,7 +103,7 @@ Whether individual names appear beside the ballots depends on what the Board cho
 
 ### Run an assembly vote
 
-Drafting is at `/Governance/Votes/Admin` — Board and Admin can create, edit and delete drafts. A draft carries the title and text in each of the six languages, which of them is official, an optional information link, whether it is yes/no or ranked choice, the options for a ranked vote, the majority it needs, who gets an indicative ballot, whether names are shown beside ballots, and the closing time.
+Drafting is at `/Governance/Votes/Admin` — Board and Admin can create, edit and delete drafts. A draft carries the title and text in each supported language, which of them is official, an optional information link, whether it is yes/no or ranked choice, the options for a ranked vote, the majority it needs, who gets an indicative ballot, whether names are shown beside ballots, and the closing time.
 
 **Opening a vote is Admin-only, and it is not reversible.** Opening freezes the roster, mails everybody on it, and writes an audit entry. From then on the motion text cannot be edited. Admin can **stop** a vote early, **extend** its deadline (later only), or **cancel** it with a recorded reason — all audited, all Admin-only. Board members draft and read; they do not open, stop, extend or cancel.
 
@@ -132,9 +132,8 @@ Either way, finalization immediately **deletes all individual Board vote records
 Role assignments live on each human's detail page under the Admin area (`/Users/Admin/{id}`). Every assignment is temporal — it has a **valid from** date and an optional **valid to** date, and every change is audited. You can also browse all current and historical role assignments at `/Auth/Admin/Roles`.
 
 - **Admin** can assign and revoke any role, including Admin itself.
-- **Board** can assign and revoke any role **except** Admin.
-- **UsersAdmin** can assign and revoke any role **except** Admin (same surface as Board for role management).
-- Board does not assign or end roles. The full set of roles Users Admin can manage is every catalogued role but Admin: Board, UsersAdmin, TeamsAdmin, CampsAdmin, TicketsAdmin, ShiftsNoInfo, FeedbackAdmin, FinanceAdmin, EventsAdmin, StoreAdmin, CantinaAdmin, EarlyEntryAdmin, RideshareAdmin, ConsentCoordinator, ShiftsAdmin.
+- **UsersAdmin** can assign and revoke any role **except** Admin.
+- Board sees the role roster but does not assign or end roles. The full set of roles Users Admin can manage is every catalogued role but Admin: Board, UsersAdmin, TeamsAdmin, CampsAdmin, TicketsAdmin, ShiftsNoInfo, FinanceAdmin, EventsAdmin, StoreAdmin, CantinaAdmin, EarlyEntryAdmin, RideshareAdmin, GrantsAdmin, SurveysAdmin, ConsentCoordinator, ShiftsAdmin.
 - Coordinator roles (Consent Coordinator, Shifts Admin) are assigned here too; what those coordinators actually do is described in [LegalAndConsent.md](LegalAndConsent.md) and [Onboarding.md](Onboarding.md).
 
 To end a role, set the **valid to** date. Historical assignments remain on the profile for the audit trail.

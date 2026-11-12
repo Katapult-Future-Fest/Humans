@@ -68,17 +68,6 @@ public abstract class WorkgroupsTestHarness : IDisposable
         Surveys.GetSummariesAsync(Arg.Any<CancellationToken>())
             .Returns(_ => Task.FromResult<IReadOnlyList<SurveySummary>>(_surveys.Values.ToList()));
 
-        UserEmails = Substitute.For<IUserEmailService>();
-        UserEmails.GetNotificationTargetEmailsAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(call =>
-            {
-                var ids = (IReadOnlyCollection<Guid>)call.Args()[0]!;
-                IReadOnlyDictionary<Guid, string> dict = ids
-                    .Where(_users.ContainsKey)
-                    .ToDictionary(id => id, id => $"{id}@example.org");
-                return Task.FromResult(dict);
-            });
-
         Roles = Substitute.For<IRoleAssignmentService>();
         Roles.GetActiveUserIdsInRoleAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns([]);
@@ -98,13 +87,14 @@ public abstract class WorkgroupsTestHarness : IDisposable
 
         GoogleSyncRead = Substitute.For<IGoogleSyncService>();
         GoogleSync = Substitute.For<IGoogleSyncWrite>();
+        GoogleGroupSync = Substitute.For<IGoogleGroupSync>();
         GoogleSync.CreateSubfolderAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(_ => $"folder-{Guid.NewGuid()}");
         GoogleSyncRead.IsFolderReachableAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns(true);
 
-        Finance = Substitute.For<IHoldedFinanceWrite>();
+        Finance = Substitute.For<IFinanceWrite>();
         Finance.CreateOrLinkExpenseAccountAsync(Arg.Any<string>(), Arg.Any<int?>(), Arg.Any<CancellationToken>())
-            .Returns(call => new HoldedExpenseAccountRef(
+            .Returns(call => new ExpenseAccountRef(
                 call.Arg<int?>() ?? 62900150, $"acc-{call.Arg<int?>() ?? 62900150}", call.Arg<string>(),
                 Created: call.Arg<int?>() is null));
 
@@ -115,9 +105,9 @@ public abstract class WorkgroupsTestHarness : IDisposable
         AuditLog = Substitute.For<IAuditLogService>();
         Logger = new CapturingLogger<WorkgroupService>();
 
-        Holded = Substitute.For<IHoldedClient>();
-        Holded.ListExpenseAccountsAsync(Arg.Any<CancellationToken>())
-            .Returns(_ => Task.FromResult<IReadOnlyList<HoldedExpenseAccountDto>>([]));
+        Holded = Substitute.For<IHoldedService>();
+        Holded.GetChartAsync(Arg.Any<CancellationToken>())
+            .Returns(_ => Task.FromResult<IReadOnlyList<HoldedChartAccountInfo>>([]));
     }
 
     /// <summary>Null means "unset" — registration then refuses with RootFolderNotConfigured.</summary>
@@ -128,15 +118,15 @@ public abstract class WorkgroupsTestHarness : IDisposable
     private protected FakeClock Clock { get; }
     private protected IUserService Users { get; }
     private protected ISurveyAnalysisRead Surveys { get; }
-    private protected IUserEmailService UserEmails { get; }
     private protected IRoleAssignmentService Roles { get; }
     private protected ITeamService Teams { get; }
     private protected IGovernanceService Governance { get; }
     private protected ISettingsService Settings { get; }
     private protected IGoogleSyncService GoogleSyncRead { get; }
     private protected IGoogleSyncWrite GoogleSync { get; }
-    private protected IHoldedFinanceWrite Finance { get; }
-    private protected IHoldedClient Holded { get; }
+    private protected IGoogleGroupSync GoogleGroupSync { get; }
+    private protected IFinanceWrite Finance { get; }
+    private protected IHoldedService Holded { get; }
     private protected INotificationService Notifications { get; }
     private protected IEmailService Email { get; }
     private protected WorkgroupsEmails EmailFactory { get; }
@@ -147,8 +137,8 @@ public abstract class WorkgroupsTestHarness : IDisposable
 
     /// <summary>The undecorated service over the real repository and the substitutes above.</summary>
     private protected WorkgroupService NewService(IWorkgroupRepository? repository = null) => new(
-        repository ?? new WorkgroupRepository(DbFactory), Users, Surveys, UserEmails, Roles, Settings, GoogleSyncRead,
-        GoogleSync, Finance, Holded, Notifications, Email, EmailFactory, AuditLog, Clock, Logger);
+        repository ?? new WorkgroupRepository(DbFactory), Users, Surveys, Roles, Settings, GoogleSyncRead,
+        GoogleSync, GoogleGroupSync, Finance, Holded, Notifications, Email, EmailFactory, AuditLog, Clock, Logger);
 
     /// <summary>A fresh context over the same store — what a test reads back through.</summary>
     private protected WorkgroupsDbContext OpenContext() => DbFactory.CreateDbContext();
@@ -180,7 +170,8 @@ public abstract class WorkgroupsTestHarness : IDisposable
         Instant? registeredAt = null,
         string? driveFolderId = "group-folder",
         WorkgroupDormantReason? dormantReason = null,
-        bool isSensitive = false)
+        bool isSensitive = false,
+        string? googleGroupPrefix = null)
     {
         var now = Clock.GetCurrentInstant();
         var coordinator = coordinatorUserId ?? SeedUser("Coordinator");
@@ -196,6 +187,7 @@ public abstract class WorkgroupsTestHarness : IDisposable
             Status = status,
             DormantReason = dormantReason,
             IsSensitive = isSensitive ? true : null,
+            GoogleGroupPrefix = googleGroupPrefix,
             DriveFolderId = status is WorkgroupStatus.Active or WorkgroupStatus.Dormant ? driveFolderId : null,
             AppliedByUserId = coordinator,
             AppliedAt = appliedAt ?? now,
@@ -263,7 +255,7 @@ public abstract class WorkgroupsTestHarness : IDisposable
     }
 
     private protected async Task<WorkgroupMeeting> AddMeetingAsync(
-        Guid workgroupId, Instant startUtc, bool isPublic = false, Instant? deletedAt = null)
+        Guid workgroupId, Instant startUtc, bool isPublic = false, Instant? deletedAt = null, string? weeklyIn = null)
     {
         var meeting = new WorkgroupMeeting
         {
@@ -273,6 +265,8 @@ public abstract class WorkgroupsTestHarness : IDisposable
             StartUtc = startUtc,
             EndUtc = startUtc.Plus(Duration.FromHours(1)),
             IsPublic = isPublic,
+            RecurrenceRule = weeklyIn is null ? null : "FREQ=WEEKLY",
+            RecurrenceTimezone = weeklyIn,
             DeletedAt = deletedAt,
             CreatedAt = startUtc,
             UpdatedAt = startUtc
@@ -340,8 +334,8 @@ public abstract class WorkgroupsTestHarness : IDisposable
         Guid id, string burnerName, ProfileInfo? profile, string language) => new(
         id, burnerName, false, language, null, Instant.FromUtc(2026, 1, 1, 0, 0),
         null, null, null, null, null, null,
-        null, null, null, [], [], [],
-        profile ?? UserFixtures.Profile(burnerName: burnerName), []);
+        null, null, $"{id}@example.org", [], [],
+        profile ?? UserFixtures.Profile(burnerName: burnerName));
 
     public void Dispose()
     {

@@ -4,14 +4,12 @@
     ViewData["Title"] = Localizer["Teams_Roster_Title"].Value;
 }
 
-<nav aria-label="@Localizer["Teams_BreadcrumbNavigation"]">
-    <ol class="breadcrumb">
-        <li class="breadcrumb-item"><a asp-action="Index">@SharedLocalizer["Teams_Title"]</a></li>
-        <li class="breadcrumb-item active" aria-current="page">@Localizer["Teams_Roster_Title"]</li>
-    </ol>
-</nav>
+@section Crumbs {
+    <a asp-action="Index">@SharedLocalizer["Teams_Title"]</a>
+    <span>@Localizer["Teams_Roster_Title"]</span>
+}
 
-<h2>@Localizer["Teams_Roster_Title"]</h2>
+<page-header title="@(Localizer["Teams_Roster_Title"].Value)" />
 
 <div class="mb-3 d-flex gap-2">
     <div class="dropdown">
@@ -52,7 +50,7 @@
 
 @if (!Model.Slots.Any())
 {
-    <div class="alert alert-info">@Localizer["Teams_Roster_NoSlots"]</div>
+    <empty-state>@Localizer["Teams_Roster_NoSlots"]</empty-state>
 }
 else
 {
@@ -88,29 +86,15 @@ else
                             </a>
                         }
                     </td>
-                    @{
-                        var periodBadge = slot.Period switch
-                        {
-                            RolePeriod.Build => "bg-info",
-                            RolePeriod.Event => "bg-success",
-                            RolePeriod.Strike => "bg-secondary",
-                            _ => "bg-light text-dark"
-                        };
-                        var periodLabel = SharedLocalizer.EnumDisplay(slot.Period);
-                    }
-                    <td><span class="badge @periodBadge">@periodLabel</span></td>
+                    <td><status-badge value="@slot.Period" /></td>
                     <td>@slot.SlotNumber</td>
-                    <td><span class="badge @slot.PriorityBadgeClass">@SharedLocalizer.EnumDisplay(slot.Priority)</span></td>
+                    <td><status-badge value="@slot.Priority" /></td>
                     <td>
                         @if (slot.IsFilled && slot.AssignedUserId.HasValue)
                         {
                             <vc:human user-id="@slot.AssignedUserId.Value" />
                         }
-                        else if (slot.IsFilled)
-                        {
-                            @slot.AssignedUserName
-                        }
-                        else
+                        else if (!slot.IsFilled)
                         {
                             <span class="text-muted fst-italic">@Localizer["Teams_Roster_SlotOpen"]</span>
                         }

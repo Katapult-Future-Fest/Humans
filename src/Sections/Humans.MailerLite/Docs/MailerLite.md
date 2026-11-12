@@ -54,9 +54,13 @@ All routes are `AdminOnly`.
 
 ## Invariants
 
+- Expected audience-preview HTTP failures and timeouts remain visible at Warning without exception stacks. Unexpected subscriber assignment/removal exceptions log at Error with exception details; the sync still counts the failed operation and continues.
+
 - Import commits reject binding errors with HTTP 400 and a Warning before rebuilding or applying a plan, so a malformed numeric limit cannot become an unlimited import. A valid blank limit still applies the whole plan; positive limits retain their existing per-outcome throttle.
 
 - Shared table currency and number cells use the selected UI culture; numeric sort values stay invariant.
+
+- Audience debug expected/to-add rows use canonical `UserInfo.Email`, including verified-secondary fallback when no verified primary exists, and exclude missing or whitespace-only addresses like the actual sync.
 
 - Audience debug tables normalize the requested page and allowed page size once before slicing. Rows and pager state use the same available page, including the last page for oversized requests and page one for empty tables.
 
@@ -72,7 +76,10 @@ All routes are `AdminOnly`.
 - The import (`MailerLiteImportService`) ingests **only** the MailerLite group named `Website` (resolved by name; throws if the group is absent) — never the whole account. The reset pass excludes anyone in that group of any status, since the import already owns their pref (active → opt-in, unsubscribed/bounced → opt-out). Both preview and apply fold case and `gmail.com`/`googlemail.com` aliases when checking Website membership, matching the verified-address lookup, so an alias cannot produce a conflicting reset. Pinned by `MailerLiteImportServiceWebsiteScopeTests`.
 - Every write to `CommunicationPreference[Marketing]` goes through Email's `ICommunicationPreferenceWrite` — `UpdatePreferenceAsync` for opt state, `ResetPreferenceAsync` to clear it (→ null) — and produces a `CommunicationPreferenceChanged` audit entry on real state changes (not idempotent confirms).
 - `ApplyAsync` is idempotent: a second run against unchanged ML+Humans state writes zero per-row entries and exactly one `MailerLiteReconciliationCompleted` summary entry.
+- The drift report counts distinct verified humans opted out in Humans who have at least one active Website subscriber address; multiple active addresses for one human count once.
 - One human, one Marketing decision: when several of a human's verified addresses sit in the `Website` group, the import resolves them to one governing subscriber before classifying or applying — any opt-out status (`unsubscribed`, `bounced`, `junk`) beats `active`, bounce/junk beat `unsubscribed`, then the most recent ML action, then email. An active address never overrides an opt-out, and the result does not depend on enumeration order. The preview lists each address under its human's resolved outcome; apply writes once per human, resolving across the human's addresses in the whole plan (throttled ones included). Pinned by `MailerLiteImportServiceSameHumanTests`.
+- The scheduled audience sync attempts every audience, then fails the job if any registered audience has no result or any result contains subscriber-operation errors. Hangfire can retry the incomplete run; the admin Push All action keeps its partial-result banner and counts.
+- Audience sync queues one import per address under the existing trim/case normalization and one group assignment per subscriber ID, even when several candidate IDs resolve to the same destination. Successful-operation and failure counts reflect those unique writes; candidate, suppression and already-assigned accounting retain their per-candidate meaning.
 - `SyncAsync` is idempotent: a second run against unchanged audience+ML state writes zero ML mutations and exactly one `MailerLiteAudienceSyncCompleted` summary entry whose counts are all zero.
 - Bounced/junk subscribers always set `OptedOut = true` regardless of any Humans-side timestamp. Delivery facts override preferences.
 - For non-bounce subscribers, Humans state wins only when the prior write's `UpdateSource ∈ {Profile, Guest, MagicLink, OneClick}` AND `UpdatedAt > mlActionAt`.
@@ -80,7 +87,8 @@ All routes are `AdminOnly`.
 - Audience sync excludes ML subscribers with `status ∈ {unsubscribed, bounced, junk}` from group assignment — delivery/consent state overrides audience membership.
 - `MailerLiteClient` retries a `429` response up to twice more (3 attempts total), honouring the response's `Retry-After` header (clamped to 0–90s; defaults to 60s when the header is absent or unparsable) before giving up (nobodies-collective/Humans#1103).
 - Successful subscriber erasure (including a remote 404) removes the address from the cached subscriber list and recomputes account status totals from the remaining snapshot. A failed remote deletion retains both.
-- Group creation requires a returned group before appending to the cached snapshot; missing/null response data fails without poisoning the existing group list.
+- Group reads require nonblank IDs and names. Group creation also requires the returned name to match the requested name exactly before appending to the cached snapshot; incomplete or mismatched response data fails without poisoning the existing group list or selecting another audience for writes.
+- Subscriber status must be a nonblank string. An incomplete status fails decoding rather than becoming eligible for audience assignment or an import opt-out decision.
 - Cache refresh replaces the subscriber/group snapshot only after both page walks succeed. Missing page data or metadata, null subscriber/group items, repeated subscriber cursors, and inconsistent group page numbers throw and retain the last successful snapshot. Group reads follow pagination metadata even across empty intermediate pages.
 
 ## Negative Access Rules
@@ -92,7 +100,9 @@ All routes are `AdminOnly`.
 
 ## Triggers
 
-- When an admin commits an import → one `MailerLiteReconciliationCompleted` audit entry attributed to that admin, with counts (no PII), after the section’s sync state is saved.
+- Manual audience-sync actor lookups observe request cancellation before entering the remote-sync timeout handlers. Once sync begins it uses `CancellationToken.None`; an HTTP timeout still produces the timeout banner even if the request has since been abandoned.
+- Import Commit resolves the actor through Users before building the plan. A merged session uses the surviving account ID; a missing account returns 401. The lookup and plan build observe request cancellation, while remote apply uses `CancellationToken.None`.
+- When an admin commits an import → one `MailerLiteReconciliationCompleted` audit entry attributed to that resolved admin, with counts (no PII), after the section’s sync state is saved.
 - When `ApplyAsync` flips `Marketing.OptedOut` → existing `CommunicationPreferenceChanged` audit fires through `CommunicationPreferenceService`.
 - When `ApplyAsync` creates a contact → existing `ContactCreated` audit through `AccountProvisioningService`.
 - When `MailerLiteAudienceSyncService.SyncAsync` runs (via the opt-in Hangfire job — `MailerLite:AudienceSyncCron`, unset by default — or the on-demand admin button) → one `MailerLiteAudienceSyncCompleted` audit entry with counts (no PII). Per-row ML mutations are not separately audited.
@@ -100,17 +110,16 @@ All routes are `AdminOnly`.
 ## Cross-Section Dependencies
 
 The section references the contracts leaves `Humans.Users.Contracts`, `Humans.Email.Contracts`,
-`Humans.Tickets.Contracts` and `Humans.Shifts.Contracts`, the section projects `Humans.Gdpr` and
-`Humans.AuditLog` (contracts in their `Contracts/` folders), plus `Humans.Base`. The
+`Humans.Tickets.Contracts` and `Humans.Shifts.Contracts`, plus `Humans.Base` (which carries the
+audit append path and the GDPR contributor seam). The
 communication-preference interfaces live in `Humans.Email.Contracts` (Users decomposition commit 14).
 
 - **Audit actions:** declared on `MailerLiteAuditActions` (`src/Sections/Humans.MailerLite/MailerLiteAuditActions.cs`), one `AuditActionDefinition` each, written through `IAuditLogService`: `MailerLiteReconciliationCompleted`, `MailerLiteAudienceSyncCompleted`.
 - **Users — people**: `IUserService.GetAllUserInfosAsync` and `GetUserInfoAsync` over the
-  cached `UserInfo` set. `MarketingAudience` / `MarketingNoTicketAudience` enumerate it
+  cached `UserInfo` set. GDPR erasure reads `GetRawUserInfoAsync` for the exact account id. `MarketingAudience` / `MarketingNoTicketAudience` enumerate it
   and keep the explicit opt-ins; the debug screen reads it for names and addresses.
 - **Users — email**: `IUserEmailService.GetNotificationTargetEmailsAsync` (the sync's
-  user-id → address resolution), `GetPrimaryEmailAsync` and `GetVerifiedEmailsForUserAsync`
-  (GDPR erasure), `FindByAddressAsync` (import matching: the verified-only pass counts
+  user-id → address resolution), `FindByAddressAsync` (import matching: the verified-only pass counts
   distinct owners, the unverified pass picks the row to replace).
 - **Email — preferences**: `ICommunicationPreferenceService.IsOptedOutAsync`,
   `GetPreferenceOrNullAsync`, `GetPreferencesForCategoryAsync` (the bulk Marketing map every
@@ -128,7 +137,7 @@ communication-preference interfaces live in `Humans.Email.Contracts` (Users deco
   predicate they apply to `ShiftUserSummary` (`HasShift`, or `HasShiftInPeriod` for Build /
   Event / Strike; Setup = Build). `TicketNoShiftsAudience` reads the same view directly.
 - **AuditLog**: writes via `IAuditLogService.LogAsync` (job overload).
-- **GDPR**: `MailerLiteGdprContributor` implements `IUserDataContributor` — Article 15 export contributes nothing (the subscriber list mirrors state already exported by the sections that generate it); Article 17 erasure deletes the MailerLite subscriber under every verified + primary email, including both Gmail/Googlemail domain spellings recognized by import matching, via `IMailerLiteService.DeleteSubscriberAsync`.
+- **GDPR**: `MailerLiteGdprContributor` implements `IUserDataContributor` — Article 15 export contributes nothing (the subscriber list mirrors state already exported by the sections that generate it); Article 17 erasure reads the exact raw account and deletes subscribers under its owned verified addresses plus a live account’s canonical/legacy email fallback, including both Gmail/Googlemail domain spellings recognized by import matching, via `IMailerLiteService.DeleteSubscriberAsync`. An archived id never resolves forward to the survivor; tombstone identity-column fallbacks are excluded because that address may now belong to the living survivor. Verified rows still owned by the archived id remain erasable.
 
 ## Architecture
 
@@ -136,7 +145,7 @@ communication-preference interfaces live in `Humans.Email.Contracts` (Users deco
 **Owned tables:** `mailerlite_sync_states` (`MailerLiteDbContext` / `IMailerLiteRepository`)
 **Status:** Own project — `src/Sections/Humans.MailerLite` (nobodies-collective/Humans#866).
 
-- Everything lives in `src/Sections/Humans.MailerLite/`: `Services/` (the orchestrators, the service interfaces and the internal DTOs), `Services/Audiences/`, `Services/MailerLite/` (the client, its JSON converter and `MailerLiteOptions`), `Domain/`, `Data/` (context, design-time factory, configuration, repository, migrations), `Controllers/`, `Models/` and `Views/`. The section still takes **no `Humans.Infrastructure` reference** — the context registers through Base's `AddSectionDbContext` seam, and the client needs only `IHttpClientFactory` from the ASP.NET shared framework.
+- Everything lives in `src/Sections/Humans.MailerLite/`: `Services/` (the orchestrators, the service interfaces, `MailerLiteOptions` and the internal DTOs), `Services/Audiences/`, `Services/MailerLite/` (the client and its JSON converter), `Domain/`, `Data/` (context, design-time factory, configuration, repository, migrations), `Controllers/`, `Models/` and `Views/`. The section still takes **no `Humans.Infrastructure` reference** — the context registers through Base's `AddSectionDbContext` seam, and the client needs only `IHttpClientFactory` from the ASP.NET shared framework.
 - **Cross-section surface** — none. The section is a leaf: `MailerLiteAudienceSyncJob` (`Jobs/`) is internal and calls `IMailerLiteAudienceSyncService.SyncAllAsync` as the actor-less scheduled run, contributed through `ISectionJobs` like every other section's jobs. The dashboard stats, the import plan/apply pair and the whole `IMailerLiteService` surface are internal too.
 - **No resource set** — the admin pages are English operator copy with no `Localizer[…]` call; admin-only pages are exempt from localization ([`localization-admin-exempt`](../../../../memory/code/localization-admin-exempt.md)).
 - **Decorator decision** — no caching decorator. Rationale: admin-only, sequential, runs by hand; one DB count per dashboard load is fine at our scale. `MailerLiteClient` is a Singleton holding its own subscriber/group snapshot, refreshed only on demand.

@@ -14,7 +14,6 @@ using Xunit;
 
 namespace Humans.Consent.Tests.Controllers;
 
-/// <summary>The My Data page shell at <c>/Consent/MyData</c>.</summary>
 public class MyDataControllerTests
 {
     private readonly Guid _userId = Guid.NewGuid();
@@ -51,10 +50,8 @@ public class MyDataControllerTests
                 DeletionEligibleAfter = eligibleAfter,
             },
             userEmails: [],
-            eventParticipations: [],
             externalLogins: [],
-            profile: null,
-            communicationPreferences: []);
+            profile: null);
 
     [HumansFact]
     public async Task Index_returns_NotFound_without_a_user()

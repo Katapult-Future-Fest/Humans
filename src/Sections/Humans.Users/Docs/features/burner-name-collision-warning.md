@@ -1,6 +1,6 @@
 <!-- freshness:triggers
   src/Sections/Humans.Users/Controllers/ProfileApiController.cs
-  src/Sections/Humans.Users.Contracts/PersonSearchFields.cs
+  src/Humans.Base/Users/PersonSearchFields.cs
   src/Sections/Humans.Users/Services/PersonSearchMatcher.cs
   src/Sections/Humans.Users/Data/CachingUserService.cs
   src/Humans.Base/Models/SearchResponseModels.cs
@@ -98,7 +98,7 @@ too short for another lookup.
 
 Localization keys `Users_ProfileEdit_BurnerNameCollisionOne` /
 `Users_ProfileEdit_BurnerNameCollisionMany` are defined in `UsersResource.resx` and the
-five locale siblings (es/ca/fr/de/it).
+locale siblings (es/ca/fr/de/it/nl).
 
 ## Related
 

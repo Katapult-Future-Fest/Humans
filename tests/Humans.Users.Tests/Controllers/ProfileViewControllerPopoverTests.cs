@@ -73,7 +73,10 @@ public class ProfileViewControllerPopoverTests
             _teamService,
             _campService,
             Substitute.For<IGovernanceService>(),
-            _authorizationService);
+            _authorizationService,
+            new MedicalConditionsService(
+                Substitute.For<Humans.Users.Data.Repositories.IUserRepository>(), _userService,
+                Substitute.For<Humans.AuditLog.Contracts.IAuditLogService>()));
 
         var identity = new ClaimsIdentity([
             new Claim(ClaimTypes.NameIdentifier, _viewerId.ToString()),
@@ -91,7 +94,7 @@ public class ProfileViewControllerPopoverTests
     }
 
     [HumansFact]
-    public async Task ViewProfile_PreservesCancellationInShiftHistoryReads()
+    public async Task ViewProfile_OrdersNoShowHistoryAndPreservesCancellation()
     {
         using var source = new CancellationTokenSource();
         var targetId = Guid.NewGuid();
@@ -101,17 +104,62 @@ public class ProfileViewControllerPopoverTests
             .Returns(BuildActiveUserInfo(targetId, "Target", "target@example.com"));
         _shiftManagement.GetCoordinatorTeamIdsAsync(_viewerId, Arg.Any<CancellationToken>())
             .Returns(new[] { Guid.NewGuid() });
+        var reviewerId = Guid.NewGuid();
+        var missingReviewerId = Guid.NewGuid();
+        _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<Guid, UserInfo>());
+        var reviewed = Instant.FromUtc(2026, 3, 1, 12, 0);
         _shiftSignups.GetNoShowHistoryAsync(targetId, Arg.Any<CancellationToken>())
-            .Returns(Array.Empty<NoShowHistoryEntry>());
+            .Returns(new[]
+            {
+                new NoShowHistoryEntry("Undated", Guid.Empty, reviewed, "UTC", null, null),
+                new NoShowHistoryEntry("Older", Guid.Empty, reviewed, "UTC", missingReviewerId, reviewed),
+                new NoShowHistoryEntry("Newest", Guid.Empty, reviewed, "UTC", reviewerId, reviewed + Duration.FromHours(1)),
+            });
+        _teamService.GetTeamsAsync(Arg.Any<CancellationToken>()).Returns(new Dictionary<Guid, TeamInfo>());
 
         var result = await _controller.ViewProfile(targetId, source.Token);
 
         var model = result.Should().BeOfType<ViewResult>().Subject.Model
             .Should().BeOfType<ProfileViewModel>().Subject;
+        model.PageTitle.Should().Be("Target");
         model.CanViewShiftSignups.Should().BeTrue();
         model.CanViewSentMessages.Should().BeTrue();
-        await _shiftManagement.Received(2).GetCoordinatorTeamIdsAsync(_viewerId, source.Token);
+        model.NoShowHistory!.Select(row => row.ShiftLabel).Should().Equal("Newest", "Older", "Undated");
+        model.NoShowHistory!.Select(row => row.MarkedByUserId).Should().Equal(reviewerId, missingReviewerId, null);
+        await _userService.DidNotReceive().GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>());
+        await _shiftManagement.Received(1).GetCoordinatorTeamIdsAsync(_viewerId, source.Token);
         await _shiftSignups.Received(1).GetNoShowHistoryAsync(targetId, source.Token);
+    }
+
+    [HumansTheory]
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    public async Task ViewProfile_SharedCoordinatorReadPreservesSelfAndRoleAccess(bool ownProfile, bool privileged)
+    {
+        var targetId = ownProfile ? _viewerId : Guid.NewGuid();
+        var ct = TestContext.Current.CancellationToken;
+        _userService.GetUserInfoAsync(_viewerId, Arg.Any<CancellationToken>())
+            .Returns(BuildActiveUserInfo(_viewerId, "Viewer", "viewer@example.com"));
+        _userService.GetUserInfoAsync(targetId, Arg.Any<CancellationToken>())
+            .Returns(BuildActiveUserInfo(targetId, "Target", "target@example.com"));
+        _shiftManagement.GetCoordinatorTeamIdsAsync(_viewerId, Arg.Any<CancellationToken>()).Returns([]);
+        _shiftSignups.GetNoShowHistoryAsync(targetId, Arg.Any<CancellationToken>()).Returns([]);
+        if (privileged)
+        {
+            ((ClaimsIdentity)_controller.User.Identity!).AddClaim(new Claim(ClaimTypes.Role, ShiftsRoles.ShiftsNoInfo));
+            _authorizationService.AuthorizeAsync(Arg.Any<ClaimsPrincipal>(), Arg.Any<object?>(),
+                ShiftsPolicies.PrivilegedSignupApprover).Returns(AuthorizationResult.Success());
+        }
+
+        var result = await _controller.ViewProfile(targetId, ct);
+
+        var model = result.Should().BeOfType<ViewResult>().Which.Model.Should().BeOfType<ProfileViewModel>().Which;
+        model.CanViewShiftSignups.Should().Be(!ownProfile && privileged);
+        model.CanViewSentMessages.Should().Be(!ownProfile && privileged);
+        await _shiftManagement.Received(ownProfile ? 0 : 1).GetCoordinatorTeamIdsAsync(_viewerId, ct);
+        await _shiftSignups.Received(!ownProfile && privileged ? 1 : 0).GetNoShowHistoryAsync(targetId, ct);
     }
 
     [HumansFact]
@@ -177,8 +225,6 @@ public class ProfileViewControllerPopoverTests
         {
             Id = Guid.NewGuid(),
             UserId = id,
-            MembershipTier = LegacyMembershipTier.Volunteer,
-            IsApproved = true,
             City = "Madrid",
             CountryCode = "ES",
         };
@@ -191,7 +237,6 @@ public class ProfileViewControllerPopoverTests
         partial.ViewName.Should().Be("_HumanPopover");
         var vm = partial.Model.Should().BeOfType<ProfileSummaryViewModel>().Subject;
         vm.HasProfile.Should().BeTrue();
-        vm.DisplayName.Should().Be("Active Human");
         vm.MembershipTier.Should().Be(nameof(MembershipTier.Volunteer));
         vm.MembershipStatus.Should().Be("Active");
         vm.City.Should().Be("Madrid");
@@ -213,8 +258,6 @@ public class ProfileViewControllerPopoverTests
         {
             Id = Guid.NewGuid(),
             UserId = id,
-            MembershipTier = LegacyMembershipTier.Volunteer,
-            IsApproved = true,
         };
         _userService.GetUserInfoAsync(id, Arg.Any<CancellationToken>())
             .Returns(BuildUserInfo(user, profile, userEmails: null));
@@ -246,7 +289,6 @@ public class ProfileViewControllerPopoverTests
         {
             Id = Guid.NewGuid(),
             UserId = id,
-            MembershipTier = LegacyMembershipTier.Volunteer,
             City = "Madrid",
             CountryCode = "ES",
         };
@@ -257,7 +299,6 @@ public class ProfileViewControllerPopoverTests
 
         var vm = result.Should().BeOfType<PartialViewResult>().Subject
             .Model.Should().BeOfType<ProfileSummaryViewModel>().Subject;
-        vm.DisplayName.Should().Be("Suspended Human");
         vm.City.Should().Be("Madrid");
         vm.IsSuspended.Should().BeTrue();
     }
@@ -267,7 +308,7 @@ public class ProfileViewControllerPopoverTests
     {
         var id = Guid.NewGuid();
         var user = new User { Id = id, DisplayName = "Suspended Human", State = UserState.Suspended };
-        var profile = new Profile { Id = Guid.NewGuid(), UserId = id, MembershipTier = LegacyMembershipTier.Volunteer, IsApproved = true };
+        var profile = new Profile { Id = Guid.NewGuid(), UserId = id };
         _userService.GetUserInfoAsync(id, Arg.Any<CancellationToken>())
             .Returns(BuildUserInfo(user, profile, userEmails: null));
 
@@ -278,14 +319,12 @@ public class ProfileViewControllerPopoverTests
 
     private static UserInfo BuildActiveUserInfo(Guid id, string displayName, string email)
     {
-        var user = new User { Id = id, DisplayName = displayName, State = UserState.Active, PreferredLanguage = "en" };
+        var user = new User { Id = id, BurnerName = displayName, DisplayName = displayName, State = UserState.Active, PreferredLanguage = "en" };
         var profile = new Profile
         {
             Id = Guid.NewGuid(),
             UserId = id,
             BurnerName = displayName,
-            MembershipTier = LegacyMembershipTier.Volunteer,
-            IsApproved = true
         };
         var emails = new List<UserEmail>
         {
@@ -298,11 +337,9 @@ public class ProfileViewControllerPopoverTests
         UserInfoFactory.Create(
             user: user,
             userEmails: userEmails ?? [],
-            eventParticipations: [],
             externalLogins: [],
             profile: profile,
             contactFields: [],
             profileLanguages: [],
-            volunteerHistory: [],
-            communicationPreferences: []);
+            volunteerHistory: []);
 }

@@ -1,5 +1,6 @@
 <!-- freshness:triggers
   src/Sections/Humans.Grants/**
+  tests/Humans.Grants.Tests/**
   src/Sections/Humans.LowIncome/Controllers/LowIncomeAdminController.cs
 -->
 <!-- freshness:flag-on-change
@@ -14,18 +15,20 @@ The association hands individual people entitlements: a cheaper ticket, early en
 
 ## User Stories
 
-**As Board or Admin, I create a program** (name, what it entitles, event, optional default expiry, issuer) and name its managers.
+**As Grants Admin or Admin, I create a program** (name, what it entitles, event, optional default expiry, issuer) and name its managers.
 - The issuer is either its managers by hand, or a source section by source key.
 - At most one open program per source key; a second is refused.
 - A closed program takes no new grants; its existing grants stay.
 
 **As a program manager, I issue grants by hand** to one or more people, optionally with an expiry that overrides the program's.
 - People already holding a live grant in the program are skipped.
+- A batch containing anyone missing or erased is refused in full.
 - I see and act only on the programs I manage; I cannot issue under a source program.
 
 **As a source section (Low Income), I issue and revoke** through `IGrantWrite`, passing only my source key.
-- Grants resolves the open program for the key; none open is an error.
+- Grants resolves the open program for the key; none open is refused (`GrantWriteRefusal.NoOpenProgram`).
 - Issuing to a current holder returns the existing grant.
+- A missing or erased recipient is refused (`GrantWriteRefusal.RecipientUnavailable`).
 
 **As a manager, I revoke a grant** with an optional reason, or **resend its notice**.
 - The revoked row stays (who, when, why); it cannot be resent or revoked again.
@@ -44,7 +47,7 @@ The association hands individual people entitlements: a cheaper ticket, early en
 
 ```
 Active → Expired   (computed: the day after ExpiresOn ?? program.GrantsExpireOn, Europe/Madrid)
-Active → Revoked   (manager, Board, Admin, or the source section)
+Active → Revoked   (manager, Grants Admin, Admin, or the source section)
 ```
 
 Nothing stores or flips the state; it is read against today. Revoked wins over expired.

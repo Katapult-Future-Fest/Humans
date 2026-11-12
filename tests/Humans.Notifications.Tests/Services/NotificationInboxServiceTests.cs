@@ -7,7 +7,6 @@ using Microsoft.EntityFrameworkCore;
 using NodaTime;
 using NodaTime.Testing;
 using NSubstitute;
-using Humans.Users.Contracts;
 
 
 namespace Humans.Notifications.Tests.Services;
@@ -17,7 +16,6 @@ public class NotificationInboxServiceTests : IDisposable
     private readonly NotificationsDbContext _dbContext;
     private readonly FakeClock _clock;
     private readonly NotificationRepository _repo;
-    private readonly IUserService _userService = Substitute.For<IUserService>();
     private readonly NotificationInboxService _service;
     private readonly Guid _userId = Guid.NewGuid();
 
@@ -31,11 +29,7 @@ public class NotificationInboxServiceTests : IDisposable
         _clock = new FakeClock(Instant.FromUtc(2026, 4, 1, 12, 0));
         _repo = new NotificationRepository(new TestDbContextFactory<NotificationsDbContext>(options));
 
-        // No test here seeds a user, so an empty display-name lookup is enough.
-        _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(ValueTask.FromResult<IReadOnlyDictionary<Guid, UserInfo>>(new Dictionary<Guid, UserInfo>()));
-
-        _service = new NotificationInboxService(_repo, _userService, TestSources.Registry, _clock);
+        _service = new NotificationInboxService(_repo, TestSources.Registry, _clock);
     }
 
     public void Dispose()
@@ -75,6 +69,30 @@ public class NotificationInboxServiceTests : IDisposable
         return notification;
     }
 
+    [HumansFact]
+    public async Task ContributeForUserAsync_ExportsOnlyTheUsersOwnRows_WithoutTheActionLabel()
+    {
+        var own = await CreateNotificationAsync();
+        var other = new Notification
+        {
+            Id = Guid.NewGuid(),
+            Title = "Someone else's notification",
+            ActionLabel = "Open it",
+            Source = TestSources.TeamUpdate.Name,
+            CreatedAt = _clock.GetCurrentInstant(),
+        };
+        other.Recipients.Add(new NotificationRecipient { NotificationId = other.Id, UserId = Guid.NewGuid() });
+        _dbContext.Notifications.Add(other);
+        await _dbContext.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var slices = await _service.ContributeForUserAsync(_userId, Xunit.TestContext.Current.CancellationToken);
+
+        var slice = slices.Should().ContainSingle().Subject;
+        slice.SectionName.Should().Be(NotificationInboxService.Notifications);
+        var json = System.Text.Json.JsonSerializer.Serialize(slice.Data);
+        json.Should().Contain(own.Title).And.NotContain(other.Title).And.NotContain("ActionLabel");
+    }
+
     [HumansTheory]
     [Xunit.InlineData(null)]
     [Xunit.InlineData("suspension")]
@@ -112,7 +130,7 @@ public class NotificationInboxServiceTests : IDisposable
         var repo = Substitute.For<INotificationRepository>();
         repo.GetUnreadBadgeCountsAsync(_userId, ct)
             .Returns(snapshot.Task, Task.FromResult((Actionable: 0, Informational: 0)));
-        var service = new NotificationInboxService(repo, _userService, TestSources.Registry, _clock);
+        var service = new NotificationInboxService(repo, TestSources.Registry, _clock);
 
         var beforeWrite = service.GetUnreadBadgeCountsAsync(_userId, ct);
         await service.MarkAllReadAsync(_userId, ct);
@@ -161,7 +179,7 @@ public class NotificationInboxServiceTests : IDisposable
             .Returns<Task<int>>(_ =>
                 throw new InvalidOperationException("Retention storage failed."));
         repo.GetUnreadBadgeCountsAsync(_userId, ct).Returns((0, 1), (0, 0));
-        var service = new NotificationInboxService(repo, _userService, TestSources.Registry, _clock);
+        var service = new NotificationInboxService(repo, TestSources.Registry, _clock);
         (await service.GetUnreadBadgeCountsAsync(_userId, ct)).Should().Be((0, 1));
 
         await ((Func<Task>)(async () => await service.PurgeExpiredAsync(ct)))
@@ -202,9 +220,7 @@ public class NotificationInboxServiceTests : IDisposable
     [HumansFact]
     public async Task ResolveAsync_LeavesReadAtAlone_ButStillClearsTheUnreadCount()
     {
-        // Resolving deliberately does not touch the recipient's ReadAt. It doesn't
-        // have to: every unread query also filters ResolvedAt == null, so a resolved
-        // notification drops out of the badge whether or not it was ever read.
+        // Resolve leaves ReadAt alone: unread queries also filter ResolvedAt == null.
         var notification = await CreateNotificationAsync(NotificationClass.Actionable);
 
         await _service.ResolveAsync(notification.Id, _userId, Xunit.TestContext.Current.CancellationToken);
@@ -222,9 +238,6 @@ public class NotificationInboxServiceTests : IDisposable
     [HumansFact]
     public async Task GetInboxAsync_ResolvedFilter_ReportsTheAllTab_NotTheOneAskedFor()
     {
-        // Resolved rows are never unread, so the resolved filter forces the tab to
-        // "all". The service reports the tab it actually queried so the view's tab
-        // pill cannot disagree with the rows underneath it.
         await CreateNotificationAsync(resolvedAt: _clock.GetCurrentInstant(), resolvedByUserId: _userId);
 
         var result = await _service.GetInboxAsync(
@@ -236,7 +249,7 @@ public class NotificationInboxServiceTests : IDisposable
     }
 
     [HumansFact]
-    public async Task GetInboxAsync_NamesTheResolver_AndLooksUpNoOtherUser()
+    public async Task GetInboxAsync_CarriesTheResolverId()
     {
         var resolverId = Guid.NewGuid();
         var notification = await CreateNotificationAsync(
@@ -247,24 +260,11 @@ public class NotificationInboxServiceTests : IDisposable
             UserId = Guid.NewGuid(),
         });
         await _dbContext.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
-        _userService.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(ValueTask.FromResult<IReadOnlyDictionary<Guid, UserInfo>>(new Dictionary<Guid, UserInfo>
-            {
-                [resolverId] = new User
-                {
-                    Id = resolverId,
-                    BurnerName = "Resolver",
-                }.ToUserInfo(),
-            }));
-
         var result = await _service.GetInboxAsync(
             _userId, search: null, filter: "resolved", tab: "all",
             ct: Xunit.TestContext.Current.CancellationToken);
 
-        result.Resolved.Should().ContainSingle().Which.ResolvedByName.Should().Be("Resolver");
-        await _userService.Received(1).GetUserInfosAsync(
-            Arg.Is<IReadOnlyCollection<Guid>>(ids => ids.Count == 1 && ids.Contains(resolverId)),
-            Arg.Any<CancellationToken>());
+        result.Resolved.Should().ContainSingle().Which.ResolvedByUserId.Should().Be(resolverId);
     }
 
     [HumansFact]
@@ -509,6 +509,20 @@ public class NotificationInboxServiceTests : IDisposable
 
         result.Actionable.Should().HaveCount(1);
         result.Informational.Should().HaveCount(1);
+        result.Actionable.Single().Body.Should().Be("Test body");
+    }
+
+    [HumansFact]
+    public async Task GetPopupAsync_DropsAnItemOnceItsRecipientOpensIt()
+    {
+        var opened = await CreateNotificationAsync(NotificationClass.Actionable);
+        var ct = Xunit.TestContext.Current.CancellationToken;
+
+        await _service.ClickThroughAsync(opened.Id, _userId, ct);
+
+        var result = await _service.GetPopupAsync(_userId, ct);
+        result.Actionable.Should().BeEmpty();
+        (await _service.GetUnreadBadgeCountsAsync(_userId, ct)).Should().Be((0, 0));
     }
 
     [HumansFact]

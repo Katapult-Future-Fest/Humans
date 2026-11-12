@@ -35,11 +35,8 @@ public class OnboardingWidgetControllerShiftsTests
     private readonly IShiftService _shiftMgmt = Substitute.For<IShiftService>();
     private readonly ISettingsService _burnSettings = Substitute.For<ISettingsService>();
     private readonly IShiftView _shiftView = Substitute.For<IShiftView>();
-    private readonly IConsentSubmission _consents = Substitute.For<IConsentSubmission>();
     private readonly IOnboardingService _onboardingService = Substitute.For<IOnboardingService>();
     private readonly IUserService _userService = Substitute.For<IUserService>();
-    private readonly IStringLocalizer<ConsentResource> _consentLocalizer =
-        Substitute.For<IStringLocalizer<ConsentResource>>();
 
     private readonly IStringLocalizer<OnboardingResource> _localizer =
         Substitute.For<IStringLocalizer<OnboardingResource>>();
@@ -49,8 +46,6 @@ public class OnboardingWidgetControllerShiftsTests
     {
         _localizer[Arg.Any<string>()].Returns(ci =>
             new LocalizedString(ci.Arg<string>(), ci.Arg<string>()));
-        _consentLocalizer[Arg.Any<string>()].Returns(ci =>
-            new LocalizedString(ci.Arg<string>(), ci.Arg<string>()));
     }
 
     private OnboardingWidgetController BuildSut(Guid userId)
@@ -58,7 +53,7 @@ public class OnboardingWidgetControllerShiftsTests
         _http.Session = new TestSession();
         _http.User = new ClaimsPrincipal(new ClaimsIdentity([new Claim(ClaimTypes.NameIdentifier, userId.ToString())],
             "test"));
-        var ctrl = new OnboardingWidgetController(_userService, _state, _profileEditor, _signups, _shiftMgmt, _burnSettings, _shiftView, _consents, _onboardingService, NodaTime.SystemClock.Instance, _localizer, _consentLocalizer, Microsoft.Extensions.Logging.Abstractions.NullLogger<OnboardingWidgetController>.Instance);
+        var ctrl = new OnboardingWidgetController(_userService, _state, _profileEditor, _signups, _shiftMgmt, _burnSettings, _shiftView, _onboardingService, _localizer, Microsoft.Extensions.Logging.Abstractions.NullLogger<OnboardingWidgetController>.Instance);
         ctrl.ControllerContext = new ControllerContext
         {
             HttpContext = _http,
@@ -80,8 +75,8 @@ public class OnboardingWidgetControllerShiftsTests
         var inputId = mergedAlias ? Guid.NewGuid() : userId;
         var shiftId = Guid.NewGuid();
         _userService.GetUserInfoAsync(inputId, Arg.Any<CancellationToken>())
-            .Returns(UserInfo.Create(new User { Id = userId, State = UserState.Active }, [], [], [],
-                UserFixtures.Profile(burnerName: "Burner", firstName: "First", lastName: "Last"), []));
+            .Returns(UserInfo.Create(new User { Id = userId, State = UserState.Active }, [], [],
+                UserFixtures.Profile(burnerName: "Burner", firstName: "First", lastName: "Last")));
         _burnSettings.GetActiveEventSettingsAsync(Arg.Any<CancellationToken>())
             .Returns(BurnFixtures.Burn());
         _shiftMgmt.GetBrowseShiftsAsync(Arg.Any<ShiftBrowseQuery>(), Arg.Any<CancellationToken>())
@@ -95,8 +90,33 @@ public class OnboardingWidgetControllerShiftsTests
         var result = await BuildSut(inputId).Shifts(ct: TestContext.Current.CancellationToken);
 
         var model = Assert.IsType<Humans.Onboarding.Models.ShiftsStepViewModel>(Assert.IsType<ViewResult>(result).Model);
+        await _shiftMgmt.Received(1).GetBrowseShiftsAsync(
+            Arg.Is<ShiftBrowseQuery>(q => q.ViewerUserId == userId), Arg.Any<CancellationToken>());
         Assert.Contains(shiftId, model.UserSignupShiftIds);
         Assert.Equal(SignupStatus.Pending, model.UserSignupStatuses[shiftId]);
+    }
+
+    [HumansTheory]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    [InlineData(true, false)]
+    public async Task Shifts_Get_UsesTheOwnerDerivedEarlyEntryLock(bool locked, bool otherLocked)
+    {
+        var userId = Guid.NewGuid();
+        _burnSettings.GetActiveEventSettingsAsync(Arg.Any<CancellationToken>())
+            .Returns(BurnFixtures.Burn() with { EarlyEntryClose = NodaTime.Instant.FromUtc(2020, 1, 1, 0, 0) });
+        var row = UrgentShiftFixtures.Urgent(shift: UrgentShiftFixtures.Shift(dayOffset: -1))
+            with
+        { EarlyEntrySignupsClosed = locked };
+        _shiftMgmt.GetBrowseShiftsAsync(Arg.Any<ShiftBrowseQuery>(), Arg.Any<CancellationToken>())
+            .Returns(new[] { row, row with { EarlyEntrySignupsClosed = otherLocked } });
+        _shiftView.GetUserAsync(userId, Arg.Any<CancellationToken>())
+            .Returns(new ValueTask<ShiftUserSummary>(ShiftUserSummary.Empty(userId)));
+
+        var result = await BuildSut(userId).Shifts(ct: TestContext.Current.CancellationToken);
+
+        var model = Assert.IsType<Humans.Onboarding.Models.ShiftsStepViewModel>(Assert.IsType<ViewResult>(result).Model);
+        Assert.Equal(locked && otherLocked, model.EarlyEntrySignupsClosed);
     }
 
     [HumansFact]
@@ -126,7 +146,7 @@ public class OnboardingWidgetControllerShiftsTests
     {
         var userId = Guid.NewGuid();
         var shiftId = Guid.NewGuid();
-        _signups.SignUpAsync(userId, shiftId, actorUserId: userId)
+        _signups.SignUpAsync(userId, shiftId)
             .Returns(SignupResult.Ok(Guid.NewGuid(), warning));
         var ctrl = BuildSut(userId);
 
@@ -135,7 +155,7 @@ public class OnboardingWidgetControllerShiftsTests
         var redirect = Assert.IsType<RedirectToActionResult>(result);
         Assert.Equal(nameof(OnboardingWidgetController.Consents), redirect.ActionName);
         Assert.Equal(warning, ctrl.TempData[TempDataKeys.InfoMessage]);
-        await _signups.Received(1).SignUpAsync(userId, shiftId, actorUserId: userId);
+        await _signups.Received(1).SignUpAsync(userId, shiftId);
     }
 
     [HumansFact]
@@ -143,7 +163,7 @@ public class OnboardingWidgetControllerShiftsTests
     {
         var userId = Guid.NewGuid();
         var shiftId = Guid.NewGuid();
-        _signups.SignUpAsync(userId, shiftId, actorUserId: userId)
+        _signups.SignUpAsync(userId, shiftId)
             .Returns(SignupResult.Fail("nope"));
         var ctrl = BuildSut(userId);
 

@@ -34,7 +34,6 @@
 
   <!-- Enums -->
   <data name="Enum_WorkgroupStatus_Applied" xml:space="preserve"><value>Richiesto</value></data>
-  <data name="Workgroups_BreadcrumbNavigation" xml:space="preserve"><value>Percorso di navigazione</value></data>
   <data name="Enum_WorkgroupStatus_Referred" xml:space="preserve"><value>Inoltrato al Consiglio</value></data>
   <data name="Enum_WorkgroupStatus_Active" xml:space="preserve"><value>Attivo</value></data>
   <data name="Enum_WorkgroupStatus_Refused" xml:space="preserve"><value>Rifiutato</value></data>
@@ -86,6 +85,7 @@
   <data name="Enum_WorkgroupLogKind_Disclosure" xml:space="preserve"><value>Divulgazione</value></data>
   <data name="Enum_WorkgroupLogKind_StatusRequested" xml:space="preserve"><value>Stato richiesto</value></data>
   <data name="Enum_WorkgroupLogKind_Note" xml:space="preserve"><value>Nota</value></data>
+  <data name="Enum_WorkgroupLogKind_MeetingNotes" xml:space="preserve"><value>Note della riunione</value></data>
 
   <data name="Enum_WorkgroupDocumentKind_Deliverable" xml:space="preserve"><value>Deliverable</value></data>
   <data name="Enum_WorkgroupDocumentKind_AnnualReport" xml:space="preserve"><value>Rapporto annuale</value></data>
@@ -130,6 +130,7 @@
   <data name="Workgroups_Error_CategoriesRequired" xml:space="preserve"><value>È richiesta almeno una categoria di commento.</value></data>
   <data name="Workgroups_Error_CategoryTooLong" xml:space="preserve"><value>Una categoria di commenti non può superare i 100 caratteri.</value></data>
   <data name="Workgroups_Error_WindowInvalid" xml:space="preserve"><value>Il periodo di commento non è valido.</value></data>
+  <data name="Workgroups_Error_RecurrenceInvalid" xml:space="preserve"><value>La regola di ripetizione non è valida.</value></data>
   <data name="Workgroups_Error_CommentsClosed" xml:space="preserve"><value>Il periodo di commento non è aperto.</value></data>
   <data name="Workgroups_Error_CommentsStillOpen" xml:space="preserve"><value>Chiudi il periodo di commento prima di consegnare questo documento.</value></data>
   <data name="Workgroups_Error_UnknownCategory" xml:space="preserve"><value>Non è una delle categorie di commento di questo documento.</value></data>
@@ -207,6 +208,7 @@
   <data name="Workgroups_Leave" xml:space="preserve"><value>Esci</value></data>
   <data name="Workgroups_DiscordChannel" xml:space="preserve"><value>Canale Discord</value></data>
   <data name="Workgroups_DriveFolder" xml:space="preserve"><value>Cartella Drive</value></data>
+  <data name="Workgroups_EmailGroup" xml:space="preserve"><value>Gruppo email</value></data>
   <data name="Workgroups_Budget" xml:space="preserve"><value>Budget</value></data>
   <data name="Workgroups_BudgetAccount" xml:space="preserve"><value>Conto Holded</value></data>
   <data name="Enum_WorkgroupLogKind_BudgetSet" xml:space="preserve"><value>Budget assegnato</value></data>
@@ -232,23 +234,16 @@
   <data name="Workgroups_History" xml:space="preserve"><value>Storico</value></data>
   <data name="Workgroups_NewMeeting" xml:space="preserve"><value>Nuova riunione</value></data>
   <data name="Workgroups_NewLogEntry" xml:space="preserve"><value>Nuova voce di registro</value></data>
+  <data name="Workgroups_AddMeetingNotes" xml:space="preserve"><value>Aggiungi note</value></data>
   <data name="Workgroups_NoHistory" xml:space="preserve"><value>Nessuno storico per ora.</value></data>
   <data name="Workgroups_Meeting" xml:space="preserve"><value>Riunione</value></data>
 
   <!-- Meeting form -->
   <data name="Workgroups_MeetingNewTitle" xml:space="preserve"><value>Nuova riunione</value></data>
   <data name="Workgroups_MeetingEditTitle" xml:space="preserve"><value>Modifica riunione</value></data>
-  <data name="Workgroups_Field_MeetingTitle" xml:space="preserve"><value>Titolo</value></data>
-  <data name="Workgroups_Field_StartDate" xml:space="preserve"><value>Data di inizio</value></data>
-  <data name="Workgroups_Field_StartTime" xml:space="preserve"><value>Ora di inizio</value></data>
-  <data name="Workgroups_Field_EndDate" xml:space="preserve"><value>Data di fine</value></data>
-  <data name="Workgroups_Field_EndTime" xml:space="preserve"><value>Ora di fine</value></data>
   <data name="Workgroups_Field_TimesAreUtc" xml:space="preserve"><value>Gli orari sono in UTC.</value></data>
-  <data name="Workgroups_Field_Location" xml:space="preserve"><value>Luogo</value></data>
-  <data name="Workgroups_Field_LocationUrl" xml:space="preserve"><value>URL del luogo</value></data>
   <data name="Workgroups_Field_IsPublic" xml:space="preserve"><value>Mostra nel calendario della comunità</value></data>
   <data name="Workgroups_Field_IsPublicHelp" xml:space="preserve"><value>Chiunque abbia accesso all'app può leggere la riunione e il verbale nella pagina del gruppo. Questa opzione mostra la riunione anche nel calendario della comunità.</value></data>
-  <data name="Workgroups_Field_Minutes" xml:space="preserve"><value>Verbale</value></data>
 
   <!-- Log entry form -->
   <data name="Workgroups_LogEntryNewTitle" xml:space="preserve"><value>Nuova voce di registro</value></data>
@@ -354,6 +349,7 @@
   <data name="Workgroups_Todo_MembershipRequests_Description" xml:space="preserve"><value>{0} ha {1} richiesta/e di ingresso.</value></data>
   <data name="Workgroups_Todo_MembershipRequests_Action" xml:space="preserve"><value>Esamina le richieste</value></data>
   <data name="Workgroups_Error_DiscordUrlInvalid" xml:space="preserve"><value>Inserisci un URL assoluto HTTP o HTTPS per il collegamento Discord.</value></data>
+  <data name="Workgroups_Error_LocationUrlInvalid" xml:space="preserve"><value>Inserisci un URL HTTP o HTTPS assoluto per il link della riunione.</value></data>
   <data name="Enum_MembershipTier_Volunteer" xml:space="preserve"><value>Volontario</value></data>
   <data name="Enum_MembershipTier_Colaborador" xml:space="preserve"><value>Colaborador</value></data>
   <data name="Enum_MembershipTier_Asociado" xml:space="preserve"><value>Asociado</value></data>

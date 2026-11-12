@@ -6,7 +6,7 @@ public sealed record HoldedBankMovementDto
 {
     public required string Id { get; init; }
     /// <summary><c>booking_date</c>, falling back to <c>value_date</c>, never zone-shifted. A <c>LocalDate</c> because
-    /// it feeds straight back into a posting date (<see cref="IHoldedClient.PayPurchaseDocumentAsync"/>), and a
+    /// it feeds straight back into a posting date (<see cref="IHoldedWrite.PayPurchaseDocumentAsync"/>), and a
     /// round trip through a midnight instant can only lose.</summary>
     public required LocalDate Date { get; init; }
     /// <summary>Signed euros: negative is money leaving the account.</summary>
@@ -15,8 +15,11 @@ public sealed record HoldedBankMovementDto
     public string? Description { get; init; }
     /// <summary>`pending` | `partial` | `reconciled`, verbatim and lowercased.</summary>
     public required string Status { get; init; }
-    public string? Origin { get; init; }
 }
+
+/// <summary>The bank-feed mirror. <paramref name="LastSyncAt"/> is the last successful sync of any window; null
+/// when none has completed.</summary>
+public sealed record HoldedBankMovementMirror(Instant? LastSyncAt, IReadOnlyList<HoldedBankMovementDto> Movements);
 
 public sealed record HoldedReconcileDocumentRef(string DocumentId, string DocumentType);
 

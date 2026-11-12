@@ -3,14 +3,12 @@
     ViewData["Title"] = Localizer["Teams_MyTeams_Title"].Value;
 }
 
-<nav aria-label="@Localizer["Teams_BreadcrumbNavigation"]">
-    <ol class="breadcrumb">
-        <li class="breadcrumb-item"><a asp-action="Index">@SharedLocalizer["Teams_Title"]</a></li>
-        <li class="breadcrumb-item active" aria-current="page">@Localizer["Teams_MyTeams_Title"]</li>
-    </ol>
-</nav>
+@section Crumbs {
+    <a asp-action="Index">@SharedLocalizer["Teams_Title"]</a>
+    <span>@Localizer["Teams_MyTeams_Title"]</span>
+}
 
-<h1>@Localizer["Teams_MyTeams_Title"]</h1>
+<page-header title="@(Localizer["Teams_MyTeams_Title"].Value)" />
 
 
 @if (Model.Memberships.Any())
@@ -53,7 +51,7 @@
             var membershipsTable = TableModel.For(Model.Memberships)
                 .Template(Localizer["Teams_MyTeams_Team"].Value, membershipTeamCell)
                 .Template(SharedLocalizer["MyTeams_Role"].Value, membershipRoleCell)
-                .Column(Localizer["Teams_MyTeams_Joined"].Value, r => r.JoinedAt.ToDate())
+                .Column(Localizer["Teams_MyTeams_Joined"].Value, r => r.JoinedAt.ToDate(), c => c.Css("text-nowrap"))
                 .Template(Localizer["Teams_MyTeams_Actions"].Value, membershipActionsCell, c => c.NoSort())
                 .Build();
         }
@@ -72,8 +70,6 @@ else
     <div class="card">
         <div class="card-header">@Localizer["Teams_MyTeams_PendingRequests"]</div>
         @{
-        Func<TeamJoinRequestSummaryViewModel, IHtmlContent> requestTeamCell =
-            @<text><a asp-action="Details" asp-route-slug="@item.TeamSlug">@item.TeamName</a></text>;
         Func<TeamJoinRequestSummaryViewModel, IHtmlContent> requestStatusCell =
             @<text><span class="badge @item.StatusBadgeClass">@SharedLocalizer["AdminApp_Pending"]</span></text>;
         Func<TeamJoinRequestSummaryViewModel, IHtmlContent> requestWithdrawCell = @<text>
@@ -85,9 +81,9 @@ else
             </form>
         </text>;
             var pendingRequestsTable = TableModel.For(Model.PendingRequests)
-                .Template(Localizer["Teams_MyTeams_Team"].Value, requestTeamCell)
+                .Link(Localizer["Teams_MyTeams_Team"].Value, r => r.TeamName, r => Url.Action("Details", new { slug = r.TeamSlug }))
                 .Template(Localizer["Teams_MyTeams_Status"].Value, requestStatusCell)
-                .Column(Localizer["Teams_MyTeams_Requested"].Value, r => r.RequestedAt.ToDate())
+                .Column(Localizer["Teams_MyTeams_Requested"].Value, r => r.RequestedAt.ToDate(), c => c.Css("text-nowrap"))
                 .Template(Localizer["Teams_MyTeams_Actions"].Value, requestWithdrawCell, c => c.NoSort())
                 .Build();
         }

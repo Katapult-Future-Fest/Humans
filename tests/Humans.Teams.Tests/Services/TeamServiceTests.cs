@@ -1,9 +1,10 @@
+using System.Globalization;
+using System.Resources;
 using Humans.Base.Interfaces;
 using Xunit;
 using Humans.Base.Helpers;
 using Humans.Base.Extensions;
-// TeamMember.User is Obsolete and never populated in production; these tests set it before
-// SaveChanges only to satisfy the FK.
+// User.DisplayName is Obsolete; the seeders still set it.
 #pragma warning disable CS0618
 using AwesomeAssertions;
 using Humans.Base.Caching;
@@ -26,6 +27,7 @@ using Humans.Shifts.Data;
 using Humans.Shifts.Domain;
 using Humans.Shifts.Services;
 using Humans.Teams.Contracts;
+using Humans.Teams.Models;
 using Humans.Teams.Data;
 using Humans.Teams.Domain;
 using Humans.Teams.Services;
@@ -45,7 +47,53 @@ namespace Humans.Teams.Tests.Services;
 
 public sealed class TeamServiceTests : TeamsTestHarness
 {
+
+    public enum CanonicalNotice { JoinRequest, MemberJoined, Approved, Rejected, Added, Removed }
+
+    [HumansTheory]
+    [InlineData(CanonicalNotice.JoinRequest)]
+    [InlineData(CanonicalNotice.MemberJoined)]
+    [InlineData(CanonicalNotice.Approved)]
+    [InlineData(CanonicalNotice.Rejected)]
+    [InlineData(CanonicalNotice.Added)]
+    [InlineData(CanonicalNotice.Removed)]
+    public async Task CanonicalNoticeRecipients_TeamMembership(CanonicalNotice notice)
+    {
+        var source = Guid.NewGuid();
+        var live = Guid.NewGuid();
+        var other = Guid.NewGuid();
+        var users = Substitute.For<IUserService>();
+        var liveInfo = UserInfo.Create(new User { Id = live, BurnerName = "Live", PreferredLanguage = "es" },
+            [new UserEmail { UserId = live, Email = "live@example.org", IsVerified = true, IsPrimary = true }], [], null);
+        foreach (var id in new[] { source, live, other })
+            users.GetUserInfoAsync(id, Arg.Any<CancellationToken>()).Returns(id == other
+                ? UserInfo.Create(new User { Id = other, PreferredLanguage = "es" }, [], [], null) : liveInfo);
+        users.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<Guid, UserInfo> { [source] = liveInfo });
+        var team = new Team { Id = Guid.NewGuid(), Name = "Team", Slug = "team" };
+        foreach (var id in new[] { source, live, other })
+            team.Members.Add(new TeamMember { Id = Guid.NewGuid(), TeamId = team.Id, UserId = id, Role = TeamMemberRole.Coordinator });
+        var provider = new ServiceLocatorBuilder().With(users).With<ITeamResourceService>(_teamResourceService)
+            .With(_emailService).With(TestTeamsEmails.Create()).Build();
+        var notices = new TeamMembershipNotices(Notifier, provider, NullLogger<TeamService>.Instance);
+        var ct = TestContext.Current.CancellationToken;
+        switch (notice)
+        {
+            case CanonicalNotice.JoinRequest: await notices.SendTeamJoinRequestSubmittedNotificationAsync(team, source, ct); break;
+            case CanonicalNotice.MemberJoined: await notices.SendTeamMemberAddedNotificationAsync(team, source, ct); break;
+            case CanonicalNotice.Approved: await notices.SendJoinRequestApprovedNotificationAsync(team, source, ct); break;
+            case CanonicalNotice.Rejected: await notices.SendJoinRequestRejectedNotificationAsync(team, source, ct); break;
+            case CanonicalNotice.Added: await notices.SendAddedToTeamEmailAsync(source, team, ct); break;
+            case CanonicalNotice.Removed: await notices.SendMemberRemovedNotificationAsync(team, source, team.Id, ct); break;
+        }
+
+        var recipients = Notifier.ReceivedCalls().SelectMany(call => (IReadOnlyList<Guid>)call.GetArguments()[4]!).ToList();
+        recipients.Should().BeEquivalentTo(notice is CanonicalNotice.JoinRequest or CanonicalNotice.MemberJoined
+            ? new[] { live, other } : [live]);
+    }
+
     private readonly TeamService _service;
+    private readonly ITeamManagementService _teamCache = Substitute.For<ITeamManagementService>();
     private readonly TeamPageService _pages;
     private readonly IUserService _userService;
     private readonly IEmailService _emailService = Substitute.For<IEmailService>();
@@ -86,6 +134,7 @@ public sealed class TeamServiceTests : TeamsTestHarness
             new GoogleSyncOutboxRepository(GoogleIntegrationDbFactory));
         var serviceProvider = new ServiceLocatorBuilder()
             .With<ITeamManagement>()
+            .With(_teamCache)
             .With<IRoleAssignmentService>(_roleAssignmentService)
             .With(_emailService)
             .With(TestTeamsEmails.Create())
@@ -119,7 +168,7 @@ public sealed class TeamServiceTests : TeamsTestHarness
             NullLogger<TeamService>.Instance);
         _pages = new TeamPageService(
             _service, _teamResourceService, shiftManagementService,
-            NewSettingsServiceBackedByShiftsDb(), _userService, _roleAssignmentService);
+            NewSettingsServiceBackedByShiftsDb(), _roleAssignmentService);
     }
 
     [HumansTheory]
@@ -717,7 +766,6 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var stored = await TeamsDb.Teams.AsNoTracking().SingleAsync(t => t.Id == team.Id, TestContext.Current.CancellationToken);
         stored.Description.Should().Be("new");
         stored.GoogleGroupPrefix.Should().Be("vol-prefix");
-        // System teams ignore name/requiresApproval/isActive on update
         stored.Name.Should().Be(originalName);
         stored.Slug.Should().Be(originalSlug);
         stored.RequiresApproval.Should().BeFalse();
@@ -976,6 +1024,44 @@ public sealed class TeamServiceTests : TeamsTestHarness
         stored.IsPromotedToDirectory.Should().BeTrue();
     }
 
+    [HumansTheory]
+    [InlineData(false, true, true, true)]
+    [InlineData(true, false, true, true)]
+    [InlineData(false, false, true, false)]
+    [InlineData(false, false, false, true)]
+    [InlineData(false, false, true, true)]
+    [InlineData(true, true, true, false)]
+    public async Task UpdateTeamAsync_DepartmentEligibilityChange_ReconcilesActiveCoordinators(
+        bool wasChild, bool becomesChild, bool wasActive, bool becomesActive)
+    {
+        var parent = SeedTeam("Parent");
+        var team = SeedTeam("Crew");
+        team.ParentTeamId = wasChild ? parent.Id : null;
+        team.IsActive = wasActive;
+        var coordinator = SeedUser(displayName: "Coordinator");
+        SeedTeamMember(team.Id, coordinator.Id, TeamMemberRole.Coordinator);
+        var member = SeedUser(displayName: "Member");
+        SeedTeamMember(team.Id, member.Id);
+        var formerCoordinator = SeedUser(displayName: "Former coordinator");
+        SeedTeamMember(team.Id, formerCoordinator.Id, TeamMemberRole.Coordinator,
+            leftAt: Clock.GetCurrentInstant() - Duration.FromDays(1));
+        await SaveAllAsync(TestContext.Current.CancellationToken);
+
+        var result = await _service.UpdateTeamAsync(
+            team.Id, team.Name, team.Description, team.RequiresApproval, becomesActive,
+            parentTeamId: becomesChild ? parent.Id : null,
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        result.Succeeded.Should().BeTrue();
+        var eligibilityChanged = (wasActive && !wasChild) != (becomesActive && !becomesChild);
+        await _systemTeamSync.Received(eligibilityChanged ? 1 : 0).SyncMembershipForUserAsync(
+            coordinator.Id, SystemTeamType.Coordinators, Arg.Any<CancellationToken>());
+        await _systemTeamSync.DidNotReceive().SyncMembershipForUserAsync(
+            member.Id, SystemTeamType.Coordinators, Arg.Any<CancellationToken>());
+        await _systemTeamSync.DidNotReceive().SyncMembershipForUserAsync(
+            formerCoordinator.Id, SystemTeamType.Coordinators, Arg.Any<CancellationToken>());
+    }
+
     [HumansFact]
     public async Task UpdateTeamAsync_BecomingChild_ForcesPublicPageFalse()
     {
@@ -1047,18 +1133,25 @@ public sealed class TeamServiceTests : TeamsTestHarness
         await AdminAuthorization.DidNotReceive().RequireCurrentUserIsAdminAsync(Arg.Any<CancellationToken>());
     }
 
-    [HumansFact]
-    public async Task CreateTeamWithGoogleGroup_ProvisioningFails_ClearsPrefixAndWarns()
+    [HumansTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CreateTeamWithGoogleGroup_ProvisioningFails_ClearsPrefixAndWarns(bool returnsError)
     {
         _googleSyncService.EnsureTeamGroupAsync(Arg.Any<Guid>(), cancellationToken: Arg.Any<CancellationToken>())
-            .Returns<GroupLinkResult>(_ => throw new InvalidOperationException("Workspace down"));
+            .Returns<GroupLinkResult>(_ => returnsError
+                ? GroupLinkResult.Error("Workspace down")
+                : throw new InvalidOperationException("Workspace down"));
 
         var result = await _service.CreateTeamWithGoogleGroupAsync(
             "Gate Crew", null, requiresApproval: false, googleGroupPrefix: "gate-crew",
             cancellationToken: TestContext.Current.CancellationToken);
 
+        result.Succeeded.Should().BeTrue();
         result.GroupWarning.Should().Contain("Google Group setup failed")
+            .And.Contain("Workspace down")
             .And.Contain("prefix has been cleared");
+        result.Team!.GoogleGroupPrefix.Should().BeNull();
         ClearAllTrackers();
         var reloaded = await TeamsDb.Teams.SingleAsync(t => t.Id == result.Team!.Id, TestContext.Current.CancellationToken);
         reloaded.GoogleGroupPrefix.Should().BeNull();
@@ -1088,34 +1181,83 @@ public sealed class TeamServiceTests : TeamsTestHarness
             Arg.Any<Guid>(), Arg.Any<bool>(), Arg.Any<CancellationToken>());
     }
 
-    [HumansFact]
-    public async Task UpdateTeamWithGoogleGroup_GroupNeedsConfirmation_ReturnsWarning()
+    [HumansTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TeamWithGoogleGroup_GroupNeedsConfirmation_ReturnsWarning(bool createTeam)
     {
         var team = SeedTeam("Alpha");
         await SaveAllAsync(TestContext.Current.CancellationToken);
-        _googleSyncService.EnsureTeamGroupAsync(team.Id, cancellationToken: Arg.Any<CancellationToken>())
+        _googleSyncService.EnsureTeamGroupAsync(Arg.Any<Guid>(), cancellationToken: Arg.Any<CancellationToken>())
             .Returns(GroupLinkResult.NeedsConfirmation("Group was deactivated.", Guid.NewGuid()));
 
-        var result = await _service.UpdateTeamWithGoogleGroupAsync(
-            team.Id, team.Name, team.Description, team.RequiresApproval, team.IsActive,
-            cancellationToken: TestContext.Current.CancellationToken);
+        var result = createTeam
+            ? await _service.CreateTeamWithGoogleGroupAsync(
+                "New Crew", null, false, googleGroupPrefix: "new-crew",
+                cancellationToken: TestContext.Current.CancellationToken)
+            : await _service.UpdateTeamWithGoogleGroupAsync(
+                team.Id, team.Name, team.Description, team.RequiresApproval, team.IsActive,
+                cancellationToken: TestContext.Current.CancellationToken);
 
         result.GroupWarning.Should().Be("Group was deactivated.");
     }
 
-    [HumansFact]
-    public async Task UpdateTeamWithGoogleGroup_GroupOk_NoWarning()
+    [HumansTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TeamWithGoogleGroup_GroupOk_NoWarning(bool createTeam)
     {
         var team = SeedTeam("Alpha");
         await SaveAllAsync(TestContext.Current.CancellationToken);
-        _googleSyncService.EnsureTeamGroupAsync(team.Id, cancellationToken: Arg.Any<CancellationToken>())
+        _googleSyncService.EnsureTeamGroupAsync(Arg.Any<Guid>(), cancellationToken: Arg.Any<CancellationToken>())
             .Returns(GroupLinkResult.Ok());
 
-        var result = await _service.UpdateTeamWithGoogleGroupAsync(
-            team.Id, team.Name, team.Description, team.RequiresApproval, team.IsActive,
-            cancellationToken: TestContext.Current.CancellationToken);
+        var result = createTeam
+            ? await _service.CreateTeamWithGoogleGroupAsync(
+                "New Crew", null, false, googleGroupPrefix: "new-crew",
+                cancellationToken: TestContext.Current.CancellationToken)
+            : await _service.UpdateTeamWithGoogleGroupAsync(
+                team.Id, team.Name, team.Description, team.RequiresApproval, team.IsActive,
+                cancellationToken: TestContext.Current.CancellationToken);
 
         result.GroupWarning.Should().BeNull();
+    }
+
+    [HumansTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TeamWithGoogleGroup_ProvisioningReadsCommittedTeamFromWarmCache(bool createTeam)
+    {
+        var team = SeedTeam("Existing Crew");
+        team.GoogleGroupPrefix = "old-prefix";
+        await SaveAllAsync(TestContext.Current.CancellationToken);
+        using var provider = new ServiceCollection()
+            .AddKeyedScoped<ITeamManagementService>(CachingTeamService.InnerServiceKey, (_, _) => _service)
+            .BuildServiceProvider();
+        var cached = new CachingTeamService(provider.GetRequiredService<IServiceScopeFactory>(),
+            NullLogger<CachingTeamService>.Instance);
+        await cached.GetTeamsAsync(TestContext.Current.CancellationToken);
+        _teamCache.When(t => t.InvalidateActiveTeamsCache()).Do(_ => cached.InvalidateActiveTeamsCache());
+        TeamInfo? observedTeam = null;
+        _googleSyncService.EnsureTeamGroupAsync(Arg.Any<Guid>(), cancellationToken: Arg.Any<CancellationToken>())
+            .Returns(async call =>
+            {
+                observedTeam = await cached.GetTeamAsync(call.Arg<Guid>(), TestContext.Current.CancellationToken);
+                return GroupLinkResult.Ok();
+            });
+
+        var result = createTeam
+            ? await cached.CreateTeamWithGoogleGroupAsync(
+                "New Crew", null, false, googleGroupPrefix: "new-prefix",
+                cancellationToken: TestContext.Current.CancellationToken)
+            : await cached.UpdateTeamWithGoogleGroupAsync(
+                team.Id, team.Name, team.Description, team.RequiresApproval, team.IsActive,
+                googleGroupPrefix: "new-prefix", cancellationToken: TestContext.Current.CancellationToken);
+
+        result.Succeeded.Should().BeTrue();
+        observedTeam.Should().NotBeNull();
+        observedTeam!.Id.Should().Be(result.Team!.Id);
+        observedTeam.GoogleGroupPrefix.Should().Be("new-prefix");
     }
 
     [HumansFact]
@@ -1648,6 +1790,25 @@ public sealed class TeamServiceTests : TeamsTestHarness
     }
 
     [HumansFact]
+    public async Task ApproveJoinRequestAsync_RequestAlreadyRejected_ReturnsRefusalAndAddsNoMember()
+    {
+        var coordinator = SeedUser(displayName: "Coordinator");
+        var requester = SeedUser(displayName: "Requester");
+        var team = SeedTeam("Alpha", requiresApproval: true);
+        SeedTeamMember(team.Id, coordinator.Id, TeamMemberRole.Coordinator);
+        var request = SeedJoinRequest(team.Id, requester.Id, TeamJoinRequestStatus.Rejected);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
+
+        var result = await _service.ApproveJoinRequestAsync(request.Id, coordinator.Id, "late", TestContext.Current.CancellationToken);
+
+        result.Succeeded.Should().BeFalse();
+        result.Refusal.Should().Match("*pending*");
+        AuditLog.ReceivedCalls().Should().BeEmpty();
+        (await _service.GetUserTeamMembershipsAsync(requester.Id, TestContext.Current.CancellationToken))
+            .Should().NotContain(m => m.TeamId == team.Id);
+    }
+
+    [HumansFact]
     public async Task RejectJoinRequestAsync_HappyPath_RecordsRejectionWithReason()
     {
         var coordinator = SeedUser(displayName: "Coordinator");
@@ -1666,6 +1827,31 @@ public sealed class TeamServiceTests : TeamsTestHarness
         stored.ReviewNotes.Should().Be("out of capacity");
         stored.ReviewedByUserId.Should().Be(coordinator.Id);
         stored.ResolvedAt.Should().Be(Clock.GetCurrentInstant());
+    }
+
+    [HumansTheory]
+    [InlineData("")]
+    [InlineData(" \t ")]
+    public async Task AddedMemberNotice_BlankEmail_StillDeliversInboxNotice(string address)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var coordinator = SeedUser(displayName: "Coordinator");
+        var requester = SeedUser(displayName: "Requester");
+        requester.Email = address;
+        requester.PreferredLanguage = "es";
+        var team = SeedTeam("Alpha", requiresApproval: true);
+        SeedTeamMember(team.Id, coordinator.Id, TeamMemberRole.Coordinator);
+        var request = SeedJoinRequest(team.Id, requester.Id);
+        await SaveAllAsync(ct);
+
+        (await _service.ApproveJoinRequestAsync(request.Id, coordinator.Id, null, ct)).Succeeded.Should().BeTrue();
+
+        await _emailService.DidNotReceiveWithAnyArgs().SendAsync(default!);
+        await _teamResourceService.DidNotReceiveWithAnyArgs().GetTeamResourcesAsync(default);
+        Notifier.ReceivedCalls().Where(call =>
+            call.GetArguments()[0] is NotificationSourceDefinition source && source == TeamsNotificationSources.TeamMemberAdded
+            && ((IReadOnlyList<Guid>)call.GetArguments()[4]!).Contains(requester.Id)
+            && string.Equals((string)call.GetArguments()[3]!, Notice("es", "Teams_Email_AddedToTeam_Subject", "Alpha"), StringComparison.Ordinal)).Should().ContainSingle();
     }
 
     [HumansTheory]
@@ -1701,10 +1887,7 @@ public sealed class TeamServiceTests : TeamsTestHarness
                 && source == TeamsNotificationSources.TeamMemberAdded
                 && ((IReadOnlyList<Guid>)call.GetArguments()[4]!).Contains(requester.Id))
             .Single().GetArguments();
-        if (string.Equals(expectedCulture, "en", StringComparison.Ordinal))
-            ((string)args[3]!).Should().EndWith("added to Alpha");
-        else
-            args[3].Should().Be("Se le ha añadido al equipo Alpha");
+        args[3].Should().Be(Notice(expectedCulture, "Teams_Email_AddedToTeam_Subject", "Alpha"));
         args[6].Should().Be($"/Teams/{team.Slug}");
         if (string.Equals(mode, "normal", StringComparison.Ordinal))
             await _emailService.Received(1).SendAsync(
@@ -1713,6 +1896,80 @@ public sealed class TeamServiceTests : TeamsTestHarness
                 Arg.Any<CancellationToken>());
         await _userService.Received(1).GetUserInfosAsync(
             Arg.Is<IReadOnlyCollection<Guid>>(ids => ids.Count == 1 && ids.Contains(requester.Id)), Arg.Any<CancellationToken>());
+    }
+
+    [HumansTheory]
+    [MemberData(nameof(SupportedCultures.All), MemberType = typeof(SupportedCultures))]
+    public async Task CoordinatorMembershipNotices_UseEachRecipientsLanguage(string language)
+    {
+        using var actorCulture = new CultureScope("fr");
+        var coordinator = SeedUser(displayName: "Coordinator");
+        coordinator.PreferredLanguage = language;
+        var secondCoordinator = SeedUser(displayName: "Second coordinator");
+        secondCoordinator.PreferredLanguage = language;
+        var requester = SeedUser(displayName: "Requester");
+        foreach (var requiresApproval in new[] { true, false })
+        {
+            var team = SeedTeam("Alpha", requiresApproval: requiresApproval);
+            SeedTeamMember(team.Id, coordinator.Id, TeamMemberRole.Coordinator);
+            SeedTeamMember(team.Id, secondCoordinator.Id, TeamMemberRole.Coordinator);
+            await SaveAllAsync(TestContext.Current.CancellationToken);
+            Notifier.ClearReceivedCalls();
+
+            await _service.JoinTeamAsync(team.Id, requester.Id, null, TestContext.Current.CancellationToken);
+
+            var args = Notifier.ReceivedCalls().Where(call => call.GetArguments()[0] is NotificationSourceDefinition
+                && ((IReadOnlyList<Guid>)call.GetArguments()[4]!).Contains(coordinator.Id)).Single().GetArguments();
+            ((IReadOnlyList<Guid>)args[4]!).Should().BeEquivalentTo(new[] { coordinator.Id, secondCoordinator.Id });
+            args[3].Should().Be(requiresApproval
+                ? Notice(language, "Teams_Notification_JoinRequestSubmitted", "Alpha")
+                : Notice(language, "Teams_Notification_MemberJoined", "Requester", "Alpha"));
+            args[5].Should().Be(requiresApproval
+                ? Notice(language, "Teams_Notification_JoinRequestSubmittedBody", "Requester", "Alpha")
+                : Notice(language, "Teams_Notification_MemberJoinedBody", "Requester", "Alpha"));
+            args[7].Should().Be(Notice(language, requiresApproval ? "Teams_Notification_ReviewRequest" : "Teams_Notification_ViewMembers"));
+            args[6].Should().Be($"/Teams/{team.Slug}/Members");
+        }
+    }
+
+    [HumansTheory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task CoordinatorMembershipNotices_ContinueAfterOneLanguageFails(bool requiresApproval)
+    {
+        var failing = SeedUser(displayName: "Unavailable coordinator");
+        failing.PreferredLanguage = "not a culture!";
+        var firstSpanish = SeedUser(displayName: "First Spanish coordinator");
+        firstSpanish.PreferredLanguage = "es";
+        var secondSpanish = SeedUser(displayName: "Second Spanish coordinator");
+        secondSpanish.PreferredLanguage = "es";
+        var requester = SeedUser(displayName: "Requester");
+        var team = SeedTeam("Alpha", requiresApproval: requiresApproval);
+        foreach (var coordinator in new[] { failing, firstSpanish, secondSpanish })
+            SeedTeamMember(team.Id, coordinator.Id, TeamMemberRole.Coordinator);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
+        _userService.GetUserInfoAsync(requester.Id, Arg.Any<CancellationToken>()).Returns((UserInfo?)null);
+        Notifier.SendAsync(Arg.Any<NotificationSourceDefinition>(), Arg.Any<NotificationClass>(),
+                Arg.Any<NotificationPriority>(), Arg.Any<string>(),
+                Arg.Is<IReadOnlyList<Guid>>(ids => ids.Contains(failing.Id)), Arg.Any<string?>(),
+                Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<string?>(),
+                Arg.Any<CancellationToken>())
+            .Returns(Task.FromException(new IOException("One language dispatch failed")));
+
+        await _service.JoinTeamAsync(team.Id, requester.Id, null, TestContext.Current.CancellationToken);
+
+        var calls = Notifier.ReceivedCalls().Where(call => call.GetArguments()[0] is NotificationSourceDefinition
+            && ((IReadOnlyList<Guid>)call.GetArguments()[4]!).Any(id => id != requester.Id))
+            .Select(call => call.GetArguments()).ToList();
+        calls.Should().HaveCount(2);
+        var english = calls.Single(args => ((IReadOnlyList<Guid>)args[4]!).Contains(failing.Id));
+        english[5].Should().Be(requiresApproval
+            ? "Someone has requested to join Alpha." : "Someone has joined Alpha.");
+        var spanish = calls.Single(args => ((IReadOnlyList<Guid>)args[4]!).Contains(firstSpanish.Id));
+        ((IReadOnlyList<Guid>)spanish[4]!).Should().BeEquivalentTo(new[] { firstSpanish.Id, secondSpanish.Id });
+        spanish[5].Should().Be(Notice("es",
+            requiresApproval ? "Teams_Notification_JoinRequestSubmittedBody" : "Teams_Notification_MemberJoinedBody",
+            Notice("es", "Teams_Notification_Someone"), "Alpha"));
     }
 
     [HumansTheory]
@@ -2446,8 +2703,7 @@ public sealed class TeamServiceTests : TeamsTestHarness
         result.PendingRequestCount.Should().Be(1);
         result.CurrentUserPendingRequestId.Should().BeNull();
         result.Members.Select(m => (m.DisplayName, m.Role)).Should().BeEquivalentTo(
-            [("Member", TeamMemberRole.Member), ("Coordinator", TeamMemberRole.Coordinator)],
-            cfg => cfg.WithStrictOrdering());
+            [("Member", TeamMemberRole.Member), ("Coordinator", TeamMemberRole.Coordinator)]);
         result.RoleDefinitions.Select(d => d.Id).Should().ContainSingle().Which.Should().Be(roleDefinition.Id);
         pendingRequest.Status.Should().Be(TeamJoinRequestStatus.Pending);
     }
@@ -2485,7 +2741,6 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var team = SeedTeam("Alpha");
         var u1 = SeedUser(displayName: "First");
         var u2 = SeedUser(displayName: "Second");
-        // Seed first request earlier
         var earlier = new TeamJoinRequest
         {
             Id = Guid.NewGuid(),
@@ -2769,32 +3024,28 @@ public sealed class TeamServiceTests : TeamsTestHarness
         result.Members.Should().BeEmpty();
     }
 
-    [HumansFact]
-    public async Task GetAdminTeamListAsync_ReturnsPaginatedResults()
+    [HumansFact(Timeout = 10000)]
+    public async Task GetAdminTeamListAsync_IncludesEveryTeamBeyondFormerSummaryLimit()
     {
-        SeedTeam("Alpha");
-        SeedTeam("Beta");
-        SeedTeam("Charlie");
+        for (var i = 0; i < 501; i++) SeedTeam($"Team {i}");
         await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetAdminTeamListAsync(1, 2, TestContext.Current.CancellationToken);
+        var result = await _service.GetAdminTeamListAsync(TestContext.Current.CancellationToken);
 
-        result.Teams.Should().HaveCount(2);
-        result.TotalCount.Should().Be(3);
+        result.Should().HaveCount(501);
     }
 
     [HumansFact]
-    public async Task GetAdminTeamListAsync_SecondPage_ReturnsRemainingItems()
+    public async Task GetAdminTeamListAsync_IncludesChildRowsWithEarlierNames()
     {
-        SeedTeam("Alpha");
-        SeedTeam("Beta");
-        SeedTeam("Charlie");
+        var parent = SeedTeam("Zulu parent");
+        var child = SeedTeam("Alpha child");
+        child.ParentTeamId = parent.Id;
         await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetAdminTeamListAsync(2, 2, TestContext.Current.CancellationToken);
+        var result = await _service.GetAdminTeamListAsync(TestContext.Current.CancellationToken);
 
-        result.Teams.Should().ContainSingle();
-        result.TotalCount.Should().Be(3);
+        result.Should().Contain(t => t.Id == child.Id);
     }
 
     [HumansFact]
@@ -2805,9 +3056,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         SeedTeamMember(team.Id, active.Id);
         await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetAdminTeamListAsync(1, 10, TestContext.Current.CancellationToken);
+        var result = await _service.GetAdminTeamListAsync(TestContext.Current.CancellationToken);
 
-        result.Teams.Single().MemberCount.Should().Be(1);
+        result.Single().MemberCount.Should().Be(1);
     }
 
     [HumansFact]
@@ -2818,9 +3069,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         SeedJoinRequest(team.Id, u1.Id);
         await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetAdminTeamListAsync(1, 10, TestContext.Current.CancellationToken);
+        var result = await _service.GetAdminTeamListAsync(TestContext.Current.CancellationToken);
 
-        result.Teams.Single().PendingRequestCount.Should().Be(1);
+        result.Single().PendingRequestCount.Should().Be(1);
     }
 
     [HumansFact]
@@ -2830,24 +3081,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         SeedTeam("Inactive", isActive: false);
         await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetAdminTeamListAsync(1, 10, TestContext.Current.CancellationToken);
+        var result = await _service.GetAdminTeamListAsync(TestContext.Current.CancellationToken);
 
-        result.TotalCount.Should().Be(2);
-        result.Teams.Should().HaveCount(2);
-    }
-
-    [HumansFact]
-    public async Task GetAdminTeamListAsync_SystemTeamsOrderedFirst()
-    {
-        SeedTeam("Zebra");
-        SeedTeam("Volunteers", type: SystemTeamType.Volunteers);
-        await SaveAllAsync(TestContext.Current.CancellationToken);
-
-        var result = await _service.GetAdminTeamListAsync(1, 10, TestContext.Current.CancellationToken);
-
-        // SystemTeamType.None(0) < Volunteers(1), so None sorts first in ascending order
-        result.Teams[0].SystemTeamType.Should().BeNull();
-        result.Teams[1].SystemTeamType.Should().Be(nameof(SystemTeamType.Volunteers));
+        result.Should().HaveCount(2);
     }
 
     [HumansTheory]
@@ -2874,14 +3110,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
         }
         await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        Func<Task> add = async () =>
-        {
-            if (assignRole)
-                await _service.AssignToRoleAsync(definition.Id, targetId, actor.Id, TestContext.Current.CancellationToken);
-        };
-
         if (assignRole)
-            await add.Should().ThrowAsync<InvalidOperationException>();
+            (await _service.AssignToRoleAsync(definition.Id, targetId, actor.Id, TestContext.Current.CancellationToken))
+                .Refusal.Should().Contain("missing, deleted or merged");
         else
             (await _service.AddMemberToTeamAsync(team.Id, targetId, actor.Id, TestContext.Current.CancellationToken))
                 .Refusal.Should().Contain("missing, deleted or merged");
@@ -2904,7 +3135,7 @@ public sealed class TeamServiceTests : TeamsTestHarness
         if (alreadyMember) SeedTeamMember(team.Id, target.Id);
         await SaveAllAsync(TestContext.Current.CancellationToken);
         _userService.GetUserInfoAsync(sourceId, Arg.Any<CancellationToken>()).Returns(new ValueTask<UserInfo?>(
-            UserInfo.Create(target, [], [], [], null, [])));
+            UserInfo.Create(target, [], [], null)));
 
         if (alreadyMember)
         {
@@ -2939,12 +3170,13 @@ public sealed class TeamServiceTests : TeamsTestHarness
         await SaveAllAsync(TestContext.Current.CancellationToken);
         var sourceId = Guid.NewGuid();
         _userService.GetUserInfoAsync(sourceId, Arg.Any<CancellationToken>()).Returns(new ValueTask<UserInfo?>(
-            UserInfo.Create(target, [], [], [], null, [])));
+            UserInfo.Create(target, [], [], null)));
 
-        var assignment = await _service.AssignToRoleAsync(definition.Id, sourceId, actor.Id,
+        var result = await _service.AssignToRoleAsync(definition.Id, sourceId, actor.Id,
             TestContext.Current.CancellationToken);
 
-        assignment.TeamMemberId.Should().Be(member.Id);
+        result.Succeeded.Should().BeTrue();
+        result.Assignment!.TeamMemberId.Should().Be(member.Id);
         (await TeamsDb.TeamMembers.CountAsync(TestContext.Current.CancellationToken)).Should().Be(1);
         (await GoogleIntegrationDb.GoogleSyncOutboxEvents.CountAsync(TestContext.Current.CancellationToken)).Should().Be(0);
     }
@@ -3161,12 +3393,10 @@ public sealed class TeamServiceTests : TeamsTestHarness
         critical.IsPublic.Should().BeTrue();
         result.Where(slot => slot.RoleDefinitionId == alphaDefinition.Id).Should().OnlyContain(slot => !slot.IsPublic);
         critical.Priority.Should().Be(nameof(SlotPriority.Critical));
-        critical.PriorityBadgeClass.Should().Be("bg-danger");
         result.Single(slot => string.Equals(slot.TeamName, "Alpha", StringComparison.Ordinal) && slot.SlotNumber == 1)
-            .AssignedUserName.Should().Be("Assigned Human");
+            .AssignedUserId.Should().Be(alphaMember.Id);
         var unprioritized = result.Single(slot => string.Equals(slot.TeamName, "Alpha", StringComparison.Ordinal) && slot.SlotNumber == 2);
         unprioritized.Priority.Should().Be(nameof(SlotPriority.None));
-        unprioritized.PriorityBadgeClass.Should().Be("bg-light text-dark");
     }
 
     [HumansFact]
@@ -3225,12 +3455,11 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var activeEvent = SeedEventSettings("Active Event", isActive: true);
         var inactiveEvent = SeedEventSettings("Old Event", isActive: false);
 
-        // Rota on active event with 2 pending signups
         var activeRota = SeedRota(team.Id, activeEvent.Id, "Gate Shifts");
         var shift1 = SeedShift(activeRota.Id);
         SeedShiftSignup(shift1.Id, user.Id, SignupStatus.Pending);
         SeedShiftSignup(shift1.Id, Guid.NewGuid(), SignupStatus.Pending);
-        SeedShiftSignup(shift1.Id, Guid.NewGuid(), SignupStatus.Confirmed); // not pending
+        SeedShiftSignup(shift1.Id, Guid.NewGuid(), SignupStatus.Confirmed);
 
         // Rota on an inactive event: must NOT be counted.
         var oldRota = SeedRota(team.Id, inactiveEvent.Id, "Old Shifts");
@@ -3239,9 +3468,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
 
         await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetAdminTeamListAsync(1, 500, TestContext.Current.CancellationToken);
+        var result = await _service.GetAdminTeamListAsync(TestContext.Current.CancellationToken);
 
-        var summary = result.Teams.Should().ContainSingle(t => t.Name == "Dept A").Subject;
+        var summary = result.Should().ContainSingle(t => t.Name == "Dept A").Subject;
         summary.PendingShiftSignupCount.Should().Be(2);
     }
 
@@ -3259,9 +3488,9 @@ public sealed class TeamServiceTests : TeamsTestHarness
 
         await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        var result = await _service.GetAdminTeamListAsync(1, 500, TestContext.Current.CancellationToken);
+        var result = await _service.GetAdminTeamListAsync(TestContext.Current.CancellationToken);
 
-        var summary = result.Teams.Should().ContainSingle(t => t.Name == "Dept B").Subject;
+        var summary = result.Should().ContainSingle(t => t.Name == "Dept B").Subject;
         summary.PendingShiftSignupCount.Should().Be(0);
     }
 
@@ -3302,9 +3531,8 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var team = SeedTeam("Doomed Team");
         var alice = SeedUser(displayName: "Alice");
         var bob = SeedUser(displayName: "Bob");
-        SeedTeamMember(team.Id, alice.Id);
+        SeedTeamMember(team.Id, alice.Id, TeamMemberRole.Coordinator);
         SeedTeamMember(team.Id, bob.Id);
-        // Previously-left member should NOT be touched.
         var ghost = SeedUser(displayName: "Ghost");
         SeedTeamMember(team.Id, ghost.Id, leftAt: Clock.GetCurrentInstant() - Duration.FromDays(30));
         await SaveAllAsync(TestContext.Current.CancellationToken);
@@ -3319,7 +3547,6 @@ public sealed class TeamServiceTests : TeamsTestHarness
         var reloaded = await TeamsDb.Teams.AsNoTracking().FirstOrDefaultAsync(t => t.Id == team.Id, TestContext.Current.CancellationToken);
         reloaded!.IsActive.Should().BeFalse();
 
-        // All previously-active memberships now have LeftAt set.
         var aliceMember = await TeamsDb.TeamMembers.AsNoTracking()
             .FirstAsync(tm => tm.TeamId == team.Id && tm.UserId == alice.Id, TestContext.Current.CancellationToken);
         var bobMember = await TeamsDb.TeamMembers.AsNoTracking()
@@ -3329,7 +3556,6 @@ public sealed class TeamServiceTests : TeamsTestHarness
         aliceMember.LeftAt.Should().Be(Clock.GetCurrentInstant());
         bobMember.LeftAt.Should().Be(Clock.GetCurrentInstant());
 
-        // Previously-left membership is unchanged (still has its original LeftAt).
         var ghostMember = await TeamsDb.TeamMembers.AsNoTracking()
             .FirstAsync(tm => tm.TeamId == team.Id && tm.UserId == ghost.Id, TestContext.Current.CancellationToken);
         ghostMember.LeftAt.Should().Be(Clock.GetCurrentInstant() - Duration.FromDays(30));
@@ -3345,6 +3571,13 @@ public sealed class TeamServiceTests : TeamsTestHarness
             .Should().Be(2, "already-left memberships must not receive another removal audit");
         await _service.DeleteTeamAsync(team.Id, actor, TestContext.Current.CancellationToken);
         AuditLog.ReceivedCalls().Count(c => string.Equals(c.GetMethodInfo().Name, nameof(IAuditLogService.LogAsync), StringComparison.Ordinal)).Should().Be(2);
+
+        await _systemTeamSync.Received(1).SyncMembershipForUserAsync(
+            alice.Id, SystemTeamType.Coordinators, Arg.Any<CancellationToken>());
+        await _systemTeamSync.DidNotReceive().SyncMembershipForUserAsync(
+            bob.Id, SystemTeamType.Coordinators, Arg.Any<CancellationToken>());
+        await _systemTeamSync.DidNotReceive().SyncMembershipForUserAsync(
+            ghost.Id, SystemTeamType.Coordinators, Arg.Any<CancellationToken>());
 
         // DeactivateResourcesForTeamAsync is intentionally NOT called from DeleteTeamAsync:
         // flipping GoogleResource.IsActive here would make the next reconciliation tick
@@ -3369,6 +3602,35 @@ public sealed class TeamServiceTests : TeamsTestHarness
 
         await _teamResourceService.DidNotReceive().DeactivateResourcesForTeamAsync(
             Arg.Any<Guid>(), Arg.Any<GoogleResourceType?>(), Arg.Any<CancellationToken>());
+    }
+
+    [HumansFact]
+    public async Task ApplyMemberRoleChanges_ReturnsOnlyRowsActuallyChangedAfterSave()
+    {
+        var team = SeedTeam("Roles");
+        var changed = SeedTeamMember(team.Id, SeedUser().Id);
+        var alreadyCoordinator = SeedTeamMember(team.Id, SeedUser().Id, TeamMemberRole.Coordinator);
+        var departed = SeedTeamMember(team.Id, SeedUser().Id);
+        departed.LeftAt = Clock.GetCurrentInstant();
+        await SaveAllAsync(TestContext.Current.CancellationToken);
+        var changes = new[]
+        {
+            (changed.Id, TeamMemberRole.Coordinator),
+            (alreadyCoordinator.Id, TeamMemberRole.Coordinator),
+            (departed.Id, TeamMemberRole.Coordinator),
+            (Guid.NewGuid(), TeamMemberRole.Coordinator),
+        };
+
+        var updated = await _service.ApplyMemberRoleChangesAsync(changes, TestContext.Current.CancellationToken);
+
+        updated.Should().Equal(changed.Id);
+        await using var fresh = await TeamsDbFactory.CreateDbContextAsync(TestContext.Current.CancellationToken);
+        var roles = await fresh.TeamMembers.ToDictionaryAsync(member => member.Id, member => member.Role,
+            TestContext.Current.CancellationToken);
+        roles[changed.Id].Should().Be(TeamMemberRole.Coordinator);
+        roles[alreadyCoordinator.Id].Should().Be(TeamMemberRole.Coordinator);
+        roles[departed.Id].Should().Be(TeamMemberRole.Member);
+        (await _service.ApplyMemberRoleChangesAsync(changes, TestContext.Current.CancellationToken)).Should().BeEmpty();
     }
 
     [HumansFact]
@@ -3437,6 +3699,12 @@ public sealed class TeamServiceTests : TeamsTestHarness
         return settingsService;
     }
 
+    private static string Notice(string culture, string key, params object[] args)
+    {
+        var info = CultureInfo.GetCultureInfo(culture);
+        return string.Format(info, new ResourceManager(typeof(TeamsResource)).GetString(key, info)!, args);
+    }
+
     private static EventSettingsInfo ToEventSettingsInfo(EventSettings src) => new(
         Id: src.Id,
         EventName: src.EventName,
@@ -3446,10 +3714,6 @@ public sealed class TeamServiceTests : TeamsTestHarness
         BuildStartOffset: src.BuildStartOffset,
         EventEndOffset: src.EventEndOffset,
         StrikeEndOffset: src.StrikeEndOffset,
-        FirstCrewStartOffset: src.FirstCrewStartOffset,
-        SetupWeekStartOffset: src.SetupWeekStartOffset,
-        PreEventWeekStartOffset: src.PreEventWeekStartOffset,
-        FinishingWeekendStartOffset: src.FinishingWeekendStartOffset,
         EarlyEntryCapacity: new Dictionary<int, int>(src.EarlyEntryCapacity),
         BarriosEarlyEntryAllocation: src.BarriosEarlyEntryAllocation is null
             ? null : new Dictionary<int, int>(src.BarriosEarlyEntryAllocation),

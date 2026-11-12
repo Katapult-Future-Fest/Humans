@@ -58,30 +58,9 @@ internal sealed class Profile
     [PersonalData]
     public string? EmergencyContactRelationship { get; set; }
 
-    // Legacy food columns: Cantina owns the answers. Read only by Cantina's fallback and copy;
-    // still exported and erased here until the retirement PR drops them.
-
-    /// <summary>Dietary preference (e.g., "Vegan", "Vegetarian", "Omnivore", "Pescatarian").</summary>
-    [PersonalData]
-    public string? DietaryPreference { get; set; }
-
-    [PersonalData]
-    public List<string> Allergies { get; set; } = [];
-
-    [PersonalData]
-    public List<string> Intolerances { get; set; } = [];
-
-    /// <summary>Free text specifying "Other" allergy when "Other" is selected.</summary>
-    [PersonalData]
-    public string? AllergyOtherText { get; set; }
-
-    /// <summary>Free text specifying "Other" intolerance when "Other" is selected.</summary>
-    [PersonalData]
-    public string? IntoleranceOtherText { get; set; }
-
     /// <summary>
-    /// GDPR Art. 9 health data, present on the cached UserInfo: every render or serialize surface
-    /// MUST gate it behind the MedicalDataViewer policy.
+    /// GDPR Art. 9 health data. Not on the cached UserInfo; <c>MedicalConditionsService</c> is its only reader,
+    /// and anyone but the owner gets it through the audited reveal.
     /// </summary>
     [PersonalData]
     public string? MedicalConditions { get; set; }
@@ -109,37 +88,6 @@ internal sealed class Profile
     /// <summary>Notes to the Board, visible to self and the Board only.</summary>
     [PersonalData]
     public string? BoardNotes { get; set; }
-
-    [PersonalData]
-    public string? Iban { get; set; }
-
-    /// <summary>
-    /// Frozen legacy column, like the review columns below: Consent's <c>consent_reviews</c> is the
-    /// live review. Kept until the <c>consent.profile-review</c> copy is done in production;
-    /// <see cref="RejectedAt"/> still feeds the state classifier's legacy arm until then.
-    /// </summary>
-    public bool IsApproved { get; set; }
-
-    /// <summary>
-    /// Frozen legacy column, retained for GDPR export until a separate schema drop.
-    /// Governance owns the live tier.
-    /// </summary>
-    public LegacyMembershipTier MembershipTier { get; set; }
-
-    /// <summary>Frozen legacy column (see <see cref="IsApproved"/>).</summary>
-    public LegacyConsentCheckStatus? ConsentCheckStatus { get; set; }
-
-    public Instant? ConsentCheckAt { get; set; }
-
-    public Guid? ConsentCheckedByUserId { get; set; }
-
-    public string? ConsentCheckNotes { get; set; }
-
-    public string? RejectionReason { get; set; }
-
-    public Instant? RejectedAt { get; set; }
-
-    public Guid? RejectedByUserId { get; set; }
 
     public string FullName => $"{FirstName} {LastName}".Trim();
 

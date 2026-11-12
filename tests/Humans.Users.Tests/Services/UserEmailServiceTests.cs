@@ -18,6 +18,89 @@ namespace Humans.Users.Tests.Services;
 
 public class UserEmailServiceTests
 {
+    public enum RemovalOverlap { UnlinkThenDelete, UnlinkThenUnlink, DeleteThenUnlink }
+
+    [HumansTheory]
+    [Xunit.InlineData(RemovalOverlap.UnlinkThenDelete)]
+    [Xunit.InlineData(RemovalOverlap.UnlinkThenUnlink)]
+    [Xunit.InlineData(RemovalOverlap.DeleteThenUnlink)]
+    public async Task OverlappingRemovals_AcrossServiceScopes_PreserveAVerifiedSignInMethod(RemovalOverlap overlap)
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var userId = Guid.NewGuid();
+        var user = new User { Id = userId };
+        var linked = new UserEmail
+        {
+            Id = Guid.NewGuid(),
+            UserId = userId,
+            Email = "linked@example.com",
+            IsVerified = true,
+            IsPrimary = true,
+            Provider = "Google",
+            ProviderKey = "linked-key"
+        };
+        var other = new UserEmail
+        {
+            Id = Guid.NewGuid(),
+            UserId = userId,
+            Email = "other@example.com",
+            IsVerified = true,
+            Provider = overlap == RemovalOverlap.UnlinkThenUnlink ? "GitHub" : null,
+            ProviderKey = overlap == RemovalOverlap.UnlinkThenUnlink ? "other-key" : null
+        };
+        var rows = new List<UserEmail> { linked, other };
+        _repository.GetUserEmailByIdAndUserIdAsync(Arg.Any<Guid>(), userId, Arg.Any<CancellationToken>())
+            .Returns(call => rows.SingleOrDefault(row => row.Id == call.ArgAt<Guid>(0)));
+        _repository.GetUserEmailsByUserIdForMutationAsync(userId, Arg.Any<CancellationToken>())
+            .Returns(_ => Task.FromResult<IReadOnlyList<UserEmail>>(rows.ToList()));
+        _repository.RemoveUserEmailAsync(Arg.Any<UserEmail>(), Arg.Any<CancellationToken>()).Returns(call =>
+        {
+            rows.Remove(call.Arg<UserEmail>());
+            return Task.CompletedTask;
+        });
+        _userManager.FindByIdAsync(userId.ToString()).Returns(user);
+        var firstReachedRemoval = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _userManager.RemoveLoginAsync(user, Arg.Any<string>(), Arg.Any<string>()).Returns(async call =>
+        {
+            if (overlap != RemovalOverlap.DeleteThenUnlink
+                && string.Equals(call.ArgAt<string>(2), "linked-key", StringComparison.Ordinal))
+            {
+                firstReachedRemoval.SetResult();
+                await releaseFirst.Task.WaitAsync(ct);
+            }
+            return IdentityResult.Success;
+        });
+        if (overlap == RemovalOverlap.DeleteThenUnlink)
+            _ticketService.GetTicketOrdersAsync(Arg.Any<CancellationToken>()).Returns(async _ =>
+            {
+                firstReachedRemoval.SetResult();
+                await releaseFirst.Task.WaitAsync(ct);
+                return (IReadOnlyList<TicketOrderInfo>)[];
+            });
+
+        var secondScope = new UserEmailService(_repository, _userService, _userManager, _clock,
+            _auditLogService, _serviceProvider, NullLogger<UserEmailService>.Instance);
+        var first = RemoveFirstAsync();
+        await firstReachedRemoval.Task.WaitAsync(ct);
+        var second = RemoveSecondAsync();
+        releaseFirst.SetResult();
+        var results = await Task.WhenAll(first, second);
+
+        results.Should().Equal(true, false);
+        rows.Should().ContainSingle().Which.IsVerified.Should().BeTrue();
+        await _repository.Received(1).RemoveUserEmailAsync(Arg.Any<UserEmail>(), Arg.Any<CancellationToken>());
+
+        async Task<bool> RemoveFirstAsync() => overlap == RemovalOverlap.DeleteThenUnlink
+            ? (await _service.DeleteEmailAsync(userId, other.Id, ct)).Succeeded
+            : (await _service.UnlinkAsync(userId, linked.Id, userId, ct)).Succeeded;
+
+        async Task<bool> RemoveSecondAsync() => overlap == RemovalOverlap.UnlinkThenDelete
+            ? (await secondScope.DeleteEmailAsync(userId, other.Id, ct)).Succeeded
+            : (await secondScope.UnlinkAsync(userId,
+                overlap == RemovalOverlap.UnlinkThenUnlink ? other.Id : linked.Id, userId, ct)).Succeeded;
+    }
+
     private readonly IUserRepository _repository = Substitute.For<IUserRepository>();
     private readonly IAccountMergeService _mergeService = Substitute.For<IAccountMergeService>();
     private readonly IUserManagement _userService = Substitute.For<IUserManagement>();
@@ -329,13 +412,11 @@ public class UserEmailServiceTests
                 CreatedAt = Instant.MinValue,
             },
             userEmails: emails,
-            eventParticipations: [],
             externalLogins: [],
             profile: null,
             contactFields: [],
             profileLanguages: [],
-            volunteerHistory: [],
-            communicationPreferences: []);
+            volunteerHistory: []);
 
     // Stub IUserManagement to expose the given UserEmail rows through the GetAllUserInfosAsync iteration.
     private void StubAllUserInfosFromRows(IReadOnlyList<UserEmail> rows)
@@ -1655,20 +1736,24 @@ public class UserEmailServiceTests
     }
 
     [HumansFact]
-    public async Task AdminMarkVerifiedAsync_RowNotFound_Throws()
+    public async Task AdminMarkVerifiedAsync_RowNotFound_ReturnsRefusal()
     {
         var userId = Guid.NewGuid();
         var rowId = Guid.NewGuid();
         _repository.GetUserEmailByIdAndUserIdAsync(rowId, userId, Arg.Any<CancellationToken>())
             .Returns((UserEmail?)null);
 
-        var act = async () => await _service.AdminMarkVerifiedAsync(userId, rowId, Guid.NewGuid(), Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.AdminMarkVerifiedAsync(userId, rowId, Guid.NewGuid(), Xunit.TestContext.Current.CancellationToken);
 
-        await act.Should().ThrowAsync<System.ComponentModel.DataAnnotations.ValidationException>();
+        result.NoPendingVerification.Should().BeTrue();
+        result.Email.Should().BeEmpty();
+        result.ErrorKey.Should().BeNull();
+        result.MergeRequestCreated.Should().BeFalse();
+        await _repository.DidNotReceive().UpdateUserEmailAsync(Arg.Any<UserEmail>(), Arg.Any<CancellationToken>());
     }
 
     [HumansFact]
-    public async Task AdminMarkVerifiedAsync_AlreadyVerified_Throws()
+    public async Task AdminMarkVerifiedAsync_AlreadyVerified_ReturnsRefusal()
     {
         var userId = Guid.NewGuid();
         var rowId = Guid.NewGuid();
@@ -1682,13 +1767,17 @@ public class UserEmailServiceTests
                 Provider = null,
             });
 
-        var act = async () => await _service.AdminMarkVerifiedAsync(userId, rowId, Guid.NewGuid(), Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.AdminMarkVerifiedAsync(userId, rowId, Guid.NewGuid(), Xunit.TestContext.Current.CancellationToken);
 
-        await act.Should().ThrowAsync<System.ComponentModel.DataAnnotations.ValidationException>();
+        result.NoPendingVerification.Should().BeTrue();
+        result.Email.Should().BeEmpty();
+        result.ErrorKey.Should().BeNull();
+        result.MergeRequestCreated.Should().BeFalse();
+        await _repository.DidNotReceive().UpdateUserEmailAsync(Arg.Any<UserEmail>(), Arg.Any<CancellationToken>());
     }
 
     [HumansFact]
-    public async Task AdminMarkVerifiedAsync_OAuthRow_Throws()
+    public async Task AdminMarkVerifiedAsync_OAuthRow_ReturnsRefusal()
     {
         // Provider != null rows are verified through the OAuth callback,
         // not via this admin path — even an admin shouldn't bypass that.
@@ -1705,9 +1794,13 @@ public class UserEmailServiceTests
                 ProviderKey = "sub-x",
             });
 
-        var act = async () => await _service.AdminMarkVerifiedAsync(userId, rowId, Guid.NewGuid(), Xunit.TestContext.Current.CancellationToken);
+        var result = await _service.AdminMarkVerifiedAsync(userId, rowId, Guid.NewGuid(), Xunit.TestContext.Current.CancellationToken);
 
-        await act.Should().ThrowAsync<System.ComponentModel.DataAnnotations.ValidationException>();
+        result.NoPendingVerification.Should().BeTrue();
+        result.Email.Should().BeEmpty();
+        result.ErrorKey.Should().BeNull();
+        result.MergeRequestCreated.Should().BeFalse();
+        await _repository.DidNotReceive().UpdateUserEmailAsync(Arg.Any<UserEmail>(), Arg.Any<CancellationToken>());
     }
 
     [HumansFact]
@@ -1839,6 +1932,59 @@ public class UserEmailServiceTests
         result.Select(r => r.UserId).Should().BeEquivalentTo([userA, userB]);
     }
 
+    [HumansTheory]
+    [Xunit.InlineData(false, "login@example.org")]
+    [Xunit.InlineData(true, "primary@example.org")]
+    [Xunit.InlineData(false, null)]
+    [Xunit.InlineData(false, "")]
+    [Xunit.InlineData(false, " \t ")]
+    [Xunit.InlineData(true, "")]
+    [Xunit.InlineData(true, " \t ")]
+    public async Task GetNotificationTargetEmailsAsync_UsesCanonicalEmail(bool hasPrimary, string? address)
+    {
+        var id = Guid.NewGuid();
+        var user = new User { Id = id, Email = hasPrimary ? "login@example.org" : address }.ToUserInfo(
+            hasPrimary
+                ? [new UserEmail { UserId = id, Email = address!, IsVerified = true, IsPrimary = true }]
+                : []);
+        _userService.GetUserInfosAsync(
+                Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(
+                new Dictionary<Guid, UserInfo> { [id] = user }));
+
+        var result = await _service.GetNotificationTargetEmailsAsync(
+            [id], Xunit.TestContext.Current.CancellationToken);
+
+        if (string.IsNullOrWhiteSpace(address)) result.Should().BeEmpty();
+        else result.Should().ContainKey(id).WhoseValue.Should().Be(address);
+    }
+
+    [HumansFact]
+    public async Task GetNotificationEmailsByUserIdsAsync_OnlyReturnsRequestedRawVerifiedPrimaries()
+    {
+        var primaryId = Guid.NewGuid();
+        var secondaryId = Guid.NewGuid();
+        var unverifiedId = Guid.NewGuid();
+        var unrelatedId = Guid.NewGuid();
+        _userService.GetAllRawUserInfosAsync(Arg.Any<CancellationToken>())
+            .Returns(new List<UserInfo>
+            {
+                BuildStubUserInfo(primaryId,
+                    [new UserEmail { UserId = primaryId, Email = "primary@example.org", IsVerified = true, IsPrimary = true }]),
+                BuildStubUserInfo(secondaryId,
+                    [new UserEmail { UserId = secondaryId, Email = "secondary@example.org", IsVerified = true }]),
+                BuildStubUserInfo(unverifiedId,
+                    [new UserEmail { UserId = unverifiedId, Email = "unverified@example.org", IsPrimary = true }]),
+                BuildStubUserInfo(unrelatedId,
+                    [new UserEmail { UserId = unrelatedId, Email = "unrelated@example.org", IsVerified = true, IsPrimary = true }]),
+            });
+
+        var result = await _service.GetNotificationEmailsByUserIdsAsync(
+            [primaryId, secondaryId, unverifiedId, Guid.NewGuid()], Xunit.TestContext.Current.CancellationToken);
+
+        result.Should().BeEquivalentTo(new Dictionary<Guid, string> { [primaryId] = "primary@example.org" });
+    }
+
     [HumansFact]
     public async Task GetNotificationTargetEmailsAsync_ForAMergedAwayId_ReturnsTheSurvivorsAddress()
     {
@@ -1852,10 +1998,9 @@ public class UserEmailServiceTests
             .Returns(new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(
                 new Dictionary<Guid, UserInfo>
                 {
-                    [archived] = UserInfoStubHelpers.MakeUserInfo(survivor),
+                    [archived] = BuildStubUserInfo(survivor,
+                        [new UserEmail { UserId = survivor, Email = "survivor@example.org", IsVerified = true, IsPrimary = true }]),
                 }));
-        _repository.GetAllNotificationTargetUserEmailsAsync(Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<Guid, string> { [survivor] = "survivor@example.org" });
 
         var result = await _service.GetNotificationTargetEmailsAsync(
             [archived], Xunit.TestContext.Current.CancellationToken);
@@ -1914,32 +2059,5 @@ public class UserEmailServiceTests
         only.Id.Should().Be(archivedRow.Id);
         only.Email.Should().Be("old@example.com");
         only.UserId.Should().Be(archived);
-    }
-
-    [HumansFact]
-    public async Task GetNobodiesTeamEmailAsync_MergeTombstone_ReturnsNull()
-    {
-        // Raw. Its sole consumer is GDPR erasure, which runs per id down the merge chain.
-        // A merge moves the addresses to the survivor, so a tombstone owns none — resolving
-        // forward would answer with the survivor's Workspace address and get a living human's
-        // mailbox suspended by a purge aimed at an archived row.
-        var archived = Guid.NewGuid();
-        var survivor = Guid.NewGuid();
-        var survivorRow = new UserEmail
-        {
-            Id = Guid.NewGuid(),
-            UserId = survivor,
-            Email = "alice@nobodies.team",
-            IsVerified = true,
-        };
-        _userService.GetRawUserInfoAsync(archived, Arg.Any<CancellationToken>())
-            .Returns(new ValueTask<UserInfo?>(BuildStubUserInfo(archived, [])));
-        _userService.GetUserInfoAsync(archived, Arg.Any<CancellationToken>())
-            .Returns(new ValueTask<UserInfo?>(BuildStubUserInfo(survivor, [survivorRow])));
-
-        var result = await _service.GetNobodiesTeamEmailAsync(
-            archived, Xunit.TestContext.Current.CancellationToken);
-
-        result.Should().BeNull();
     }
 }

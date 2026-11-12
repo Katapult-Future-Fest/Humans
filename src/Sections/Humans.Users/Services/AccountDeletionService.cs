@@ -1,3 +1,4 @@
+using System.Transactions;
 using Humans.Base.Extensions;
 using Humans.Users.Services;
 using Humans.Auth.Contracts;
@@ -61,12 +62,37 @@ internal sealed class AccountDeletionService(
         var effectiveDeletionDate = eligibleAfter is { } holdDate && holdDate > deletionDate
             ? holdDate : deletionDate;
 
-        await userService.SetDeletionPendingAsync(userId, now, deletionDate, eligibleAfter, ct);
+        int endedMemberships;
+        int endedRoles;
+        try
+        {
+            // A partial revocation must not leave an AlreadyPending request that cannot retry.
+            using var scope = new TransactionScope(TransactionScopeOption.Required,
+                new TransactionOptions { IsolationLevel = IsolationLevel.ReadCommitted },
+                TransactionScopeAsyncFlowOption.Enabled);
+            if (!await userService.SetDeletionPendingAsync(userId, now, deletionDate, eligibleAfter, ct))
+                return new DeletionRequestResult(false, "NotFound");
 
-        // Access ends during the grace period.
-        var endedMemberships = await teamService.RevokeAllMembershipsAsync(userId, ct);
+            // Access ends during the grace period.
+            endedMemberships = await teamService.RevokeAllMembershipsAsync(userId, ct);
+            endedRoles = await roleAssignmentService.RevokeAllActiveAsync(userId, ct);
 
-        var endedRoles = await roleAssignmentService.RevokeAllActiveAsync(userId, ct);
+            scope.Complete();
+        }
+        catch
+        {
+            // The decorator may have published the pending state inside the rolled-back transaction.
+            // Refresh after disposal; its failure path evicts the stale entry for a later reload.
+            try
+            {
+                await userInfoRefresher.RefreshAsync(userId, CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Failed to refresh user {UserId} after deletion-request rollback", userId);
+            }
+            throw;
+        }
 
         await auditLogService.LogAsync(
             UsersAuditActions.MembershipsRevokedOnDeletionRequest, nameof(User), userId,
@@ -78,18 +104,30 @@ internal sealed class AccountDeletionService(
             "Revoked {MembershipCount} memberships and {RoleCount} roles immediately",
             userId, deletionDate, eligibleAfter, endedMemberships, endedRoles);
 
-        var notificationEmails = await userEmailService.GetNotificationTargetEmailsAsync([userId], ct);
-        var notificationEmail = notificationEmails.GetValueOrDefault(userId) ?? user.Email;
-        if (notificationEmail is not null)
+        // The request and access revocations are committed; confirmation cannot undo them.
+        try
         {
-            await emailService.SendAsync(emailMessages.AccountDeletionRequested(
-                userId,
-                notificationEmail,
-                user.BurnerName,
-                effectiveDeletionDate,
-                user.PreferredLanguage.IsSupportedCultureCode()
-                    ? user.PreferredLanguage : CultureCatalog.DefaultCultureCode),
-                ct);
+            var notificationEmails = await userEmailService.GetNotificationTargetEmailsAsync([userId], CancellationToken.None);
+            var notificationEmail = notificationEmails.GetValueOrDefault(userId) ?? user.Email;
+            if (!string.IsNullOrWhiteSpace(notificationEmail))
+            {
+                await emailService.SendAsync(emailMessages.AccountDeletionRequested(
+                    userId,
+                    notificationEmail,
+                    user.BurnerName,
+                    effectiveDeletionDate,
+                    user.PreferredLanguage.IsSupportedCultureCode()
+                        ? user.PreferredLanguage : CultureCatalog.DefaultCultureCode),
+                    CancellationToken.None);
+            }
+            else
+            {
+                logger.LogWarning("Skipping account-deletion request confirmation for user {UserId}: no notification email", userId);
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Account deletion requested for user {UserId} but its confirmation email failed", userId);
         }
 
         return new DeletionRequestResult(
@@ -136,9 +174,6 @@ internal sealed class AccountDeletionService(
         // the real name and break IsGdprAnonymized.
         await EraseEverySectionAsync(userId, ct);
 
-        // Contributors run against the inner UserService, so the decorator hasn't seen the collapse.
-        await userInfoRefresher.RefreshAsync(userId, ct);
-
         // Must not name the human: the audit log survives erasure.
         const string description = "Admin-initiated purge: identity collapsed";
         if (actorId is Guid actor)
@@ -171,10 +206,6 @@ internal sealed class AccountDeletionService(
         // mid-cascade failure retries the whole fan-out tomorrow.
         await EraseEverySectionAsync(userId, ct);
 
-        // Contributors write through the inner UserService, so the decorator hasn't seen these
-        // writes and admin search would keep matching the erased human by their real name.
-        await userInfoRefresher.RefreshAsync(userId, ct);
-
         return summary;
     }
 
@@ -185,18 +216,32 @@ internal sealed class AccountDeletionService(
     /// </summary>
     /// <remarks>
     /// Cache invalidation is interleaved, not batched: a contributor that throws mid-chain still
-    /// leaves every earlier id erased and dropped, and a <see cref="PurgeAsync"/> has no daily retry.
+    /// leaves every attempted id refreshed or evicted, and a <see cref="PurgeAsync"/> has no daily retry.
     /// </remarks>
     private async Task EraseEverySectionAsync(Guid userId, CancellationToken ct)
     {
         foreach (var subjectId in await MergeChainAsync(userId, ct))
         {
-            await gdprService.EraseForUserAsync(subjectId, ct);
-
-            // Callers only invalidate the survivor; a stale entry would keep the tombstone's name
-            // searchable after it was erased.
-            if (subjectId != userId)
-                await userInfoRefresher.RefreshAsync(subjectId, ct);
+            var erased = false;
+            try
+            {
+                await gdprService.EraseForUserAsync(subjectId, ct);
+                erased = true;
+            }
+            finally
+            {
+                try
+                {
+                    // Contributors can commit profile erasure before a later step fails. Refresh the
+                    // attempted id too, including the survivor, without the caller's cancellation.
+                    await userInfoRefresher.RefreshAsync(subjectId, CancellationToken.None);
+                }
+                catch (Exception ex) when (!erased)
+                {
+                    // ReplaceAsync evicts on failure; preserve the erasure error that drives the retry.
+                    logger.LogError(ex, "UserInfo refresh failed after incomplete erasure for {UserId}", subjectId);
+                }
+            }
         }
     }
 

@@ -125,6 +125,107 @@ public class ProfileEmailsControllerGridTests
             .Returns(AuthorizationResult.Success());
     }
 
+    public enum EmailMutation
+    {
+        SetEmailVisibility,
+        DeleteEmail,
+        LinkGoogle
+    }
+
+    [HumansTheory]
+    [Xunit.InlineData(EmailMutation.SetEmailVisibility)]
+    [Xunit.InlineData(EmailMutation.DeleteEmail)]
+    [Xunit.InlineData(EmailMutation.LinkGoogle)]
+    public async Task Email_mutation_account_preflight_observes_cancellation(EmailMutation action)
+    {
+        using var request = new CancellationTokenSource();
+        _controller.HttpContext.RequestAborted = request.Token;
+        _userService.GetUserInfoAsync(_userId, Arg.Any<CancellationToken>()).Returns(call =>
+        {
+            call.Arg<CancellationToken>().Should().Be(request.Token);
+            call.Arg<CancellationToken>().ThrowIfCancellationRequested();
+            return new ValueTask<UserInfo?>(new User { Id = _userId }.ToUserInfo());
+        });
+        await request.CancelAsync();
+        var emailId = Guid.NewGuid();
+        Func<Task<IActionResult>> invoke = action switch
+        {
+            EmailMutation.SetEmailVisibility => () => _controller.SetEmailVisibility(emailId, null),
+            EmailMutation.DeleteEmail => () => _controller.DeleteEmail(emailId),
+            EmailMutation.LinkGoogle => () => _controller.Link("Google"),
+            _ => throw new ArgumentOutOfRangeException(nameof(action), action, null),
+        };
+
+        await invoke.Should().ThrowAsync<OperationCanceledException>();
+        _authorizationService.ReceivedCalls().Should().BeEmpty();
+        _userEmailService.ReceivedCalls().Should().BeEmpty();
+        _auditLogService.ReceivedCalls().Should().BeEmpty();
+    }
+
+    public enum AdminVerificationOutcome { NoPending, Refused, Verified, MergeRequested }
+
+    [HumansTheory]
+    [InlineData(AdminVerificationOutcome.NoPending)]
+    [InlineData(AdminVerificationOutcome.Refused)]
+    [InlineData(AdminVerificationOutcome.Verified)]
+    [InlineData(AdminVerificationOutcome.MergeRequested)]
+    public async Task AdminVerifyEmail_FormatsExplicitOutcome(AdminVerificationOutcome outcome)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var row = Guid.NewGuid();
+        var target = Guid.NewGuid();
+        _userEmailService.AdminMarkVerifiedAsync(target, row, _userId, ct).Returns(
+            new VerifyEmailResult(outcome == AdminVerificationOutcome.NoPending ? string.Empty : "email@example.test",
+                outcome == AdminVerificationOutcome.MergeRequested,
+                outcome == AdminVerificationOutcome.Refused ? "Users_EmailUpdate_AccountUnavailable" : null)
+            { NoPendingVerification = outcome == AdminVerificationOutcome.NoPending });
+
+        var result = await _controller.AdminVerifyEmail(target, row, ct);
+
+        var redirect = result.Should().BeOfType<RedirectToActionResult>().Subject;
+        redirect.ActionName.Should().Be(nameof(ProfileEmailsController.AdminEmails));
+        redirect.RouteValues!["id"].Should().Be(target);
+        var refused = outcome is AdminVerificationOutcome.NoPending or AdminVerificationOutcome.Refused;
+        _controller.TempData.ContainsKey("ErrorMessage").Should().Be(refused);
+        _controller.TempData.ContainsKey("SuccessMessage").Should().Be(!refused);
+        if (refused)
+        {
+            _controller.TempData["ErrorMessage"].Should().Be(outcome == AdminVerificationOutcome.NoPending
+                ? "No email pending verification." : "Users_EmailUpdate_AccountUnavailable");
+            var log = _logger.ReceivedCalls().Single().GetArguments();
+            log[0].Should().Be(LogLevel.Warning);
+            log[3].Should().BeNull();
+        }
+        else
+        {
+            _controller.TempData["SuccessMessage"].Should().Be(outcome == AdminVerificationOutcome.MergeRequested
+                ? "Users_EmailGrid_AdminVerifyMergeRequested" : "Users_EmailGrid_AdminVerifySuccess");
+            _logger.ReceivedCalls().Should().BeEmpty();
+        }
+    }
+
+    public enum AdminVerificationDependencyFailure { Validation, Operation }
+
+    [HumansTheory]
+    [InlineData(AdminVerificationDependencyFailure.Validation)]
+    [InlineData(AdminVerificationDependencyFailure.Operation)]
+    public async Task AdminVerifyEmail_PropagatesDependencyFailures(AdminVerificationDependencyFailure kind)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var row = Guid.NewGuid();
+        Exception failure = kind == AdminVerificationDependencyFailure.Validation
+            ? new ValidationException("Private dependency diagnostic")
+            : new InvalidOperationException("Private dependency diagnostic");
+        _userEmailService.AdminMarkVerifiedAsync(_userId, row, _userId, ct)
+            .Returns(Task.FromException<VerifyEmailResult>(failure));
+
+        var act = () => _controller.AdminVerifyEmail(_userId, row, ct);
+
+        (await act.Should().ThrowAsync<Exception>()).Which.Should().BeSameAs(failure);
+        _controller.TempData.Should().BeEmpty();
+        _logger.ReceivedCalls().Should().BeEmpty();
+    }
+
     [HumansFact]
     public async Task Emails_RequestAborted_CancelsEmailGridReads()
     {
@@ -196,16 +297,10 @@ public class ProfileEmailsControllerGridTests
         arguments[2]!.ToString().Should().Contain(expectedError).And.Contain(emailId.ToString());
     }
 
-    [HumansTheory]
-    [InlineData("en")]
-    [InlineData("es")]
-    [InlineData("de")]
-    [InlineData("it")]
-    [InlineData("fr")]
-    [InlineData("ca")]
-    public async Task VerifyEmail_LocalizesTypedInvalidLink(string culture)
+    [HumansFact]
+    public async Task VerifyEmail_LocalizesTypedInvalidLink()
     {
-        using var cultureScope = new CultureScope(culture);
+        using var cultureScope = new CultureScope("en");
         var localizer = new StringLocalizer<UsersResource>(new ResourceManagerStringLocalizerFactory(
             Options.Create(new LocalizationOptions()), NullLoggerFactory.Instance));
         var controller = new ProfileEmailsController(

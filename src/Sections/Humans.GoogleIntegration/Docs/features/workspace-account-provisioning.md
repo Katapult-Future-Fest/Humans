@@ -47,7 +47,7 @@ Nobodies Collective uses Google Workspace for organizational email (@nobodies.te
 - Email sent to the human's personal (recovery) email, NOT the new @nobodies.team address
 - Contains: username, temporary password, link to https://mail.google.com/
 - Mentions that 2FA setup is required on first login
-- Localized in all supported languages (en/es/de/fr/it/ca)
+- Localized in all supported languages (en/es/de/fr/it/ca/nl)
 - Sent through `IEmailService.SendAsync`, which writes the email outbox row
 - When there is no recovery address, or the hand-off to `IEmailService` throws, provisioning still succeeds (the account is created and linked) and the admin sees an info message to reset the password if credentials do not arrive; the in-app `WorkspaceCredentialsReady` notice then tells the person to contact an administrator for credentials
 
@@ -192,6 +192,7 @@ Ambiguous characters (0, O, l, 1, I) are excluded for readability.
 | Action | Required Role |
 |--------|---------------|
 | Provision account | UsersAdmin, Admin |
+| Provision account for a member of a team (from the team's Members page) | Coordinator of that team (or its parent department); TeamsAdmin, Admin for any team |
 | Link existing account | Admin |
 | View `/Google/Accounts` (2FA status, recovery email, etc.) | Admin |
 | Reset password (one-shot delivery) | Admin |
@@ -203,6 +204,7 @@ Ambiguous characters (0, O, l, 1, I) are excluded for readability.
 |-------|--------|--------|
 | `/Users/Admin/{id}` | GET | Human admin page (shows provisioning form) |
 | `/Google/Human/{id}/ProvisionEmail` | POST | Provision and link @nobodies.team account |
+| `/Teams/{slug}/Members/{userId}/ProvisionEmail` | POST | Same, from the team Members page (`TeamAdminController`); the human must be a member of the team |
 | `/Google/Accounts` | GET | List all @nobodies.team accounts with 2FA status, recovery email, link orphans |
 | `/Google/Accounts/ResetPassword` | POST | Reset password — temp password shown once in a modal |
 | `/Google/Accounts/ResetPasswordAndGenerate2Fa` | POST | Reset password + issue one backup verification code — both shown once in the same modal |

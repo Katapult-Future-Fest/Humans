@@ -3,6 +3,7 @@
 @{
     ViewData["Title"] = "Store summary";
     var s = Model.Summary;
+    var productColumns = s.CrossTab.Products.OrderBy(p => p.ProductName, StringComparer.Ordinal).ToList();
 }
 
 <div class="page-head">
@@ -23,12 +24,10 @@
     <div class="card-body p-0">
         @if (s.ByCounterparty.Count == 0)
         {
-            <p class="text-muted m-3 mb-3">No orders for @s.Year.</p>
+            <empty-state class="m-3 mb-3">No orders for @s.Year.</empty-state>
         }
         else
         {
-            Func<OrderSummaryDto, IHtmlContent> counterpartyCell =
-                @<text><a asp-controller="Store" asp-action="Order" asp-route-id="@item.OrderId">@item.CounterpartyName</a></text>;
 
             bool IsTeam(OrderSummaryDto r) =>
                 r.CounterpartyType == OrderCounterpartyType.Team;
@@ -48,7 +47,7 @@
 
             var counterpartyTable = TableModel.For(counterpartyRows)
                 .Column("Type", r => r.CounterpartyType)
-                .Template("Counterparty", counterpartyCell)
+                .Link("Counterparty", r => r.CounterpartyName, r => Url.Action("Order", "Store", new { id = r.OrderId }))
                 .Column("State", r => r.State)
                 .Column("Payment", r => PaymentStatus(r), c => c.SelectFilter())
                 .Column("Total due (€)", r => r.TotalDueEur, c => c.Currency().End())
@@ -74,11 +73,12 @@
     <div class="card-body p-0">
         @if (s.ByItem.Count == 0)
         {
-            <p class="text-muted m-3 mb-3">No lines for @s.Year.</p>
+            <empty-state class="m-3 mb-3">No lines for @s.Year.</empty-state>
         }
         else
         {
-            var itemTable = TableModel.For(s.ByItem)
+            var itemTable = TableModel.For(s.ByItem.OrderByDescending(p => p.TotalQty)
+                    .ThenBy(p => p.ProductName, StringComparer.Ordinal).ToList())
                 .Column("Product", r => r.ProductName)
                 .Column("Total qty", r => r.TotalQty, c => c.Number().End())
                 .Column("Total revenue (€)", r => r.TotalRevenueEur, c => c.Currency().End())
@@ -93,7 +93,7 @@
     <div class="card-body p-0 table-responsive">
         @if (s.CrossTab.Counterparties.Count == 0 || s.CrossTab.Products.Count == 0)
         {
-            <p class="text-muted m-3 mb-3">Nothing to plot for @s.Year.</p>
+            <empty-state class="m-3 mb-3">Nothing to plot for @s.Year.</empty-state>
         }
         else
         {
@@ -102,7 +102,7 @@
                     <tr>
                         <th>Type</th>
                         <th>Counterparty</th>
-                        @foreach (var col in s.CrossTab.Products)
+                        @foreach (var col in productColumns)
                         {
                             <th class="text-end">@col.ProductName</th>
                         }
@@ -114,7 +114,7 @@
                     <tr>
                         <td>@cp.CounterpartyType</td>
                         <td>@cp.CounterpartyName</td>
-                        @foreach (var col in s.CrossTab.Products)
+                        @foreach (var col in productColumns)
                         {
                             var qty = cp.QtyByProduct.TryGetValue(col.ProductId, out var q) ? q : 0;
                             <td class="text-end">@(qty == 0 ? "" : qty.ToString(System.Globalization.CultureInfo.InvariantCulture))</td>
@@ -125,7 +125,7 @@
                 <tfoot>
                     <tr class="fw-semibold">
                         <td colspan="2">Total</td>
-                        @foreach (var col in s.CrossTab.Products)
+                        @foreach (var col in productColumns)
                         {
                             <td class="text-end">@col.TotalQty</td>
                         }

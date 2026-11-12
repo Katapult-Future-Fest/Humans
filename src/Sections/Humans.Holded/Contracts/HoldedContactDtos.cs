@@ -1,15 +1,19 @@
+using NodaTime;
+
 namespace Humans.Holded.Contracts;
 
+/// <summary>The contact mirror and when it last synced successfully (null when never), so a caller can judge its
+/// age against now. A failed sync leaves the last good list.</summary>
+public sealed record HoldedContactMirror(Instant? LastSyncAt, IReadOnlyList<HoldedContactDto> Contacts);
+
 /// <summary>Create payload for a Holded contact (creditor/supplier/client). There is no update payload; see
-/// <see cref="IHoldedClient.CreateContactAsync"/>.</summary>
+/// <see cref="IHoldedWrite.CreateContactAsync"/>.</summary>
 public sealed record HoldedContactInput
 {
     /// <summary>Legal name — the official identity (accountant / SEPA / tax). Never the burner.</summary>
     public required string Name { get; init; }
     /// <summary>Burner/display name. Only ever set alongside a legal <see cref="Name"/>.</summary>
     public string? TradeName { get; init; }
-    /// <summary>The Humans UserId. Not sent: v2's contacts POST has no <c>custom_id</c> (read-only on GET).</summary>
-    public string? CustomId { get; init; }
     /// <summary>Decides the account series Holded mints: <c>creditor</c> 410xxxxx, <c>supplier</c> 400xxxxx,
     /// <c>client</c>/<c>debtor</c> 430xxxxx. Expense-report members are creditors, apart from the 400 proveedores
     /// paid by invoice; Store's factura counterparties are clients.</summary>

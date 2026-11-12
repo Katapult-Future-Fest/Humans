@@ -17,8 +17,7 @@ namespace Humans.Grants.Tests.Infrastructure;
 /// <summary>
 /// Base class for the section's tests: a per-test in-memory <see cref="GrantsDbContext"/> and
 /// factory, a deterministic clock, substitutes for every cross-section seam the service talks
-/// to, and seeders for programs and grants. Member names follow the other section harnesses
-/// (memory/code/service-test-harness.md): <c>Db</c>, <c>DbFactory</c>, <c>Clock</c>, <c>SeedUser</c>.
+/// to, and seeders for programs and grants.
 /// </summary>
 public abstract class GrantsTestHarness : IDisposable
 {
@@ -45,17 +44,6 @@ public abstract class GrantsTestHarness : IDisposable
         Users.GetUserInfoAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>())
             .Returns(call => new ValueTask<UserInfo?>(_users.GetValueOrDefault(call.Arg<Guid>())));
 
-        UserEmails = Substitute.For<IUserEmailService>();
-        UserEmails.GetNotificationTargetEmailsAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(call =>
-            {
-                var ids = (IReadOnlyCollection<Guid>)call.Args()[0]!;
-                IReadOnlyDictionary<Guid, string> dict = ids.Distinct()
-                    .Where(_users.ContainsKey)
-                    .ToDictionary(id => id, id => $"{id}@example.org");
-                return Task.FromResult(dict);
-            });
-
         Notifications = Substitute.For<INotificationEmitter>();
         Email = Substitute.For<IEmailService>();
         EmailFactory = TestGrantsEmails.Create();
@@ -69,7 +57,6 @@ public abstract class GrantsTestHarness : IDisposable
     private protected TestDbContextFactory<GrantsDbContext> DbFactory { get; }
     private protected FakeClock Clock { get; }
     private protected IUserService Users { get; }
-    private protected IUserEmailService UserEmails { get; }
     private protected INotificationEmitter Notifications { get; }
     private protected IEmailService Email { get; }
     private protected GrantsEmails EmailFactory { get; }
@@ -81,7 +68,7 @@ public abstract class GrantsTestHarness : IDisposable
 
     /// <summary>The service over the real repository and the substitutes above.</summary>
     private protected GrantService NewService() => new(
-        new GrantRepository(DbFactory), Users, UserEmails, Notifications, Email, EmailFactory, AuditLog, Settings, Clock, Logger);
+        new GrantRepository(DbFactory), Users, Notifications, Email, EmailFactory, AuditLog, Settings, Clock, Logger);
 
     /// <summary>A fresh context over the same store — what a test reads back through.</summary>
     private protected GrantsDbContext OpenContext() => DbFactory.CreateDbContext();
@@ -96,9 +83,9 @@ public abstract class GrantsTestHarness : IDisposable
         _users[userId] = new UserInfo(
             userId, burnerName, false, language, null, Instant.FromUtc(2026, 1, 1, 0, 0),
             null, null, null, null, null, null,
-            null, null, null, [], [], [],
-            UserFixtures.Profile(burnerName: burnerName), [])
-        { MergedUserIds = mergedIds ?? [] };
+            null, null, null, [], [],
+            UserFixtures.Profile(burnerName: burnerName))
+        { IdentityEmailColumn = $"{userId}@example.org", MergedUserIds = mergedIds ?? [] };
         return userId;
     }
 
@@ -123,6 +110,7 @@ public abstract class GrantsTestHarness : IDisposable
             Name = name,
             Entitles = "a ticket at the build-crew price",
             Year = 2027,
+            EventSettingsId = Event2027.Id,
             IssuedBy = issuedBy,
             SourceKey = issuedBy == GrantIssuer.Source ? sourceKey ?? "low-income" : null,
             GrantsExpireOn = expiresOn,

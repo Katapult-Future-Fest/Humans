@@ -45,7 +45,7 @@ internal sealed class ICalFeedService(
             items.AddRange(contributed);
         }
 
-        return items.OrderBy(i => i.Start).ToList();
+        return items;
     }
 
     public async Task<bool> HasFeedAsync(Guid userId, CancellationToken ct = default) =>
@@ -72,20 +72,35 @@ internal sealed class ICalFeedService(
         var calendar = new Ical.Net.Calendar { ProductId = "-//Nobodies Collective//Humans//EN" };
         calendar.AddProperty("X-WR-CALNAME", "Nobodies");
 
-        foreach (var item in items)
+        var zonesAdded = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var item in items.OrderBy(i => i.Start))
         {
-            calendar.Events.Add(new CalendarEvent
+            var ev = new CalendarEvent
             {
                 Uid = item.Uid,
                 Summary = item.Summary,
-                Description = item.Description,
-                Location = item.Location,
+                // Google and Outlook ignore URL and don't link LOCATION, but every client links a URL in DESCRIPTION.
+                Description = item.LocationUrl is null
+                    ? item.Description
+                    : string.IsNullOrWhiteSpace(item.Description) ? item.LocationUrl : $"{item.LocationUrl}\n\n{item.Description}",
+                Location = string.IsNullOrWhiteSpace(item.Location) ? item.LocationUrl : item.Location,
                 // ToDateTimeUtc keeps Kind=Utc so DTSTART gets its Z suffix (Ical.Net version-sensitive; a test guards it).
                 DtStart = new CalDateTime(item.Start.ToDateTimeUtc()),
                 DtEnd = new CalDateTime(item.End.ToDateTimeUtc()),
                 Categories = [item.Source],
                 Url = item.Url is null ? null : new Uri(BuildAbsoluteUrl(item.Url)),
-            });
+            };
+            // A rule repeats in local time, so DTSTART carries the zone; a UTC start would drift an hour across DST.
+            if (item.RecurrenceRule is { } rule && CalendarEventForm.TryResolveZone(item.RecurrenceTimezone) is { } zone)
+            {
+                ev.DtStart = new CalDateTime(item.Start.InZone(zone).LocalDateTime.ToDateTimeUnspecified(), zone.Id, hasTime: true);
+                ev.DtEnd = new CalDateTime(item.End.InZone(zone).LocalDateTime.ToDateTimeUnspecified(), zone.Id, hasTime: true);
+                ev.RecurrenceRule = new RecurrencePattern(rule);
+                if (zonesAdded.Add(zone.Id)) calendar.AddTimeZone(zone.Id);
+            }
+            // Google Calendar draws its Join button from this property; other clients ignore it.
+            if (item.LocationUrl is not null) ev.AddProperty("X-GOOGLE-CONFERENCE", item.LocationUrl);
+            calendar.Events.Add(ev);
         }
 
         return new CalendarSerializer().SerializeToString(calendar);

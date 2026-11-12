@@ -14,7 +14,7 @@
 
 # Issues
 
-Issues is how you tell us something is wrong, ask for something new, or ask a question. It replaced Feedback: everything filed from here on lives here.
+Issues is how you tell us something is wrong, ask for something new, or ask a question.
 
 ## What this section is for
 
@@ -67,7 +67,7 @@ If you hold a role that owns an area, that area's queue is yours. You see it at 
 | Tickets | Tickets Admin |
 | Camps | Camps Admin |
 | Teams | Teams Admin |
-| Shifts | No-Info Admin |
+| Shifts | Shifts NoInfo |
 | Onboarding | Consent Coordinator, Shifts Admin, Users Admin |
 | Profiles | Users Admin |
 | Budget | Finance Admin |
@@ -103,6 +103,5 @@ A comment posted through the API counts the same as one in the browser: if the k
 
 ## Related sections
 
-- [Feedback](Feedback.md) — the retired predecessor; its archive is still there for admins
 - [The in-app AI helper](AiHelper.md) — try it first for a question; it can file an issue for you
 - [Admin](Admin.md) — roles are assigned on the admin role pages; API keys are allocated at `/Backdoor`

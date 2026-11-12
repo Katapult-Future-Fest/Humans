@@ -29,31 +29,29 @@
 
 @if (!Model.Rows.Any())
 {
-    <p class="text-muted">@Localizer["Agent_HistoryEmpty"]</p>
+    <empty-state>@Localizer["Agent_HistoryEmpty"]</empty-state>
 }
 else
 {
-    Func<AgentConversationRow, IHtmlContent> humanCell =
-        @<text><vc:human user-id="@item.Conversation.UserId" link="Admin" /></text>;
-    Func<AgentConversationRow, IHtmlContent> startedCell =
-        @<text><span class="text-nowrap">@item.Conversation.StartedAt.ToInvariantTimestamp()</span></text>;
-    Func<AgentConversationRow, IHtmlContent> lastMessageCell =
-        @<text><span class="text-nowrap">@item.Conversation.LastMessageAt.ToInvariantTimestamp()</span></text>;
+    Func<AgentConversationListSnapshot, IHtmlContent> startedCell =
+        @<text><span class="text-nowrap">@item.StartedAt.ToInvariantTimestamp()</span></text>;
+    Func<AgentConversationListSnapshot, IHtmlContent> lastMessageCell =
+        @<text><span class="text-nowrap">@item.LastMessageAt.ToInvariantTimestamp()</span></text>;
     // Non-admins get the user-facing transcript; admins keep the token/tool-call diagnostic view.
-    Func<AgentConversationRow, IHtmlContent> viewCell = Model.IsAdminView
-        ? @<text><a asp-action="ConversationDetail" asp-route-id="@item.Conversation.Id">View</a></text>
-        : @<text><a asp-action="Conversation" asp-route-id="@item.Conversation.Id">@SharedLocalizer["Common_View"]</a></text>;
+    Func<AgentConversationListSnapshot, IHtmlContent> viewCell = Model.IsAdminView
+        ? @<text><a asp-action="ConversationDetail" asp-route-id="@item.Id">View</a></text>
+        : @<text><a asp-action="Conversation" asp-route-id="@item.Id">@SharedLocalizer["Common_View"]</a></text>;
     var b = TableModel.For(Model.Rows);
     if (Model.IsAdminView)
     {
-        b = b.Template("Human", humanCell);
+        b = b.Human("Human", r => r.UserId, HumanLink.Admin);
     }
     b = b.Template(Localizer["Agent_HistoryStarted"].Value, startedCell);
     if (Model.IsAdminView)
     {
-        b = b.Column("Locale", r => r.Conversation.Locale);
+        b = b.Column("Locale", r => r.Locale);
     }
-    var table = b.Column(Localizer["Agent_HistoryMessages"].Value, r => r.Conversation.MessageCount, c => c.End())
+    var table = b.Column(Localizer["Agent_HistoryMessages"].Value, r => r.MessageCount, c => c.End())
         .Template(Localizer["Agent_HistoryLastMessage"].Value, lastMessageCell)
         .Template("", viewCell, c => c.NoSort())
         .Build();

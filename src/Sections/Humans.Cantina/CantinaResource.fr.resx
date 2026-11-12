@@ -85,10 +85,11 @@
   <data name="Cantina_Dietary_Intolerance_Lactose" xml:space="preserve"><value>Lactose</value></data>
   <data name="Cantina_Dietary_AllergyOther_Required" xml:space="preserve"><value>Veuillez décrire votre autre allergie.</value></data>
   <data name="Cantina_Dietary_IntoleranceOther_Required" xml:space="preserve"><value>Veuillez décrire votre autre intolérance.</value></data>
-  <data name="Cantina_Dietary_BreadcrumbNavigation" xml:space="preserve"><value>Fil d’Ariane</value></data>
   <data name="Cantina_Dietary_PageTitle" xml:space="preserve"><value>Informations alimentaires</value></data>
   <data name="Cantina_Dietary_Saved" xml:space="preserve"><value>Vos informations alimentaires ont été enregistrées.</value></data>
   <data name="Cantina_Dietary_SaveFailed" xml:space="preserve"><value>Impossible d’enregistrer les informations alimentaires.</value></data>
+  <data name="Cantina_Dietary_PreferenceTooLong" xml:space="preserve"><value>La préférence alimentaire doit comporter au maximum 200 caractères.</value></data>
+  <data name="Cantina_Dietary_OtherTextTooLong" xml:space="preserve"><value>Les précisions sur les autres allergies ou intolérances doivent comporter au maximum 500 caractères.</value></data>
   <data name="Cantina_Dietary_LoadFailed" xml:space="preserve"><value>Impossible de charger les informations alimentaires.</value></data>
   <data name="Cantina_Dietary_OptionalHint" xml:space="preserve"><value>Facultatif. Cela aide la cantine à prévoir les repas des longs créneaux et n'a jamais d'effet sur vos inscriptions aux créneaux.</value></data>
   <data name="Cantina_Dietary_DeclineButton" xml:space="preserve"><value>Je préfère ne pas répondre</value></data>
@@ -97,7 +98,4 @@
   <data name="Cantina_Roster_RevealHealth" xml:space="preserve"><value>Afficher les allergies et intolérances</value></data>
   <data name="Cantina_Roster_HealthHidden" xml:space="preserve"><value>Les détails des allergies et intolérances sont masqués. Les afficher est enregistré dans le journal d'audit.</value></data>
   <data name="Cantina_Roster_RevealHealthNote" xml:space="preserve"><value>Les afficher est enregistré dans le journal d'audit.</value></data>
-  <data name="Cantina_Dietary_RevealsTitle" xml:space="preserve"><value>Qui a consulté ces informations</value></data>
-  <data name="Cantina_Dietary_RevealsEmpty" xml:space="preserve"><value>Personne n'a consulté tes réponses sur les allergies et intolérances.</value></data>
-  <data name="Cantina_Dietary_RevealedBy" xml:space="preserve"><value>Consulté par</value></data>
 </root>

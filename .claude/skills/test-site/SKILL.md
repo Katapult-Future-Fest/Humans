@@ -71,8 +71,8 @@ Run suites matching `$ARGUMENTS` (default: all). Report PASS/FAIL after each ste
 1. `/Teams` → cards with team names and member counts
 2. Click any non-system team → name, description, member list with roles (Lead/Member), Google resources section
 3. `/Teams/My` → user's memberships
-4. `/Teams/Map` → loads (OK if "No API key" — just no crash)
-5. `/Teams/Birthdays` → birthday calendar for current month
+4. `/Users/Map` → loads (OK if "No API key" — just no crash)
+5. `/Users/Birthdays` → birthday calendar for current month
 
 ---
 
@@ -102,7 +102,7 @@ Requires Admin or Board role.
 
 ### i18n
 
-For each language (en, es, fr, de, it): switch via nav/footer selector; check `/Profile`, `/Consent`, `/Teams` labels are translated (no raw English keys like `Profile_FieldName`). Switch back to user's preferred language when done.
+For each language (en, es, fr, de, it, ca, nl): switch via nav/footer selector; check `/Profile`, `/Consent`, `/Teams` labels are translated (no raw English keys like `Profile_FieldName`). Switch back to user's preferred language when done.
 
 ---
 

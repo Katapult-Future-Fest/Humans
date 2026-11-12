@@ -139,11 +139,9 @@ internal sealed partial class UserRepository
             }
             else
             {
-                // Clear IsPrimary and IsGoogle so the target's selections stand; the frozen IsGoogle
-                // designation is what the google.workspace-identities fallback reads.
+                // The survivor keeps its notification target.
                 ctx.Entry(src).Property(nameof(UserEmail.UserId)).CurrentValue = targetUserId;
                 src.IsPrimary = false;
-                src.IsGoogle = false;
                 src.UpdatedAt = updatedAt;
             }
         }
@@ -197,22 +195,6 @@ internal sealed partial class UserRepository
                 aliases.Add(row);
         }
         return [.. exact, .. aliases];
-    }
-
-    public async Task<Dictionary<Guid, string>> GetAllNotificationTargetUserEmailsAsync(
-        CancellationToken ct = default)
-    {
-        await using var ctx = await _factory.CreateDbContextAsync(ct);
-        return await ctx.UserEmails
-            .AsNoTracking()
-            .Where(e => e.IsVerified && e.IsPrimary)
-            .GroupBy(e => e.UserId)
-            .Select(g => new
-            {
-                UserId = g.Key,
-                Email = g.Select(e => e.Email).First()
-            })
-            .ToDictionaryAsync(x => x.UserId, x => x.Email, ct);
     }
 
     public async Task<IReadOnlyList<Guid>> GetUserIdsByUserEmailPrefixAndSuffixAsync(

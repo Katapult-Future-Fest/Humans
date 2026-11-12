@@ -1,3 +1,4 @@
+using Humans.Calendar.Contracts;
 using Humans.Governance.Contracts;
 using System.ComponentModel.DataAnnotations;
 using System.Globalization;
@@ -10,7 +11,7 @@ using NodaTime;
 
 namespace Humans.Workgroups.Models;
 
-/// <summary>Badges aren't baked in: the views ask <see cref="WorkgroupRhythm"/>, so page and job can't disagree.</summary>
+/// <summary>Badges aren't baked in: the views ask <see cref="WorkgroupInfo"/>, so page and job can't disagree.</summary>
 internal sealed class RegisterViewModel
 {
     public required Instant Now { get; init; }
@@ -21,19 +22,15 @@ internal sealed class RegisterViewModel
 
     public required IReadOnlyList<WorkgroupInfo> Archive { get; init; }
 
-    public required IReadOnlyDictionary<Guid, UserInfo> People { get; init; }
-
     public required Guid CurrentUserId { get; init; }
 
     public static RegisterViewModel Build(
         IReadOnlyList<WorkgroupInfo> register,
-        IReadOnlyDictionary<Guid, UserInfo> people,
         Guid currentUserId,
         Instant now) => new()
         {
             Now = now,
             CurrentUserId = currentUserId,
-            People = people,
             Active = register
                 .Where(w => w.Status == WorkgroupStatus.Active)
                 .OrderBy(w => w.Name, StringComparer.CurrentCultureIgnoreCase)
@@ -52,21 +49,22 @@ internal sealed class RegisterViewModel
 
 internal sealed class WorkgroupBudgetFormViewModel : IValidatableObject
 {
+    [BindRequired]
     public bool HasBudget { get; set; }
 
     /// <summary>Parsed invariantly by <see cref="ParsedAmount"/>, not model-bound as a decimal: the number input always
     /// posts "12.34", which a comma-decimal request culture would read as 1234.</summary>
     public string? Amount { get; set; }
 
-    /// <summary>"create" (default) or "link".</summary>
-    public string AccountMode { get; set; } = "create";
+    /// <summary>"create" or "link"; required only when a budget is enabled.</summary>
+    public string? AccountMode { get; set; }
 
     public int? ExistingAccountNum { get; set; }
 
     private bool IsLink => string.Equals(AccountMode, "link", StringComparison.Ordinal);
 
     public decimal? ParsedAmount =>
-        decimal.TryParse(Amount, NumberStyles.Number, CultureInfo.InvariantCulture, out var amount) ? amount : null;
+        decimal.TryParse(Amount, NumberStyles.Number & ~NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out var amount) ? amount : null;
 
     public WorkgroupBudgetSave ToSave() => new(
         HasBudget ? ParsedAmount : null,
@@ -77,6 +75,8 @@ internal sealed class WorkgroupBudgetFormViewModel : IValidatableObject
     public IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
     {
         if (!HasBudget) yield break;
+        if (AccountMode is not ("create" or "link"))
+            yield return new ValidationResult("Choose whether to create or link the Holded account.", [nameof(AccountMode)]);
         if (string.IsNullOrWhiteSpace(Amount))
             yield return new ValidationResult("Enter the budget amount.", [nameof(Amount)]);
         else if (ParsedAmount is not (>= 0m and <= 99_999_999m))
@@ -120,7 +120,13 @@ internal sealed class WorkgroupPageViewModel
     public required bool CanSeeBudget { get; init; }
 
     /// <summary>Empty unless the viewer can administer.</summary>
-    public IReadOnlyList<HoldedExpenseAccountDto> ExpenseAccounts { get; init; } = [];
+    public IReadOnlyList<HoldedChartAccountInfo> ExpenseAccounts { get; init; } = [];
+
+    /// <summary>Dates a one-off meeting falls on; a series uses the zone it repeats in.</summary>
+    public DateTimeZone OrganisationZone { get; init; } = DateTimeZone.Utc;
+
+    public LocalDate MeetingDate(WorkgroupMeetingInfo occurrence) =>
+        occurrence.StartUtc.InZone(CalendarEventForm.TryResolveZone(occurrence.RecurrenceTimezone) ?? OrganisationZone).Date;
 
     public string DisplayName(Guid? userId) =>
         userId is { } id && People.TryGetValue(id, out var info) ? info.BurnerName : "—";
@@ -145,8 +151,10 @@ internal sealed class WorkgroupFormViewModel
     [StringLength(500, ErrorMessage = "Validation_MaxLength")]
     public string Deliverable { get; set; } = string.Empty;
 
+    [BindRequired]
     public WorkgroupDeliverableKind DeliverableKind { get; set; }
 
+    [BindRequired]
     public WorkgroupAudience Audience { get; set; }
 
     public LocalDate? TargetDate { get; set; }
@@ -154,6 +162,7 @@ internal sealed class WorkgroupFormViewModel
     [StringLength(500, ErrorMessage = "Validation_MaxLength")]
     public string? DiscordChannelUrl { get; set; }
 
+    [BindRequired]
     public bool IsSensitive { get; set; }
 
     public Guid? SecondCoordinatorUserId { get; set; }
@@ -180,7 +189,8 @@ internal sealed class WorkgroupFormViewModel
         Name, Purpose, Deliverable, DeliverableKind, Audience, TargetDate, DiscordChannelUrl, IsSensitive);
 }
 
-internal sealed class MeetingFormViewModel
+/// <summary>The shared calendar form's fields plus the meeting's own Public flag. Notes after it are log entries.</summary>
+internal sealed class MeetingFormViewModel : ICalendarEventForm
 {
     public Guid? Id { get; init; }
 
@@ -190,34 +200,68 @@ internal sealed class MeetingFormViewModel
     [StringLength(200, ErrorMessage = "Validation_MaxLength")]
     public string Title { get; set; } = string.Empty;
 
-    public Instant StartUtc { get; set; }
+    [StringLength(4000, ErrorMessage = "Validation_MaxLength")]
+    public string? Description { get; set; }
 
-    public Instant EndUtc { get; set; }
+    public LocalDate? StartDate { get; set; }
+
+    public LocalTime? StartTime { get; set; }
+
+    public LocalDate? EndDate { get; set; }
+
+    public LocalTime? EndTime { get; set; }
+
+    public string TimeZoneId { get; set; } = string.Empty;
 
     [StringLength(200, ErrorMessage = "Validation_MaxLength")]
     public string? Location { get; set; }
 
     public string? LocationUrl { get; set; }
 
+    [BindRequired]
     public bool IsPublic { get; set; }
 
-    public string? Minutes { get; set; }
+    // Meetings are always timed.
+    public bool IsAllDay { get; set; }
 
-    public static MeetingFormViewModel FromMeeting(string slug, WorkgroupMeetingInfo m) => new()
+    [BindRequired]
+    public bool IsRecurring { get; set; }
+
+    public string? RecurrenceRule { get; set; }
+
+    public bool SupportsAllDay => false;
+
+    public bool SupportsRecurrence => true;
+
+    public static MeetingFormViewModel New(string slug, Instant start, DateTimeZone zone)
     {
-        Id = m.Id,
-        Slug = slug,
-        Title = m.Title,
-        StartUtc = m.StartUtc,
-        EndUtc = m.EndUtc,
-        Location = m.Location,
-        LocationUrl = m.LocationUrl,
-        IsPublic = m.IsPublic,
-        Minutes = m.Minutes
-    };
+        var form = new MeetingFormViewModel { Slug = slug };
+        CalendarEventForm.SetTimed(form, start, start + Duration.FromHours(1), zone);
+        return form;
+    }
 
-    public WorkgroupMeetingSave ToSave() =>
-        new(Title, StartUtc, EndUtc, Location, LocationUrl, IsPublic, Minutes);
+    public static MeetingFormViewModel FromMeeting(string slug, WorkgroupMeetingInfo m, DateTimeZone zone)
+    {
+        var form = new MeetingFormViewModel
+        {
+            Id = m.Id,
+            Slug = slug,
+            Title = m.Title,
+            Description = m.Description,
+            Location = m.Location,
+            LocationUrl = m.LocationUrl,
+            IsPublic = m.IsPublic,
+            IsRecurring = m.RecurrenceRule is not null,
+            RecurrenceRule = m.RecurrenceRule
+        };
+        // A series is shown in the zone it repeats in, so its wall-clock time reads as entered.
+        CalendarEventForm.SetTimed(form, m.StartUtc, m.EndUtc, CalendarEventForm.TryResolveZone(m.RecurrenceTimezone) ?? zone);
+        return form;
+    }
+
+    public WorkgroupMeetingSave ToSave(CalendarEventTimes times) =>
+        new(Title, times.Start!.Value, times.End!.Value, Location, LocationUrl, IsPublic, Description,
+            times.RecurrenceRule, times.RecurrenceTimezone);
 }
 
 internal sealed class LogEntryFormViewModel
@@ -226,9 +270,14 @@ internal sealed class LogEntryFormViewModel
 
     public required string Slug { get; init; }
 
-    /// <summary>Update, Disclosure or Note.</summary>
+    /// <summary>Update, Disclosure, Note or MeetingNotes.</summary>
+    [BindRequired]
     public WorkgroupLogKind Kind { get; set; } = WorkgroupLogKind.Update;
 
+    /// <summary>The meeting whose occurrence on <see cref="OccurredOn"/> these notes are about.</summary>
+    public Guid? MeetingId { get; set; }
+
+    [BindRequired]
     public LocalDate OccurredOn { get; set; }
 
     [StringLength(200, ErrorMessage = "Validation_MaxLength")]
@@ -244,10 +293,20 @@ internal sealed class LogEntryFormViewModel
         Kind = e.Kind,
         OccurredOn = e.OccurredOn,
         Title = e.Title,
-        Body = e.Body ?? string.Empty
+        Body = e.Body ?? string.Empty,
+        MeetingId = e.MeetingId
     };
 
-    public WorkgroupLogEntrySave ToSave() => new(Kind, OccurredOn, Title, Body);
+    public static LogEntryFormViewModel ForMeetingNotes(string slug, WorkgroupMeetingInfo meeting, LocalDate occurredOn) => new()
+    {
+        Slug = slug,
+        Kind = WorkgroupLogKind.MeetingNotes,
+        OccurredOn = occurredOn,
+        Title = meeting.Title,
+        MeetingId = meeting.Id
+    };
+
+    public WorkgroupLogEntrySave ToSave() => new(Kind, OccurredOn, Title, Body, MeetingId);
 }
 
 internal sealed class DocumentFormViewModel
@@ -260,6 +319,7 @@ internal sealed class DocumentFormViewModel
     [StringLength(200, ErrorMessage = "Validation_MaxLength")]
     public string Title { get; set; } = string.Empty;
 
+    [BindRequired]
     public WorkgroupDocumentKind Kind { get; set; }
 
     /// <summary>Markdown, sanitized on render.</summary>
@@ -287,8 +347,6 @@ internal sealed class DocumentPageViewModel
 
     public required Guid CurrentUserId { get; init; }
 
-    public required IReadOnlyDictionary<Guid, UserInfo> People { get; init; }
-
     public required bool IsMember { get; init; }
 
     public required bool CanAdminister { get; init; }
@@ -299,8 +357,6 @@ internal sealed class DocumentPageViewModel
 
     public bool CanSeeHidden => IsMember || CanAdminister;
 
-    public string DisplayName(Guid? userId) =>
-        userId is { } id && People.TryGetValue(id, out var info) ? info.BurnerName : "—";
 }
 
 internal sealed class AdminQueueViewModel
@@ -308,8 +364,6 @@ internal sealed class AdminQueueViewModel
     public required Instant Now { get; init; }
 
     public required IReadOnlyList<WorkgroupInfo> Register { get; init; }
-
-    public required IReadOnlyDictionary<Guid, UserInfo> People { get; init; }
 
     public required string? RootDriveFolderId { get; init; }
 
@@ -326,8 +380,6 @@ internal sealed class AdminQueueViewModel
             .SelectMany(w => w.AwaitingDisposition().Select(d => (Workgroup: w, Document: d)))
             .OrderBy(x => x.Document.DeliveredAt);
 
-    public string DisplayName(Guid? userId) =>
-        userId is { } id && People.TryGetValue(id, out var info) ? info.BurnerName : "—";
 }
 
 internal sealed class RegisterExistingViewModel
@@ -341,10 +393,11 @@ internal sealed class RegisterExistingViewModel
     [BindRequired]
     public LocalDate RegisteredOn { get; set; }
 
+    [BindRequired]
     public WorkgroupBudgetFormViewModel Budget { get; set; } = new();
 
     [BindNever]
-    public IReadOnlyList<HoldedExpenseAccountDto> ExpenseAccounts { get; set; } = [];
+    public IReadOnlyList<HoldedChartAccountInfo> ExpenseAccounts { get; set; } = [];
 }
 
 internal sealed class WorkgroupsSettingsViewModel

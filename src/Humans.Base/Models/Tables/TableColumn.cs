@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Encodings.Web;
 using Humans.Base.Extensions;
+using Humans.Base.ViewComponents;
 using Microsoft.AspNetCore.Html;
 using NodaTime;
 
@@ -22,6 +23,7 @@ public sealed class TableColumnOptions
     internal IReadOnlyList<string> FilterOptionsValue { get; private set; } = [];
     internal string? CellCssValue { get; private set; }
     internal string? HeaderCssValue { get; private set; }
+    internal bool CodeValue { get; private set; }
 
     /// <summary>
     /// Server mode: make this column sortable under the given sortBy key.
@@ -44,6 +46,9 @@ public sealed class TableColumnOptions
     public TableColumnOptions Number() { FormatOverride = CellFormat.Number; return this; }
     public TableColumnOptions EnumBadge() { FormatOverride = CellFormat.EnumBadge; return this; }
     public TableColumnOptions BoolIcon() { FormatOverride = CellFormat.BoolIcon; return this; }
+
+    /// <summary>Wraps the formatted text in <c>code</c> (ids, slugs, keys).</summary>
+    public TableColumnOptions Code() { CodeValue = true; return this; }
 
     /// <summary>Contains-match filter. Server mode requires paramName + current value.</summary>
     public TableColumnOptions TextFilter(string? paramName = null, string? value = null)
@@ -91,7 +96,11 @@ public sealed class TableColumn<TRow>(
     CellFormat format,
     Func<TRow, object?>? value,
     Func<TRow, IHtmlContent>? template,
-    TableColumnOptions options) : ITableColumn
+    TableColumnOptions options,
+    Func<TRow, string?>? href = null,
+    Func<TRow, Guid?>? userId = null,
+    HumanLayout humanLayout = HumanLayout.Text,
+    HumanLink humanLink = HumanLink.Public) : ITableColumn
     where TRow : class
 {
     private static readonly IHtmlContent NullContent =
@@ -108,7 +117,11 @@ public sealed class TableColumn<TRow>(
     public string? FilterParamName => options.FilterParamNameValue;
     public string? FilterValue => options.FilterValueValue;
     public IReadOnlyList<string> FilterOptions => options.FilterOptionsValue;
-    public string? CellCssClass => options.CellCssValue;
+    // Dates and amounts are one token each: never let one wrap mid-value in a narrow column.
+    public string? CellCssClass => Format is CellFormat.Date or CellFormat.DateTime
+        or CellFormat.Currency or CellFormat.Number
+        ? string.IsNullOrEmpty(options.CellCssValue) ? "text-nowrap" : $"{options.CellCssValue} text-nowrap"
+        : options.CellCssValue;
     public string? HeaderCssClass => options.HeaderCssValue;
 
     public string SortType => Format is CellFormat.Date or CellFormat.DateTime
@@ -120,13 +133,16 @@ public sealed class TableColumn<TRow>(
         if (Format == CellFormat.Template)
             return template!(typed);
 
+        if (Format == CellFormat.Human)
+            return NullContent;
+
         var raw = value!(typed);
         if (raw is null)
             return NullContent;
 
-        return Format switch
+        var content = Format switch
         {
-            CellFormat.Date => Encoded(((Instant)raw).ToDate()),
+            CellFormat.Date => Encoded(raw is LocalDate date ? date.ToDate() : ((Instant)raw).ToDate()),
             CellFormat.DateTime => Encoded(((Instant)raw).ToDateTime()),
             CellFormat.Currency => Encoded(ToDecimal(raw).ToString("N2", CultureInfo.CurrentUICulture)),
             CellFormat.Number => Encoded(ToDecimal(raw).ToString("#,##0.##", CultureInfo.CurrentUICulture)),
@@ -134,22 +150,38 @@ public sealed class TableColumn<TRow>(
             CellFormat.BoolIcon => (bool)raw ? CheckContent : NullContent,
             _ => Encoded(raw.ToString() ?? string.Empty),
         };
+        if (options.CodeValue)
+            content = new HtmlContentBuilder().AppendHtml("<code>").AppendHtml(content).AppendHtml("</code>");
+        return href?.Invoke(typed) is { } url
+            ? new HtmlContentBuilder()
+                .AppendHtml($"""<a href="{HtmlEncoder.Default.Encode(url)}">""").AppendHtml(content).AppendHtml("</a>")
+            : content;
     }
+
+    public HumanCell? Human(object row) =>
+        Format == CellFormat.Human && userId!((TRow)row) is { } id && id != Guid.Empty
+            ? new HumanCell(id, humanLayout, humanLink)
+            : null;
 
     public string? SortValue(object row)
     {
-        if (value is null || !string.Equals(SortType, "number", StringComparison.Ordinal))
+        var isTemplate = Format == CellFormat.Template;
+        if (value is null || (!isTemplate && !string.Equals(SortType, "number", StringComparison.Ordinal)))
             return null;
 
         var raw = value((TRow)row);
         if (raw is null)
             return string.Empty;
 
-        return Format switch
+        return raw switch
         {
-            CellFormat.Date or CellFormat.DateTime =>
-                ((Instant)raw).ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture),
-            _ => ToDecimal(raw).ToString(CultureInfo.InvariantCulture),
+            LocalDate date => date.AtMidnight().InUtc().ToInstant().ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture),
+            Instant instant => instant.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture),
+            DateTime dateTime => dateTime.Ticks.ToString(CultureInfo.InvariantCulture),
+            string text => text,
+            Enum enumValue => enumValue.ToString(),
+            IConvertible => ToDecimal(raw).ToString(CultureInfo.InvariantCulture),
+            _ => raw.ToString(),
         };
     }
 

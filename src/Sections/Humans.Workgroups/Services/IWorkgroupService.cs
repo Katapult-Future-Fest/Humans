@@ -160,11 +160,18 @@ internal interface IWorkgroupService : IApplicationService
 
     /// <summary>Refused and Withdrawn groups are rejected. Returns the Holded account when one was created or
     /// linked by this call, else null.</summary>
-    Task<WorkgroupMutationResult<HoldedExpenseAccountRef?>> SetBudgetAsync(
+    Task<WorkgroupMutationResult<ExpenseAccountRef?>> SetBudgetAsync(
         Guid workgroupId, Guid actorUserId, WorkgroupBudgetSave save, CancellationToken ct = default);
 
-    /// <summary>Empty when Holded is unreachable, so the page still renders.</summary>
-    Task<IReadOnlyList<HoldedExpenseAccountDto>> ListExpenseAccountsAsync(CancellationToken ct = default);
+    /// <summary>
+    /// Links the group's optional email group by local part, or clears it with null or blank. Refused and Withdrawn
+    /// groups are rejected, as is a group another workgroup already uses. Clearing leaves the Google group as it is.
+    /// </summary>
+    Task<WorkgroupMutationResult> SetGoogleGroupAsync(
+        Guid workgroupId, Guid actorUserId, string? prefix, CancellationToken ct = default);
+
+    /// <summary>Active group-6 accounts from the Holded mirror; empty when the mirror is unavailable.</summary>
+    Task<IReadOnlyList<HoldedChartAccountInfo>> ListExpenseAccountsAsync(CancellationToken ct = default);
 
     /// <summary>The Board's written reply to a delivered document.</summary>
     Task<WorkgroupMutationResult> RecordDispositionAsync(

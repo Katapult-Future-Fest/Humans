@@ -1,3 +1,5 @@
+using Humans.Base;
+using Microsoft.Extensions.Localization;
 using System.ComponentModel.DataAnnotations;
 using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Humans.Shifts.Services;
@@ -168,7 +170,6 @@ internal sealed class ShiftBrowseViewModel
     /// <summary>Independent of the current filters, so the option list stays stable as the viewer filters.</summary>
     public List<DayFilterOption> DayOptions { get; set; } = [];
 
-    public bool ShowFullShifts { get; set; }
     public Guid UserId { get; set; }
     public HashSet<Guid> UserSignupShiftIds { get; set; } = [];
     public Dictionary<Guid, SignupStatus> UserSignupStatuses { get; set; } = new();
@@ -218,6 +219,8 @@ internal sealed class DepartmentShiftGroup
 
 internal sealed class RotaShiftGroup
 {
+    public bool EarlyEntrySignupsClosed { get; set; }
+
     public RotaInfo Rota { get; set; } = null!;
     public List<ShiftDisplayItem> Shifts { get; set; } = [];
 
@@ -241,6 +244,14 @@ internal sealed record DayFilterOption(LocalDate Date, ShiftPeriod Period, Build
 
 internal sealed class ShiftDisplayItem
 {
+    internal static string PeriodLabel(ShiftPeriod period, IStringLocalizer<SharedResource> localizer) => period switch
+    {
+        ShiftPeriod.Build => localizer["Shifts_SetUp"].Value,
+        ShiftPeriod.Event => localizer["Shifts_Event"].Value,
+        ShiftPeriod.Strike => localizer["Shifts_Strike"].Value,
+        _ => string.Empty
+    };
+
     public ShiftInfo Shift { get; set; } = null!;
     public Instant AbsoluteStart { get; set; }
     public Instant AbsoluteEnd { get; set; }
@@ -300,7 +311,6 @@ internal sealed class ShiftAdminViewModel
     /// <summary>Keyed by UserId for every signup on the page; views read this, never <c>ShiftSignup.User</c>.</summary>
     public IReadOnlyDictionary<Guid, UserInfo> Users { get; set; } = new Dictionary<Guid, UserInfo>();
 
-    public bool CanViewMedical { get; set; }
     public List<DailyStaffingData> StaffingData { get; set; } = [];
     public List<DailyStaffingHours> StaffingHours { get; set; } = [];
     public Instant Now { get; set; }
@@ -530,7 +540,6 @@ internal sealed class ShiftSignupsViewModel
     public BurnSettingsInfo? EventSettings { get; set; }
     public ShiftSignupsViewMode ViewMode { get; set; }
     public Guid UserId { get; set; }
-    public string? DisplayName { get; set; }
 }
 
 internal sealed record ShiftSignupsRow(ShiftSignupSummary Signup, string DepartmentName);

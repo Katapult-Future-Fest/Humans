@@ -52,7 +52,6 @@ internal sealed class AgentAdminStatusService(
             .Where(r => r.CreatedAt >= window7d && !string.IsNullOrEmpty(r.RefusalReason))
             .GroupBy(r => r.RefusalReason!, StringComparer.Ordinal)
             .Select(g => new AgentRefusalBucket(g.Key, g.Count()))
-            .OrderByDescending(b => b.Count)
             .ToList();
         var refusals7dCount = refusals7d.Sum(b => b.Count);
 
@@ -60,7 +59,7 @@ internal sealed class AgentAdminStatusService(
             .Where(r => r.CreatedAt >= window7d)
             .SelectMany(r => r.FetchedDocs ?? Array.Empty<string>())
             .Where(slug => !string.IsNullOrEmpty(slug))
-            .GroupBy(slug => slug, StringComparer.Ordinal)
+            .GroupBy(CanonicalDocSlug, StringComparer.OrdinalIgnoreCase)
             .Select(g => new AgentTopDoc(g.Key, g.Count()))
             .OrderByDescending(d => d.Count)
             .Take(10)
@@ -85,6 +84,15 @@ internal sealed class AgentAdminStatusService(
             Retention: retention.Snapshot,
             Balance: balance1,
             SettingsStoreWarm: settings1.UpdatedAt != Instant.MinValue);
+    }
+
+    private static string CanonicalDocSlug(string slug)
+    {
+        const string sectionPrefix = AgentToolNames.FetchSectionGuide + ":";
+        return slug.StartsWith(sectionPrefix, StringComparison.Ordinal)
+            && AgentSectionKeys.TryResolve(slug[sectionPrefix.Length..], out var section)
+                ? sectionPrefix + section
+                : slug;
     }
 
     private static AgentUsageStats BuildUsage(

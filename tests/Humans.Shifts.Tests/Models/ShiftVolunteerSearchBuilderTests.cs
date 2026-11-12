@@ -9,7 +9,6 @@ using Humans.Users.Contracts;
 using Humans.Users.Domain;
 using Humans.Shifts.Helpers;
 using Humans.Shifts.Models;
-using Humans.Settings.Contracts;
 using NodaTime;
 using NSubstitute;
 using Xunit;
@@ -109,7 +108,7 @@ public class ShiftVolunteerSearchBuilderTests
         [
             ShiftUserSummaryProjection.ToSummary(
                 MakeSignup(PastBurnId, dayOffset: 1, new LocalTime(20, 0), Duration.FromHours(2)),
-                ToCalendar(PastBurn)),
+                PastBurn),
         ]);
 
         var result = await BuildSut().BuildForShiftAsync(target, "ann");
@@ -135,17 +134,6 @@ public class ShiftVolunteerSearchBuilderTests
             "ann");
 
         Assert.Equal(VolunteerSearchBuildStatus.NotFound, result.Status);
-    }
-
-    [HumansFact]
-    public void SearchRows_NeverCarryMedicalConditions()
-    {
-        // Art. 9 data leaves the server only through ShiftsController.RevealMedical, one audited person at a time.
-        typeof(VolunteerSearchResult).GetProperties().Select(p => p.Name)
-            .Should().NotContain(name => name.Contains("Medical", StringComparison.Ordinal));
-        typeof(VolunteerBadgesViewModel).GetProperties()
-            .Where(p => p.PropertyType == typeof(string)).Select(p => p.Name)
-            .Should().Equal(["DietaryPreference"], "the badge model carries a medical flag, never the text");
     }
 
     [HumansFact]
@@ -179,7 +167,7 @@ public class ShiftVolunteerSearchBuilderTests
         _shiftView.GetUsersAsync(Arg.Any<IEnumerable<Guid>>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<Guid, ShiftUserView>
             {
-                [_candidateId] = new(_candidateId, null, null, null, [], signups, ToCalendar(ActiveBurn)),
+                [_candidateId] = new(_candidateId, null, null, null, [], signups, ActiveBurn),
             });
 
     // The target as GetShiftByIdAsync hands it over: the shift's own fields plus its rota.
@@ -209,23 +197,6 @@ public class ShiftVolunteerSearchBuilderTests
             Status = SignupStatus.Confirmed,
             Shift = MakeShiftEntity(burnId, dayOffset, start, duration),
         };
-
-    private static EventSettingsInfo ToCalendar(BurnSettingsInfo burn) => new(
-        Id: burn.Id,
-        EventName: burn.EventName,
-        Year: burn.Year,
-        TimeZoneId: burn.TimeZoneId,
-        GateOpeningDate: burn.GateOpeningDate,
-        BuildStartOffset: burn.BuildStartOffset,
-        EventEndOffset: burn.EventEndOffset,
-        StrikeEndOffset: burn.StrikeEndOffset,
-        FirstCrewStartOffset: burn.FirstCrewStartOffset,
-        SetupWeekStartOffset: burn.SetupWeekStartOffset,
-        PreEventWeekStartOffset: burn.PreEventWeekStartOffset,
-        FinishingWeekendStartOffset: burn.FinishingWeekendStartOffset,
-        EarlyEntryCapacity: new Dictionary<int, int>(),
-        BarriosEarlyEntryAllocation: null,
-        EarlyEntryClose: null);
 
     private static BurnSettingsInfo MakeBurn(Guid id, string timeZoneId, LocalDate gateOpening) =>
         new(

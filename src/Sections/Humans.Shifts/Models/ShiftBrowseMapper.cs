@@ -18,7 +18,10 @@ internal static class ShiftBrowseMapper
             ConfirmedCount = u.ConfirmedCount,
             RemainingSlots = u.RemainingSlots,
             UrgencyScore = u.UrgencyScore,
-            Signups = u.Signups,
+            Signups = u.Signups
+                .OrderBy(s => s.Status == SignupStatus.Confirmed ? 0 : 1)
+                .ThenBy(s => s.DisplayName, StringComparer.OrdinalIgnoreCase)
+                .ToList(),
         };
     }
 
@@ -36,6 +39,7 @@ internal static class ShiftBrowseMapper
         return new RotaShiftGroup
         {
             Rota = rota,
+            EarlyEntrySignupsClosed = rotaGroup.First().EarlyEntrySignupsClosed,
             Shifts = shifts,
             DepartmentName = departmentName,
             DepartmentSlug = departmentSlug,

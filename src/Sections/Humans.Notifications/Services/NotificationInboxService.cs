@@ -4,13 +4,11 @@ using Humans.Gdpr.Contracts;
 using Humans.Notifications.Domain;
 using Humans.Notifications.Contracts;
 using NodaTime;
-using Humans.Users.Contracts;
 
 namespace Humans.Notifications.Services;
 
 internal sealed class NotificationInboxService(
     INotificationRepository repo,
-    IUserService userService,
     NotificationSourceRegistry sources,
     IClock clock) : INotificationInboxService, IUserDataContributor
 {
@@ -33,15 +31,13 @@ internal sealed class NotificationInboxService(
         var recipients = await repo.GetInboxAsync(
             userId, search, parsedFilter, groupSources, effectiveTab, cutoff, ct);
 
-        var displayNames = await LoadResolverNamesAsync(recipients, ct);
-
         var needsAttention = new List<NotificationRowDto>();
         var informational = new List<NotificationRowDto>();
         var resolved = new List<NotificationRowDto>();
 
         foreach (var nr in recipients)
         {
-            var row = MapToRow(nr, displayNames);
+            var row = MapToRow(nr);
             if (row.IsResolved)
                 resolved.Add(row);
             else if (nr.Notification.Class == NotificationClass.Actionable)
@@ -69,14 +65,12 @@ internal sealed class NotificationInboxService(
     {
         var recipients = await repo.GetPopupAsync(userId, ct);
 
-        var displayNames = await LoadResolverNamesAsync(recipients, ct);
-
         var actionable = new List<NotificationRowDto>();
         var informational = new List<NotificationRowDto>();
 
         foreach (var nr in recipients)
         {
-            var row = MapToRow(nr, displayNames);
+            var row = MapToRow(nr);
             if (nr.Notification.Class == NotificationClass.Actionable)
                 actionable.Add(row);
             else
@@ -90,29 +84,20 @@ internal sealed class NotificationInboxService(
         };
     }
 
-    public async Task<NotificationActionResult> ResolveAsync(
+    public Task<NotificationMutationOutcome> ResolveAsync(
         Guid notificationId, Guid userId,
-        CancellationToken ct = default)
-    {
-        var outcome = await repo.ResolveAsync(notificationId, userId, clock.GetCurrentInstant(), NotificationClass.Actionable, ct);
-        return ToActionResult(outcome);
-    }
+        CancellationToken ct = default) =>
+        repo.ResolveAsync(notificationId, userId, clock.GetCurrentInstant(), NotificationClass.Actionable, ct);
 
-    public async Task<NotificationActionResult> DismissAsync(
+    public Task<NotificationMutationOutcome> DismissAsync(
         Guid notificationId, Guid userId,
-        CancellationToken ct = default)
-    {
-        var outcome = await repo.ResolveAsync(notificationId, userId, clock.GetCurrentInstant(), NotificationClass.Informational, ct);
-        return ToActionResult(outcome);
-    }
+        CancellationToken ct = default) =>
+        repo.ResolveAsync(notificationId, userId, clock.GetCurrentInstant(), NotificationClass.Informational, ct);
 
-    public async Task<NotificationActionResult> MarkReadAsync(
+    public Task<NotificationMutationOutcome> MarkReadAsync(
         Guid notificationId, Guid userId,
-        CancellationToken ct = default)
-    {
-        var outcome = await repo.MarkReadAsync(notificationId, userId, clock.GetCurrentInstant(), ct);
-        return ToActionResult(outcome);
-    }
+        CancellationToken ct = default) =>
+        repo.MarkReadAsync(notificationId, userId, clock.GetCurrentInstant(), ct);
 
     public async Task MarkAllReadAsync(
         Guid userId,
@@ -137,14 +122,10 @@ internal sealed class NotificationInboxService(
         await repo.BulkResolveAsync(notificationIds, userId, clock.GetCurrentInstant(), NotificationClass.Informational, ct);
     }
 
-    public async Task<string?> ClickThroughAsync(
+    public Task<string?> ClickThroughAsync(
         Guid notificationId, Guid userId,
-        CancellationToken ct = default)
-    {
-        var outcome = await repo.ClickThroughAsync(notificationId, userId, clock.GetCurrentInstant(), ct);
-        if (outcome.NotFound) return null;
-        return outcome.ActionUrl;
-    }
+        CancellationToken ct = default) =>
+        repo.ClickThroughAsync(notificationId, userId, clock.GetCurrentInstant(), ct);
 
     public async Task ResolveBySourceAsync(
         Guid userId, NotificationSourceDefinition source,
@@ -236,40 +217,16 @@ internal sealed class NotificationInboxService(
         return (parsedFilter, parsedTab);
     }
 
-    private async Task<IReadOnlyDictionary<Guid, string>> LoadResolverNamesAsync(
-        IReadOnlyList<NotificationRecipient> recipients, CancellationToken ct)
-    {
-        var userIds = new HashSet<Guid>();
-        foreach (var nr in recipients)
-        {
-            if (nr.Notification.ResolvedByUserId is { } resolverId)
-                userIds.Add(resolverId);
-        }
-
-        if (userIds.Count == 0)
-            return new Dictionary<Guid, string>();
-
-        var users = await userService.GetUserInfosAsync(userIds, ct);
-        return users.ToDictionary(kv => kv.Key, kv => kv.Value.BurnerName);
-    }
-
-    private static NotificationRowDto MapToRow(
-        NotificationRecipient nr,
-        IReadOnlyDictionary<Guid, string> displayNames)
+    private static NotificationRowDto MapToRow(NotificationRecipient nr)
     {
         var n = nr.Notification;
-
-        string? resolvedByName = null;
-        if (n.ResolvedByUserId is { } resolverId &&
-            displayNames.TryGetValue(resolverId, out var name))
-        {
-            resolvedByName = name;
-        }
 
         return new NotificationRowDto
         {
             Id = n.Id,
             Title = n.Title,
+            Body = n.Body,
+            TargetGroupName = n.TargetGroupName,
             ActionUrl = n.ActionUrl,
             Priority = n.Priority,
             Source = n.Source,
@@ -278,11 +235,7 @@ internal sealed class NotificationInboxService(
             IsRead = nr.ReadAt is not null,
             IsResolved = n.ResolvedAt is not null,
             ResolvedAt = n.ResolvedAt?.ToDateTimeUtc(),
-            ResolvedByName = resolvedByName,
+            ResolvedByUserId = n.ResolvedByUserId,
         };
     }
-
-    private static NotificationActionResult ToActionResult(NotificationMutationOutcome outcome) =>
-        new(outcome.Success, NotFound: outcome.NotFound, Forbidden: outcome.Forbidden);
-
 }

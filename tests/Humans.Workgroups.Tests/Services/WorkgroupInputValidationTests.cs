@@ -112,6 +112,8 @@ public sealed class WorkgroupInputValidationTests : WorkgroupsTestHarness
     [InlineData(true, "100", "link", 62900170, true)]
     [InlineData(true, "100", "create", null, true)]
     [InlineData(true, "abc", "create", null, false)]
+    [InlineData(true, "12,34", "create", null, false)]
+    [InlineData(true, "1,234.56", "link", 62900170, false)]
     [InlineData(true, "-1", "create", null, false)]
     [InlineData(false, null, "link", null, true)]
     public void BudgetForm_RequiresAmountAndLinkedAccountWhenBudgeted(
@@ -286,7 +288,7 @@ public sealed class WorkgroupInputValidationTests : WorkgroupsTestHarness
         var now = Clock.GetCurrentInstant();
         var actor = group.Members.Single().UserId;
         var url = "https://example.org/".PadRight(2000, 'x');
-        var save = new WorkgroupMeetingSave("Meeting", now, now.Plus(Duration.FromHours(1)), null, url, false, null);
+        var save = new WorkgroupMeetingSave("Meeting", now, now.Plus(Duration.FromHours(1)), null, url, false);
         var meetingId = (await service.CreateMeetingAsync(group.Id, actor, save, Ct)).Value;
         Func<Task<WorkgroupMutationResult>> act = async () =>
         {
@@ -303,5 +305,19 @@ public sealed class WorkgroupInputValidationTests : WorkgroupsTestHarness
         await using var ctx = OpenContext();
         var meetings = await ctx.Meetings.Where(m => m.WorkgroupId == group.Id).ToListAsync(Ct);
         meetings.Should().ContainSingle().Which.LocationUrl.Should().Be(url);
+    }
+
+    [HumansTheory]
+    [InlineData("javascript:alert(1)")]
+    [InlineData("meet.example.org/abc")]
+    public async Task MeetingUrl_RejectsAnythingButAbsoluteHttp(string url)
+    {
+        var group = await SeedWorkgroupAsync();
+        var now = Clock.GetCurrentInstant();
+        var save = new WorkgroupMeetingSave("Meeting", now, now.Plus(Duration.FromHours(1)), null, url, false);
+
+        var result = await NewService().CreateMeetingAsync(group.Id, group.Members.Single().UserId, save, Ct);
+
+        result.Refusal!.Key.Should().Be(WorkgroupErrorKeys.LocationUrlInvalid);
     }
 }

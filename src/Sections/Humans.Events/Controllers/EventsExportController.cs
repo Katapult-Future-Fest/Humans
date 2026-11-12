@@ -29,10 +29,10 @@ internal sealed class EventsExportController(
     [Authorize(Policy = EventsPolicies.Manage)]
     public async Task<IActionResult> DownloadCsv(CancellationToken ct)
     {
-        var actorUserId = GetCurrentUserId();
-        if (actorUserId is null) return Unauthorized();
+        var actor = await GetCurrentUserInfoAsync(ct);
+        if (actor is null) return Unauthorized();
 
-        var bytes = await guide.GetApprovedEventsForExportAsync(actorUserId.Value, ct);
+        var bytes = await guide.GetApprovedEventsForExportAsync(actor.Id, ct);
         return File(bytes, "text/csv", "event-guide-export.csv");
     }
 
@@ -44,7 +44,7 @@ internal sealed class EventsExportController(
         var eventSettings = await LoadBurnSettingsAsync(guide, settings, ct);
         var tz = GetTimeZone(eventSettings);
         var maxSlots = settings?.MaxPrintSlots;
-        var campsById = await LoadCampsByIdAsync(camps, eventSettings?.GateOpeningDate.Year, ct);
+        var campsById = await LoadCampsByIdAsync(camps, eventSettings?.Id, ct);
 
         var gateOpeningDate = eventSettings?.GateOpeningDate;
         var allOccurrences = new List<PrintGuideEntry>();

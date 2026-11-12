@@ -51,6 +51,7 @@ public sealed class Section :
     ISectionDataMigrations,
     ISectionHelp,
     ISectionJobs,
+    ISectionMemberDashboard,
     ISectionPolicies,
     ISectionThingsToDo,
     IUserPart
@@ -63,8 +64,16 @@ public sealed class Section :
             FormerNames: ["HumanAdmin"]),
     ];
 
-    internal static IdentityBuilder AddIdentityStores(IdentityBuilder builder) =>
-        builder.AddEntityFrameworkStores<UsersDbContext>();
+    internal static IdentityBuilder AddIdentity(IServiceCollection services) =>
+        services.AddIdentity<User, IdentityRole<Guid>>(options =>
+            {
+                // UserEmail table owns email uniqueness; User.Email is null on new users.
+                options.User.RequireUniqueEmail = false;
+                options.SignIn.RequireConfirmedEmail = false;
+            })
+            .AddEntityFrameworkStores<UsersDbContext>()
+            .AddDefaultTokenProviders()
+            .AddClaimsPrincipalFactory<HumansUserClaimsPrincipalFactory>();
 
     public void Register(IServiceCollection services, IConfiguration configuration)
     {
@@ -72,7 +81,7 @@ public sealed class Section :
         services.AddSingleton<INotificationSourceContributor, UsersNotificationSources>();
         services.AddSectionDbContext<UsersDbContext>(sentinelTable: "users");
 
-        // On every section's context pipeline: catches User/UserEmail/CommunicationPreference
+        // On every section's context pipeline: catches User/UserEmail
         // writes wherever they are saved, including Identity machinery.
         services.AddSingleton<UserInfoSaveChangesInterceptor>();
         services.AddSingleton<IInterceptor>(sp => sp.GetRequiredService<UserInfoSaveChangesInterceptor>());
@@ -107,7 +116,6 @@ public sealed class Section :
 
         services.AddHostedService(sp => sp.GetRequiredService<CachingUserService>());
 
-        services.AddSingleton<ICommunicationPreferenceRepository, CommunicationPreferenceRepository>();
 
         services.AddScoped<ContactFieldService>();
         services.AddScoped<IContactFieldService>(sp => sp.GetRequiredService<ContactFieldService>());
@@ -126,9 +134,8 @@ public sealed class Section :
 
         services.AddSingleton<IAuthorizationHandler, UserEmailAuthorizationHandler>();
 
-        services.AddSingleton<IAuthorizationHandler, HumanAdminOnlyHandler>();
-
         services.AddScoped<ProfileService>();
+        services.AddScoped<MedicalConditionsService>();
         services.AddScoped<IProfilePictureService>(sp => sp.GetRequiredService<ProfileService>());
 
         services.AddScoped<IHumanLifecycleService, HumanLifecycleService>();
@@ -138,6 +145,7 @@ public sealed class Section :
         // names it by full name as the sole caller of ReconcileOAuthIdentityAsync.
         services.AddScoped<IAccountDeletionService, AccountDeletionService>();
         services.AddScoped<IExternalLoginService, ExternalLoginService>();
+        services.AddScoped<IUserSignInService, UserSignInService>();
 
         services.AddScoped<ProcessAccountDeletionsJob>();
         services.AddScoped<SuspendNonCompliantMembersJob>();
@@ -224,6 +232,9 @@ public sealed class Section :
             new(ChromeSlots.WidgetGallery, typeof(UsersGalleryViewComponent)),
         ];
 
+    IEnumerable<ChromeComponent> ISectionMemberDashboard.Components() =>
+        [new(ChromeSlots.MemberDashboard, typeof(HumansDirectoryCardsViewComponent), Weight: 90)];
+
     void ISectionConfiguration.DeclareSettings(IConfiguration configuration, ConfigurationRegistry registry)
     {
         configuration.GetRequiredSetting(registry, "GoogleMaps:ApiKey", "Google Maps", isSensitive: true);
@@ -278,8 +289,8 @@ public sealed class Section :
         options.AddPolicy(UsersPolicies.Manage, policy =>
             policy.RequireRole(UsersRoles.UsersAdmin, RoleNames.Admin));
 
-        options.AddPolicy(UsersPolicies.UsersAdminOnly, policy =>
-            policy.AddRequirements(new HumanAdminOnlyRequirement()));
+        options.AddPolicy(UsersPolicies.MedicalDataViewer, policy =>
+            policy.RequireRole(RoleNames.Admin, RoleNames.Board, ShiftsRoles.ShiftsNoInfo));
     }
 
     async ValueTask<IEnumerable<ThingsToDoEntry>> ISectionThingsToDo.EntriesAsync(
@@ -304,7 +315,7 @@ public sealed class Section :
             entries.Add(ConsentCheckEntry(localizer, profile is not null && review.Status == ConsentCheckStatus.Cleared));
         }
 
-        var medical = await MedicalEntryAsync(services, localizer, logger, profile, userId, ct);
+        var medical = await MedicalEntryAsync(services, localizer, logger, userId, ct);
         if (medical is not null)
         {
             entries.Add(medical);
@@ -359,18 +370,18 @@ public sealed class Section :
         IServiceProvider services,
         IStringLocalizer<SharedResource> localizer,
         ILogger logger,
-        ProfileInfo? profile,
         Guid userId, CancellationToken ct)
     {
-        if (!string.IsNullOrEmpty(profile?.MedicalConditions))
-        {
-            return null;
-        }
-
         try
         {
             var dietary = await services.GetRequiredService<ICantinaService>().GetDietaryProfileAsync(userId, ct);
             if (dietary is { HasPreference: true } or { DeclinedToAnswer: true })
+            {
+                return null;
+            }
+
+            var medical = await services.GetRequiredService<MedicalConditionsService>().GetOwnAsync(userId, ct);
+            if (!string.IsNullOrEmpty(medical))
             {
                 return null;
             }
@@ -392,7 +403,7 @@ public sealed class Section :
     IEnumerable<UserPart> IUserPart.Parts() =>
     [
         new(UserPartSlots.BoardVoteApplicant, typeof(ProfileCardViewComponent)),
-        new(UserPartSlots.OnboardingReviewApplicant, typeof(ProfileCardViewComponent)),
+        new(UserPartSlots.ConsentReviewApplicant, typeof(ProfileCardViewComponent)),
         new(UserPartSlots.TicketTransferParty, typeof(HumanSummaryViewComponent)),
     ];
 }

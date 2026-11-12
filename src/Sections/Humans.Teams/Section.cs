@@ -1,4 +1,5 @@
 using System.Globalization;
+using Humans.Base.Models.Tables;
 using Humans.Base.Authorization;
 using Humans.Base.Constants;
 using Humans.Base.Hosting;
@@ -51,6 +52,19 @@ public sealed class Section :
 
     public void Register(IServiceCollection services, IConfiguration configuration)
     {
+        EnumBadgeMap.Register(new Dictionary<Enum, string>
+        {
+            [SlotPriority.None] = "bg-light text-dark",
+            [SlotPriority.Critical] = "bg-danger",
+            [SlotPriority.Important] = "bg-warning text-dark",
+            [SlotPriority.NiceToHave] = "bg-secondary",
+
+            [RolePeriod.YearRound] = "bg-light text-dark",
+            [RolePeriod.Build] = "bg-info",
+            [RolePeriod.Event] = "bg-success",
+            [RolePeriod.Strike] = "bg-secondary",
+        });
+
         services.AddSingleton<IAuditActionContributor, TeamsAuditActions>();
         services.AddSingleton<INotificationSourceContributor, TeamsNotificationSources>();
         services.AddSectionDbContext<TeamsDbContext>(sentinelTable: "teams");
@@ -88,7 +102,6 @@ public sealed class Section :
 
         services.AddScoped<ISystemTeamSync, SystemTeamSyncJob>();
 
-        // The policies this handler backs stay in Shell's AuthorizationPolicyExtensions.
         services.AddScoped<IAuthorizationHandler, TeamAuthorizationHandler>();
 
         services.AddSingleton<TeamsMetricsService>();
@@ -115,10 +128,10 @@ public sealed class Section :
             [
                 Of("View teams & join", ("Volunteer", Allowed), ("Coordinator", Allowed), ("Board", Allowed), ("TeamsAdmin", Allowed)),
                 Of("View team details", ("Volunteer", Allowed), ("Coordinator", Allowed), ("Board", Allowed), ("TeamsAdmin", Allowed)),
-                Of("Manage members", ("Volunteer", Denied), ("Coordinator", Allowed), ("Board", Allowed), ("TeamsAdmin", Allowed)),
-                Of("Manage roles", ("Volunteer", Denied), ("Coordinator", Allowed), ("Board", Allowed), ("TeamsAdmin", Allowed)),
-                Of("Create teams", ("Volunteer", Denied), ("Coordinator", Denied), ("Board", Allowed), ("TeamsAdmin", Allowed)),
-                Of("Delete teams", ("Volunteer", Denied), ("Coordinator", Denied), ("Board", Allowed), ("TeamsAdmin", Denied)),
+                Of("Manage members", ("Volunteer", Denied), ("Coordinator", Allowed), ("Board", Denied), ("TeamsAdmin", Allowed)),
+                Of("Manage roles", ("Volunteer", Denied), ("Coordinator", Allowed), ("Board", Denied), ("TeamsAdmin", Allowed)),
+                Of("Create teams", ("Volunteer", Denied), ("Coordinator", Denied), ("Board", Denied), ("TeamsAdmin", Allowed)),
+                Of("Delete teams", ("Volunteer", Denied), ("Coordinator", Denied), ("Board", Denied), ("TeamsAdmin", Denied)),
                 Of("Google resource sync", ("Volunteer", Denied), ("Coordinator", Denied), ("Board", Denied), ("TeamsAdmin", Limited)),
             ]
         }

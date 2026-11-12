@@ -26,6 +26,60 @@ namespace Humans.Rideshare.Tests.Services;
 /// </summary>
 public sealed class RideshareServiceTests : RideshareTestHarness
 {
+    public enum MissingMutationTarget
+    {
+        UpdateOffer,
+        CancelOffer,
+        UpdateRequest,
+        CancelRequest,
+        ExpressInterestTrip,
+        ExpressInterestRequest,
+        AcceptInterest,
+        DeclineInterest,
+        WithdrawInterest
+    }
+
+    [HumansTheory]
+    [InlineData(MissingMutationTarget.UpdateOffer)]
+    [InlineData(MissingMutationTarget.CancelOffer)]
+    [InlineData(MissingMutationTarget.UpdateRequest)]
+    [InlineData(MissingMutationTarget.CancelRequest)]
+    [InlineData(MissingMutationTarget.ExpressInterestTrip)]
+    [InlineData(MissingMutationTarget.ExpressInterestRequest)]
+    [InlineData(MissingMutationTarget.AcceptInterest)]
+    [InlineData(MissingMutationTarget.DeclineInterest)]
+    [InlineData(MissingMutationTarget.WithdrawInterest)]
+    public async Task MissingMutationTargets_ReturnNotFoundWithoutWriting(MissingMutationTarget target)
+    {
+        var actor = SeedUser();
+        var missing = Guid.NewGuid();
+        var trip = target == MissingMutationTarget.ExpressInterestRequest ? await SeedTripAsync(actor) : null;
+        var service = NewService();
+
+        var result = await (target switch
+        {
+            MissingMutationTarget.UpdateOffer => service.UpdateOfferAsync(missing, actor, NewTripSave(), Ct),
+            MissingMutationTarget.CancelOffer => service.CancelOfferAsync(missing, actor, Ct),
+            MissingMutationTarget.UpdateRequest => service.UpdateRequestAsync(missing, actor, NewRequestSave(), Ct),
+            MissingMutationTarget.CancelRequest => service.CancelRequestAsync(missing, actor, Ct),
+            MissingMutationTarget.ExpressInterestTrip => service.ExpressInterestAsync(actor, missing, null, 1, null, Ct),
+            MissingMutationTarget.ExpressInterestRequest => service.ExpressInterestAsync(actor, trip!.Id, missing, 1, null, Ct),
+            MissingMutationTarget.AcceptInterest => service.AcceptInterestAsync(missing, actor, Ct),
+            MissingMutationTarget.DeclineInterest => service.DeclineInterestAsync(missing, actor, Ct),
+            MissingMutationTarget.WithdrawInterest => service.WithdrawInterestAsync(missing, actor, Ct),
+            _ => throw new ArgumentOutOfRangeException(nameof(target))
+        });
+
+        result.AccessFailure.Should().Be(RideshareAccessFailure.NotFound);
+        result.Id.Should().BeNull();
+        result.Refusal.Should().BeNull();
+        await using var ctx = OpenContext();
+        (await ctx.Interests.CountAsync(Ct)).Should().Be(0);
+        (await ctx.Requests.CountAsync(Ct)).Should().Be(0);
+        (await ctx.Trips.CountAsync(Ct)).Should().Be(trip is null ? 0 : 1);
+        Notifications.ReceivedCalls().Should().BeEmpty();
+    }
+
     [HumansTheory]
     [InlineData(false)]
     [InlineData(true)]
@@ -293,7 +347,7 @@ public sealed class RideshareServiceTests : RideshareTestHarness
         var service = NewService();
 
         var stranger = () => service.CancelOfferAsync(trip.Id, SeedUser("Bo"), Ct);
-        await stranger.Should().ThrowAsync<UnauthorizedAccessException>();
+        (await stranger()).AccessFailure.Should().Be(RideshareAccessFailure.Forbidden);
 
         Clock.AdvanceHours(1);
         var cancelledAt = Clock.GetCurrentInstant();
@@ -315,7 +369,7 @@ public sealed class RideshareServiceTests : RideshareTestHarness
         var service = NewService();
 
         var stranger = () => service.CancelRequestAsync(request.Id, SeedUser("Bo"), Ct);
-        await stranger.Should().ThrowAsync<UnauthorizedAccessException>();
+        (await stranger()).AccessFailure.Should().Be(RideshareAccessFailure.Forbidden);
 
         Clock.AdvanceHours(1);
         var cancelledAt = Clock.GetCurrentInstant();
@@ -330,14 +384,14 @@ public sealed class RideshareServiceTests : RideshareTestHarness
     }
 
     [HumansFact]
-    public async Task UpdateOffer_ByAnotherHuman_Throws()
+    public async Task UpdateOffer_ByAnotherHuman_ReturnsForbidden()
     {
         await SeedSettingsAsync();
         var trip = await SeedTripAsync(SeedUser("Ada"));
 
         var act = () => NewService().UpdateOfferAsync(trip.Id, SeedUser("Bo"), NewTripSave(seats: 4), Ct);
 
-        await act.Should().ThrowAsync<UnauthorizedAccessException>();
+        (await act()).AccessFailure.Should().Be(RideshareAccessFailure.Forbidden);
     }
 
     [HumansFact]
@@ -352,14 +406,14 @@ public sealed class RideshareServiceTests : RideshareTestHarness
     }
 
     [HumansFact]
-    public async Task UpdateRequest_ByAnotherHuman_Throws()
+    public async Task UpdateRequest_ByAnotherHuman_ReturnsForbidden()
     {
         var request = await SeedRequestAsync(SeedUser("Ada"));
 
         var act = () => NewService().UpdateRequestAsync(
             request.Id, SeedUser("Bo"), NewRequestSave(partySize: 2), Ct);
 
-        await act.Should().ThrowAsync<UnauthorizedAccessException>();
+        (await act()).AccessFailure.Should().Be(RideshareAccessFailure.Forbidden);
     }
 
     [HumansFact]
@@ -600,7 +654,7 @@ public sealed class RideshareServiceTests : RideshareTestHarness
     }
 
     [HumansFact]
-    public async Task AcceptAndDecline_ByAnyoneButThePostingOwner_Throw()
+    public async Task AcceptAndDecline_ByAnyoneButThePostingOwner_ReturnForbidden()
     {
         var trip = await SeedTripAsync(SeedUser("Ada"));
         var rider = SeedUser("Bo");
@@ -610,8 +664,8 @@ public sealed class RideshareServiceTests : RideshareTestHarness
         var accept = () => service.AcceptInterestAsync(interest.Id, rider, Ct);
         var decline = () => service.DeclineInterestAsync(interest.Id, SeedUser("Cy"), Ct);
 
-        await accept.Should().ThrowAsync<UnauthorizedAccessException>();
-        await decline.Should().ThrowAsync<UnauthorizedAccessException>();
+        (await accept()).AccessFailure.Should().Be(RideshareAccessFailure.Forbidden);
+        (await decline()).AccessFailure.Should().Be(RideshareAccessFailure.Forbidden);
     }
 
     [HumansFact]
@@ -642,7 +696,7 @@ public sealed class RideshareServiceTests : RideshareTestHarness
         var service = NewService();
 
         var byDriver = () => service.AcceptInterestAsync(interest.Id, driver, Ct);
-        await byDriver.Should().ThrowAsync<UnauthorizedAccessException>();
+        (await byDriver()).AccessFailure.Should().Be(RideshareAccessFailure.Forbidden);
 
         await service.AcceptInterestAsync(interest.Id, rider, Ct);
         await using var ctx = OpenContext();
@@ -683,7 +737,7 @@ public sealed class RideshareServiceTests : RideshareTestHarness
         var service = NewService();
 
         var thirdParty = () => service.WithdrawInterestAsync(onTrip.Id, SeedUser("Cy"), Ct);
-        await thirdParty.Should().ThrowAsync<UnauthorizedAccessException>();
+        (await thirdParty()).AccessFailure.Should().Be(RideshareAccessFailure.Forbidden);
 
         await service.WithdrawInterestAsync(onTrip.Id, driver, Ct);   // the trip's driver owns this posting
         await service.WithdrawInterestAsync(onPin.Id, rider, Ct);     // the pin's rider owns that one
@@ -778,6 +832,64 @@ public sealed class RideshareServiceTests : RideshareTestHarness
         (await ctx.Interests.SingleAsync(i => i.Id == id, Ct)).TripId.Should().Be(covering.Id);
     }
 
+    [HumansTheory]
+    [InlineData(false, 0)]
+    [InlineData(false, 1)]
+    [InlineData(false, 2)]
+    [InlineData(true, 0)]
+    [InlineData(true, 1)]
+    [InlineData(true, 2)]
+    [InlineData(false, 3)]
+    [InlineData(true, 3)]
+    public async Task PinAnswer_RejectsAnotherOrUnassignedEvent_EvenWhenDirectionAndDateMatch(bool accepting, int unassignedSide)
+    {
+        var autumn = StubAutumnEvent();
+        var driver = SeedUser("Ada");
+        var rider = SeedUser("Bo");
+        var trip = await SeedTripAsync(driver);
+        var request = await SeedRequestAsync(rider);
+        trip.EventSettingsId = unassignedSide is 1 or 3 ? null : autumn.Id;
+        request.EventSettingsId = unassignedSide is 2 or 3 ? null : EventId;
+        if (unassignedSide == 1) request.EventSettingsId = autumn.Id;
+        await Db.SaveChangesAsync(Ct);
+        var interest = accepting ? await SeedInterestAsync(driver, trip.Id, requestId: request.Id) : null;
+        var service = NewService();
+
+        var result = accepting
+            ? await service.AcceptInterestAsync(interest!.Id, rider, Ct)
+            : await service.ExpressInterestAsync(driver, trip.Id, request.Id, 0, null, Ct);
+
+        result.Refusal!.Key.Should().Be("Rideshare_Error_RideUnavailable");
+        await using var ctx = OpenContext();
+        if (accepting)
+            (await ctx.Interests.SingleAsync(Ct)).Status.Should().Be(InterestStatus.Pending);
+        else
+            (await ctx.Interests.CountAsync(Ct)).Should().Be(0);
+        Notifications.ReceivedCalls().Should().BeEmpty();
+    }
+
+    [HumansTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PinAnswer_RejectsAnUnassignedSide_EvenWhenItsYearMatches(bool unassignedTrip)
+    {
+        StubAutumnEvent();
+        var driver = SeedUser("Ada");
+        var rider = SeedUser("Bo");
+        var trip = await SeedTripAsync(driver);
+        var request = await SeedRequestAsync(rider);
+        if (unassignedTrip) trip.EventSettingsId = null;
+        else request.EventSettingsId = null;
+        await Db.SaveChangesAsync(Ct);
+        var service = NewService();
+
+        var sent = await service.ExpressInterestAsync(driver, trip.Id, request.Id, 0, null, Ct);
+        sent.Refusal!.Key.Should().Be("Rideshare_Error_RideUnavailable");
+
+        await using var ctx = OpenContext();
+        (await ctx.Interests.CountAsync(Ct)).Should().Be(0);
+    }
+
     [HumansFact]
     public async Task ExpressInterest_AnsweringAPin_RequiresTheDriver()
     {
@@ -786,7 +898,7 @@ public sealed class RideshareServiceTests : RideshareTestHarness
 
         var act = () => NewService().ExpressInterestAsync(SeedUser("Cy"), trip.Id, request.Id, 1, null, Ct);
 
-        await act.Should().ThrowAsync<UnauthorizedAccessException>();
+        (await act()).AccessFailure.Should().Be(RideshareAccessFailure.Forbidden);
     }
 
     [HumansFact]
@@ -878,6 +990,9 @@ public sealed class RideshareServiceTests : RideshareTestHarness
         var byAuthorRequest = await SeedRequestAsync(byAuthor);
         await SeedInterestAsync(byAuthor, trip.Id, status: InterestStatus.Accepted);
 
+        // Offering someone else a seat does not satisfy the driver's own request.
+        var driverRequest = await SeedRequestAsync(driver);
+
         // Matched because the driver's accepted answer points at the request.
         var byId = SeedUser("Cy");
         var byIdRequest = await SeedRequestAsync(byId);
@@ -911,6 +1026,8 @@ public sealed class RideshareServiceTests : RideshareTestHarness
         snapshot.Requests.Single(r => r.Id == byIdRequest.Id).IsMatched.Should().BeTrue();
         snapshot.Requests.Single(r => r.Id == pendingRequest.Id).IsMatched.Should().BeFalse();
         snapshot.Requests.Single(r => r.Id == strandedRequest.Id).IsMatched.Should().BeFalse();
+        snapshot.Requests.Single(r => r.Id == driverRequest.Id).IsMatched.Should().BeFalse();
+        snapshot.Stats().RidersStillLooking.Should().Be(5);
     }
 
     [HumansFact]
@@ -929,14 +1046,47 @@ public sealed class RideshareServiceTests : RideshareTestHarness
     }
 
     [HumansTheory]
-    [InlineData("en", "A human is interested in your ride")]
-    [InlineData("es", "Un human está interesado en tu viaje")]
-    [InlineData("de", "Ein human interessiert sich für deine Fahrt")]
-    [InlineData("it", "Un human è interessato al tuo viaggio")]
-    [InlineData("fr", "Un human est intéressé par votre trajet")]
-    [InlineData("ca", "Un human està interessat en el teu viatge")]
-    public async Task InterestNotification_MissingActorName_UsesRecipientLanguage(string language, string title)
+    [InlineData("received")]
+    [InlineData("accepted")]
+    [InlineData("declined")]
+    public async Task InterestNotices_DeliverToResolvedSurvivor(string action)
     {
+        var archived = Guid.NewGuid();
+        var survivor = SeedUser("Ada");
+        var actor = SeedUser("Bo");
+        var recipient = await Users.GetUserInfoAsync(survivor, Ct);
+        Users.GetUserInfoAsync(archived, Arg.Any<CancellationToken>()).Returns(recipient);
+        var trip = await SeedTripAsync(archived);
+        var interest = new RideshareInterest
+        {
+            Id = Guid.NewGuid(),
+            TripId = trip.Id,
+            Trip = trip,
+            FromUserId = string.Equals(action, "received", StringComparison.Ordinal) ? actor : archived,
+            Seats = 1
+        };
+        var notices = new RideshareNotices(Users, Notifications, Logger);
+
+        switch (action)
+        {
+            case "received": await notices.InterestReceivedAsync(interest, trip, null); break;
+            case "accepted": await notices.InterestAcceptedAsync(interest, actor); break;
+            default: await notices.InterestDeclinedAsync(interest, actor); break;
+        }
+
+        var delivery = Notifications.ReceivedCalls().Should().ContainSingle().Subject.GetArguments();
+        ((IReadOnlyList<Guid>)delivery[4]!).Should().Equal(survivor);
+        ((CancellationToken)delivery[^1]!).CanBeCanceled.Should().BeFalse();
+    }
+
+    [HumansTheory]
+    [MemberData(nameof(SupportedCultures.All), MemberType = typeof(SupportedCultures))]
+    public async Task InterestNotification_MissingActorName_UsesRecipientLanguage(string language)
+    {
+        var resources = new System.Resources.ResourceManager(typeof(RideshareResource));
+        var culture = System.Globalization.CultureInfo.GetCultureInfo(language);
+        var title = string.Format(culture, resources.GetString("Rideshare_NoticeInterestRide", culture)!,
+            resources.GetString("Rideshare_NoticeHuman", culture));
         var driver = SeedUser("Ada");
         var rider = SeedUser(" ");
         var trip = await SeedTripAsync(driver);
@@ -1178,9 +1328,11 @@ public sealed class RideshareServiceTests : RideshareTestHarness
     }
 
     [HumansFact]
-    public async Task SaveSettings_StampsTheLegacyRowOfTheEventsYear_InsteadOfAddingOne()
+    public async Task SaveSettings_DoesNotAdoptAnUnassignedRowOfTheSameYear()
     {
         var legacy = await SeedSettingsAsync();
+        legacy.EventSettingsId = null;
+        await Db.SaveChangesAsync(Ct);
 
         await NewService().SaveSettingsAsync(EventId, new SettingsSave(
             "Somewhere else", 43.2, -2.4,
@@ -1188,18 +1340,20 @@ public sealed class RideshareServiceTests : RideshareTestHarness
             new LocalDate(Year, 7, 12), new LocalDate(Year, 7, 20)), SeedUser(), Ct);
 
         await using var ctx = OpenContext();
-        var row = await ctx.Settings.SingleAsync(Ct);
-        row.Id.Should().Be(legacy.Id);
+        (await ctx.Settings.CountAsync(Ct)).Should().Be(2);
+        var row = await ctx.Settings.SingleAsync(s => s.EventSettingsId == EventId, Ct);
+        row.Id.Should().NotBe(legacy.Id);
+        (await ctx.Settings.SingleAsync(s => s.Id == legacy.Id, Ct)).EventSettingsId.Should().BeNull();
         row.EventSettingsId.Should().Be(EventId);
         row.DestinationLabel.Should().Be("Somewhere else");
     }
 
     [HumansFact]
-    public async Task ASecondEventInTheSameYear_GetsItsOwnRides_AndTheLegacyRowsStayWithTheFirst()
+    public async Task ASecondEventInTheSameYear_GetsItsOwnRides_AndTheFirstEventsRowsStaySeparate()
     {
         var autumn = StubAutumnEvent();
         await SeedSettingsAsync();
-        var legacyTrip = await SeedTripAsync(SeedUser("Ada"));
+        var summerTrip = await SeedTripAsync(SeedUser("Ada"));
         var service = NewService();
         await service.SaveSettingsAsync(autumn.Id, new SettingsSave(
             "Autumn site", 40.0, -3.0,
@@ -1211,7 +1365,7 @@ public sealed class RideshareServiceTests : RideshareTestHarness
 
         var summer = await service.GetSnapshotAsync(EventId, Ct);
         summer.Settings!.DestinationLabel.Should().Be("Elsewhere");
-        summer.Trips.Select(t => t.Id).Should().Equal(legacyTrip.Id);
+        summer.Trips.Select(t => t.Id).Should().Equal(summerTrip.Id);
 
         var autumnSnapshot = await service.GetSnapshotAsync(autumn.Id, Ct);
         autumnSnapshot.EventName.Should().Be("Autumn Burn");
@@ -1234,27 +1388,26 @@ public sealed class RideshareServiceTests : RideshareTestHarness
     }
 
     [HumansFact]
-    public async Task AssignEventIds_StampsLegacyRowsWithTheEarliestEventOfTheirYear_AndIsIdempotent()
+    public async Task GetSnapshot_IgnoresUnassignedRows_EvenWhenTheirYearMatches()
     {
-        StubAutumnEvent();
         var settings = await SeedSettingsAsync();
         var trip = await SeedTripAsync(SeedUser());
         var request = await SeedRequestAsync(SeedUser());
-        var orphan = await SeedTripAsync(SeedUser(), year: 2019);
-        var service = NewService();
+        settings.EventSettingsId = null;
+        trip.EventSettingsId = null;
+        request.EventSettingsId = null;
+        await Db.SaveChangesAsync(Ct);
+        var assignedTrip = await SeedTripAsync(SeedUser());
 
-        (await service.GetEventIdPlanAsync(Ct)).Where(p => p.Event is not null).Should().HaveCount(3)
-            .And.OnlyContain(p => p.Event!.Id == EventId);
+        var snapshot = await NewService().GetSnapshotAsync(EventId, Ct);
 
-        (await service.AssignEventIdsAsync(Ct)).Should().Be(3);
-        (await service.AssignEventIdsAsync(Ct)).Should().Be(0);
-
+        snapshot.Settings.Should().BeNull();
+        snapshot.Trips.Select(t => t.Id).Should().Equal(assignedTrip.Id);
+        snapshot.Requests.Should().BeEmpty();
         await using var ctx = OpenContext();
-        (await ctx.Settings.SingleAsync(s => s.Id == settings.Id, Ct)).EventSettingsId.Should().Be(EventId);
-        (await ctx.Trips.SingleAsync(t => t.Id == trip.Id, Ct)).EventSettingsId.Should().Be(EventId);
-        (await ctx.Requests.SingleAsync(r => r.Id == request.Id, Ct)).EventSettingsId.Should().Be(EventId);
-        (await ctx.Trips.SingleAsync(t => t.Id == orphan.Id, Ct)).EventSettingsId.Should().BeNull();
-        (await service.GetSnapshotAsync(EventId, Ct)).Trips.Select(t => t.Id).Should().Equal(trip.Id);
+        (await ctx.Settings.SingleAsync(s => s.Id == settings.Id, Ct)).EventSettingsId.Should().BeNull();
+        (await ctx.Trips.SingleAsync(t => t.Id == trip.Id, Ct)).EventSettingsId.Should().BeNull();
+        (await ctx.Requests.SingleAsync(r => r.Id == request.Id, Ct)).EventSettingsId.Should().BeNull();
     }
 
     /// <summary>A second, later event in <see cref="RideshareTestHarness.Year"/>; the harness's event stays the earliest.</summary>

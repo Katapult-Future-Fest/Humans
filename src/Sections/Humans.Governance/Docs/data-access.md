@@ -4,8 +4,8 @@
 
 Project: `src/Sections/Humans.Governance`; services under `Services/`,
 repository under `Data/`. **DbContext:**
-`GovernanceDbContext`. `ApplicationRepository`,
-`AssemblyVoteRepository` and `MembershipTierRepository` inject
+`GovernanceDbContext`. `ApplicationRepository`
+and `AssemblyVoteRepository` inject
 `IDbContextFactory<GovernanceDbContext>` directly. Owns
 `Applications`, `MembershipTiers` (`governance_membership_tiers`), `ApplicationStateHistories`, `BoardVotes`,
 `AssemblyVotes`, `AssemblyVoteOptions`, `AssemblyVoteRosterEntries`,
@@ -19,7 +19,7 @@ membership-tier expiry and the section's own members. Readers outside this secti
 `IGovernanceService` — tier reads from Users (popover, human summary, admin detail, duplicate
 accounts), Onboarding, Workgroups, Tickets, Surveys, Agent and Teams. Nothing outside the section
 writes Governance data: the section's own `MembershipTierExpiryJob` calls
-`IGovernanceManagement.ExpireMembershipTiersAsync` and records the `TierDowngraded` audit.
+`IGovernanceManagement.ExpireMembershipTiersAsync`; `MembershipTierService` records each `TierDowngraded` audit after its tier mutation commits.
 
 Cross-section reads inside the section go through the read surfaces
 (`IUserService`, `ITeamService`, `IConsentService`).
@@ -56,7 +56,7 @@ delegate to `MembershipTierService`.
 ### MembershipTierService (Scoped, internal)
 
 Repositories: `IMembershipTierRepository`, plus `IApplicationRepository` (read-only — grant
-and term data for expiry).
+and term data for expiry). Both interfaces resolve to `ApplicationRepository`; its membership-tier partial owns tier access so approvals can commit the tier and application together.
 
 | Table | R/W |
 |-------|-----|
@@ -85,7 +85,7 @@ Repositories: `IAssemblyVoteRepository`, plus the section's `IApplicationReposit
 
 No cache, no caching decorator — one vote at a time and ~120 voters.
 
-Cross-section calls via `IUserService`, `IUserEmailService`,
+Cross-section calls via `IUserService`,
 `IRoleAssignmentService`, `ITeamService`, `IEmailService`,
 the section's own `GovernanceEmails` builder, `INotificationEmitter`,
 `INotificationAutoResolve`, `IAuditLogService`, `IGoogleTranslationService`,
@@ -167,3 +167,55 @@ for `/Email/EmailPreview`. No DB access, no cache.
 ---
 
 
+
+### ApplicationReader (internal, owned by ApplicationDecisionService)
+
+Repository: `IApplicationRepository`. Reads application member/admin/Board views,
+pending snapshots and summary counts; enriches through the existing Users and Auth
+role-assignment contracts. Owns shared vote/history projection. No writes, cache
+or separate DI registration; badge caching remains in the decision service.
+
+### AssemblyVoteDrafts (internal, owned by AssemblyVoteService)
+
+Repository: `IAssemblyVoteRepository`. Owns draft authoring and its existing
+state/revision guards; uses the existing translation contract, clock and logger.
+Shares bounded-text and safe-URL policy with the service. No legal-vote transitions,
+cache or separate DI registration.
+
+### ApplicationDecisionNotices (internal, owned by ApplicationDecisionService)
+
+No repository. Sends the approval, rejection and withdrawal email and in-app
+notification for a decided `Application` through `IUserService`, `IEmailService`,
+`INotificationEmitter` and the `GovernanceEmails` builder, localised to the applicant's
+language. Not DI-registered — the decision service constructs it. No DB access, no cache.
+
+### AssemblyVoteDataExport (internal, owned by AssemblyVoteService)
+
+Repository: `IAssemblyVoteRepository`. Builds the member's GDPR export slices
+(`AssemblyVotes`, `AssemblyVoteActions`) behind `AssemblyVoteService`'s
+`IUserDataContributor`; resolves the merge chain through `IUserService`. Read-only. Not
+DI-registered. No cache.
+
+| Table | R/W |
+|-------|-----|
+| AssemblyVoteRosterEntries | R (`GetVotingRecordForUserAsync`) |
+| AssemblyVotes | R (voting record; votes the user created or peeked at via `GetActorRecordForUserAsync`) |
+| AssemblyBallots | R |
+| AssemblyBallotHistories | R (revisions included with the ballot) |
+| AssemblyVotePeeks | R (`GetActorRecordForUserAsync`) |
+
+### AssemblyVoteEffects (internal, owned by AssemblyVoteService)
+
+Repository: `IAssemblyVoteRepository`. Owns the notification side of the vote lifecycle:
+open and close notices, the pre-close reminder sweep, and the roster `NotifiedAt` /
+`ReminderSentAt` stamps. Not DI-registered. No cache.
+
+| Table | R/W |
+|-------|-----|
+| AssemblyVotes | R (`GetByIdAsync`, `GetOpenVotesClosingBetweenAsync`) |
+| AssemblyVoteOptions | R (loaded with the vote) |
+| AssemblyVoteRosterEntries | R/W (roster reads; `StampNotifiedAsync`, `StampReminderSentAsync` write the stamps) |
+| AssemblyBallots | R (`GetBallotForRosterAsync`, reminder filter) |
+
+Cross-section calls via `IUserService`, `IEmailService`, `INotificationEmitter`,
+`INotificationAutoResolve`, `IAuditLogService`, `IClock`, and the section's `GovernanceEmails`.

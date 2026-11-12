@@ -1,104 +1,97 @@
+using Humans.AuditLog.Contracts;
+using Humans.Base.Interfaces;
+using Humans.Workgroups.Data;
+using Humans.Notifications.Contracts;
 using Humans.Workgroups.Domain;
 using NodaTime;
 
 namespace Humans.Workgroups.Services;
 
-/// <summary>
-/// Kept out of the projection: the register is cached, so anything derived from "now" is computed at read time.
-/// The job and the views both ask here, so a page badge and a job action can't disagree.
-/// </summary>
-internal static class WorkgroupRhythm
+internal sealed class WorkgroupRhythm(
+    IWorkgroupRepository repository,
+    WorkgroupNotices notices,
+    IAuditLogService auditLog,
+    IClock clock,
+    ILogger<WorkgroupService> logger) : IApplicationService
 {
-    public static readonly Duration UpdateDueAfter = Duration.FromDays(30);
-
-    /// <summary>Clause 1's fourteen days for the Secretary to act on an application.</summary>
-    public static readonly Duration RegistrationDueAfter = Duration.FromDays(14);
-
-    /// <summary>A delivered document with no disposition after this long is highlighted for the Board.</summary>
-    public static readonly Duration DispositionOverdueAfter = Duration.FromDays(60);
-
-    /// <summary>A soft leave keeps the row off the roster; a pending request isn't on it yet.</summary>
-    public static IEnumerable<WorkgroupMemberInfo> CurrentMembers(this WorkgroupInfo w) =>
-        w.Members.Where(m => m.LeftAt is null && !m.IsPending);
-
-    public static IEnumerable<WorkgroupMemberInfo> PendingMembers(this WorkgroupInfo w) =>
-        w.Members.Where(m => m.LeftAt is null && m.IsPending);
-
-    public static bool IsPendingMember(this WorkgroupInfo w, Guid userId) =>
-        w.PendingMembers().Any(m => m.UserId == userId);
-
-    public static bool IsCoordinator(this WorkgroupInfo w, Guid userId) =>
-        w.Coordinators().Any(m => m.UserId == userId);
-
-    public static IEnumerable<WorkgroupMemberInfo> Coordinators(this WorkgroupInfo w) =>
-        w.CurrentMembers().Where(m => m.Role == WorkgroupMemberRole.Coordinator);
-
-    public static IReadOnlyList<Guid> CoordinatorUserIds(this WorkgroupInfo w) =>
-        w.Coordinators().Select(m => m.UserId).ToList();
-
-    public static IReadOnlyList<Guid> CurrentMemberUserIds(this WorkgroupInfo w) =>
-        w.CurrentMembers().Select(m => m.UserId).ToList();
-
-    public static bool IsMember(this WorkgroupInfo w, Guid userId) =>
-        w.CurrentMembers().Any(m => m.UserId == userId);
-
-    public static bool AcceptsMemberWork(this WorkgroupInfo w) => w.Status == WorkgroupStatus.Active;
-
-    /// <summary>Not yet started, soonest first.</summary>
-    public static IEnumerable<WorkgroupMeetingInfo> UpcomingMeetings(this WorkgroupInfo w, Instant now) =>
-        w.Meetings.Where(m => m.StartUtc >= now).OrderBy(m => m.StartUtc);
-
-    public static WorkgroupMeetingInfo? NextMeeting(this WorkgroupInfo w, Instant now) =>
-        w.UpcomingMeetings(now).FirstOrDefault();
-
-    /// <summary>An Update entry or a meeting; a Note or Disclosure doesn't count.</summary>
-    public static Instant? LastActivityAt(this WorkgroupInfo w, Instant now)
+    public async Task RunDailyRhythmAsync(CancellationToken ct = default)
     {
-        var lastUpdate = w.LogEntries
-            .Where(e => e.Kind == WorkgroupLogKind.Update)
-            .Select(e => (Instant?)e.CreatedAt)
-            .Max();
-        var lastMeeting = w.Meetings.Where(m => m.StartUtc <= now).Select(m => (Instant?)m.StartUtc).Max();
+        var now = clock.GetCurrentInstant();
+        var graph = await repository.GetGraphAsync(ct);
 
-        return (lastUpdate, lastMeeting) switch
+        foreach (var workgroup in graph.Workgroups)
         {
-            (null, null) => null,
-            (null, var m) => m,
-            (var u, null) => u,
-            var (u, m) => Instant.Max(u.Value, m.Value)
-        };
+            ct.ThrowIfCancellationRequested();
+            var info = WorkgroupRegisterReader.ToInfo(workgroup);
+
+            // One group's failure isn't the pass's: the rest still get their notices.
+            try
+            {
+                if (info.Status == WorkgroupStatus.Active)
+                {
+                    await NudgeForUpdateAsync(workgroup, info, now, ct);
+                }
+                else if (info.Status is WorkgroupStatus.Applied or WorkgroupStatus.Referred)
+                {
+                    await FlagOverdueRegistrationAsync(workgroup, info, now, ct);
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "The workgroup rhythm pass failed for {WorkgroupId}", workgroup.Id);
+            }
+        }
     }
 
-    /// <summary>Measured from registration when the group has never shown activity.</summary>
-    public static Duration? SilenceFor(this WorkgroupInfo w, Instant now)
+    /// <summary>In-app only.</summary>
+    private async Task NudgeForUpdateAsync(
+        Workgroup workgroup, WorkgroupInfo info, Instant now, CancellationToken ct)
     {
-        var since = w.LastActivityAt(now) ?? w.RegisteredAt;
-        return since is null ? null : now - since.Value;
+        if (info.SilenceFor(now) is not { } silence || !info.IsUpdateDue(now))
+            return;
+
+        // Once per thirty-day window (day 30, 60, 90 …); the register badge carries it in between.
+        var days = (int)silence.TotalDays;
+        if (days % (int)WorkgroupInfo.UpdateDueAfter.TotalDays != 0)
+            return;
+
+        var coordinators = info.CoordinatorUserIds();
+        var dispatched = await notices.NotifyAsync(coordinators, WorkgroupsNotificationSources.WorkgroupReportingDue,
+            "Workgroups_Todo_UpdateDue_Title", info, body: null, ct);
+        if (dispatched > 0)
+            await AuditJobAsync(WorkgroupsAuditActions.WorkgroupUpdateDueNotified,
+                workgroup, $"Requested update notices for {dispatched} coordinators after {days} days of silence");
     }
 
-    public static bool IsUpdateDue(this WorkgroupInfo w, Instant now) =>
-        w.Status == WorkgroupStatus.Active
-        && w.SilenceFor(now) is { } silence
-        && silence >= UpdateDueAfter;
+    /// <summary>The Board is told once; the queue keeps showing it.</summary>
+    private async Task FlagOverdueRegistrationAsync(
+        Workgroup workgroup, WorkgroupInfo info, Instant now, CancellationToken ct)
+    {
+        if (!info.IsRegistrationOverdue(now)
+            || !JustCrossed(now - info.AppliedAt, WorkgroupInfo.RegistrationDueAfter))
+        {
+            return;
+        }
 
-    public static bool IsRegistrationOverdue(this WorkgroupInfo w, Instant now) =>
-        w.Status is WorkgroupStatus.Applied or WorkgroupStatus.Referred
-        && now - w.AppliedAt >= RegistrationDueAfter;
+        await AuditJobAsync(WorkgroupsAuditActions.WorkgroupApplicationOverdue,
+            workgroup, "Application still undecided fourteen days after it was made");
+        await notices.NotifyBoardAsync(WorkgroupsNotificationSources.WorkgroupRegistrationPending,
+            $"Application overdue: {workgroup.Name}", info,
+            "Clause 1 gives the Secretary fourteen days. This application is past that.", ct);
+    }
 
-    public static bool IsOpenForComment(this WorkgroupDocumentInfo d, Instant now) =>
-        d.Status == WorkgroupDocumentStatus.Published
-        && d.CommentsOpenAt is { } from
-        && d.CommentsCloseAt is { } to
-        && now >= from
-        && now < to;
+    /// <summary>
+    /// True on the one daily pass that first sees <paramref name="elapsed"/> past <paramref name="threshold"/>.
+    /// The queue row is the durable signal, so a missed pass costs only a nudge.
+    /// </summary>
+    private static bool JustCrossed(Duration elapsed, Duration threshold) =>
+        elapsed >= threshold && elapsed - threshold < Duration.FromDays(1);
+    private async Task AuditJobAsync(AuditActionDefinition action, Workgroup w, string description)
+    {
+        await auditLog.LogAsync(action, AuditEntityTypes.Workgroup, w.Id, description,
+            WorkgroupRhythmJobName);
+    }
 
-    public static bool IsOpenForComment(this WorkgroupInfo w, Instant now) =>
-        w.Documents.Any(d => d.IsOpenForComment(now));
+    internal const string WorkgroupRhythmJobName = "WorkgroupRhythmJob";
 
-    public static IEnumerable<WorkgroupDocumentInfo> AwaitingDisposition(this WorkgroupInfo w) =>
-        w.Documents.Where(d => d.Status == WorkgroupDocumentStatus.Delivered
-            && d.Disposition is null or WorkgroupDisposition.Deferred);
-
-    public static bool HasOverdueDisposition(this WorkgroupInfo w, Instant now) =>
-        w.AwaitingDisposition().Any(d => d.DeliveredAt is { } at && now - at >= DispositionOverdueAfter);
 }

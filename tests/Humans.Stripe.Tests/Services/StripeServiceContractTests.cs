@@ -244,8 +244,25 @@ public class StripeServiceContractTests
     }
 
     [HumansTheory]
+    [InlineData("{")]
+    [InlineData("[]")]
+    [InlineData("{\"object\":\"v2.core.event\"}")]
+    [InlineData("{}")]
+    [InlineData("{\"id\":\"evt_invalid\",\"type\":\"checkout.session.completed\",\"data\":null}")]
+    [InlineData("{\"type\":\"checkout.session.completed\",\"data\":{\"object\":{\"object\":\"checkout.session\",\"id\":\"cs_test\",\"currency\":\"eur\"}}}")]
+    [InlineData("{\"id\":\"evt_invalid\",\"type\":\"checkout.session.completed\",\"data\":{\"object\":{\"object\":\"customer\",\"id\":\"cus_private\"}}}")]
+    public void ParseStoreCheckoutEvent_rejects_signed_malformed_payloads_without_throwing(string payload)
+    {
+        var (svc, log) = Build(s => s.StoreWebhookSecret = TestWebhookSecret);
+
+        svc.ParseStoreCheckoutEvent(payload, Sign(payload, TestWebhookSecret)).Should().BeNull();
+
+        log.Entries.Should().Contain(e => e.Level == LogLevel.Warning);
+    }
+
+    [HumansTheory]
     [InlineData(0)]
-    [InlineData(-0.01)]
+    [InlineData("-0.01")]
     [InlineData(-100)]
     public async Task CreateCheckoutSession_rejects_a_non_positive_amount(decimal amountEur)
     {
@@ -398,6 +415,48 @@ public class StripeServiceContractTests
             Guid.NewGuid(), 10m, "https://x/ok", "https://x/no", null, "Order", TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<StripeException>();
+    }
+
+    [HumansFact]
+    public async Task CreateCheckoutSession_opens_no_replacement_when_the_superseded_session_already_completed()
+    {
+        var http = Substitute.For<IHttpClient>();
+        using var headers = new HttpResponseMessage();
+        http.MakeRequestAsync(Arg.Any<StripeRequest>(), Arg.Any<CancellationToken>()).Returns(
+            new StripeResponse(HttpStatusCode.BadRequest, headers.Headers,
+                """{"error":{"type":"invalid_request_error","message":"Only open sessions can be expired."}}"""),
+            new StripeResponse(HttpStatusCode.OK, headers.Headers,
+                """{"id":"cs_paid","object":"checkout.session","status":"complete","currency":"eur","amount_total":2000,"created":1750000000}"""));
+        var svc = new StripeService(Options.Create(new StripeSettings { StoreKey = "rk_test_s" }),
+            new CapturingLogger<StripeService>(), http);
+
+        var result = await svc.CreateCheckoutSessionAsync(Guid.NewGuid(), 30m, "https://x/ok", "https://x/no", null,
+            "Order", TestContext.Current.CancellationToken, Guid.NewGuid(), "cs_paid");
+
+        result.SessionId.Should().Be("cs_paid");
+        result.Status.Should().Be("complete");
+        result.Url.Should().BeNull();
+        await http.Received(2).MakeRequestAsync(Arg.Any<StripeRequest>(), Arg.Any<CancellationToken>());
+    }
+
+    [HumansFact]
+    public async Task CreateCheckoutSession_returns_a_replayed_attempt_in_its_live_state()
+    {
+        var http = Substitute.For<IHttpClient>();
+        using var headers = new HttpResponseMessage();
+        http.MakeRequestAsync(Arg.Any<StripeRequest>(), Arg.Any<CancellationToken>()).Returns(
+            new StripeResponse(HttpStatusCode.OK, headers.Headers,
+                """{"id":"cs_replay","object":"checkout.session","status":"open","url":"https://pay.test/x","currency":"eur","amount_total":2000,"created":1750000000}"""),
+            new StripeResponse(HttpStatusCode.OK, headers.Headers,
+                """{"id":"cs_replay","object":"checkout.session","status":"expired","currency":"eur","amount_total":2000,"created":1750000000}"""));
+        var svc = new StripeService(Options.Create(new StripeSettings { StoreKey = "rk_test_s" }),
+            new CapturingLogger<StripeService>(), http);
+
+        var result = await svc.CreateCheckoutSessionAsync(Guid.NewGuid(), 20m, "https://x/ok", "https://x/no", null,
+            "Order", TestContext.Current.CancellationToken, Guid.NewGuid());
+
+        result.Status.Should().Be("expired");
+        result.Url.Should().BeNull();
     }
 
     [HumansFact]

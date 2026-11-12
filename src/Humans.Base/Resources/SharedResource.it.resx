@@ -55,6 +55,11 @@
   <data name="Common_Close" xml:space="preserve">
     <value>Chiudi</value>
   </data>
+  <data name="Common_Previous" xml:space="preserve"><value>Precedente</value></data>
+  <data name="Common_Next" xml:space="preserve"><value>Successiva</value></data>
+  <data name="Common_Pagination" xml:space="preserve"><value>Paginazione</value></data>
+  <data name="Common_Breadcrumb" xml:space="preserve"><value>Percorso di navigazione</value></data>
+  <data name="Common_Filter" xml:space="preserve"><value>Filtra</value></data>
   <data name="Common_FilterColumn" xml:space="preserve"><value>Filtra {0}</value></data>
   <data name="Common_All" xml:space="preserve"><value>Tutti</value></data>
   <data name="SectionHelp_Title" xml:space="preserve"><value>Guida alla sezione</value></data>
@@ -301,12 +306,6 @@
   <data name="LinkPreview_Expenses_Description" xml:space="preserve">
     <value>Richieste di spesa e rimborsi.</value>
   </data>
-  <data name="LinkPreview_Feedback_Title" xml:space="preserve">
-    <value>Feedback</value>
-  </data>
-  <data name="LinkPreview_Feedback_Description" xml:space="preserve">
-    <value>Invia un feedback su Humans.</value>
-  </data>
   <data name="LinkPreview_Finance_Title" xml:space="preserve">
     <value>Finanze</value>
   </data>
@@ -505,7 +504,7 @@
     <value>Camp &amp; barrios</value>
   </data>
   <data name="Home_CampsDescription" xml:space="preserve">
-    <value>Registra il tuo camp, scopri i vicini per atmosfera o zona sonora e conferma la tua partecipazione ogni stagione.</value>
+    <value>Registra il tuo camp, scopri i vicini per atmosfera o zona sonora e conferma la tua partecipazione ogni stagione. Trova il tuo posto sulla mappa.</value>
   </data>
   <data name="Home_TicketsTitle" xml:space="preserve">
     <value>Biglietteria &amp; eventi</value>
@@ -929,9 +928,6 @@
   <data name="Nav_City" xml:space="preserve">
     <value>Mappa</value>
   </data>
-  <data name="Nav_Rideshare" xml:space="preserve">
-    <value>Passaggi</value>
-  </data>
   <data name="Nav_Budget" xml:space="preserve">
     <value>Budget</value>
   </data>
@@ -961,17 +957,8 @@
   <data name="Search_Title" xml:space="preserve">
     <value>Cerca Humans</value>
   </data>
-  <data name="Search_Placeholder" xml:space="preserve">
-    <value>Cerca per nome, città, interessi, bio...</value>
-  </data>
-  <data name="Search_NoResults" xml:space="preserve">
-    <value>Nessun human trovato corrispondente alla tua ricerca.</value>
-  </data>
   <data name="Search_MatchedIn" xml:space="preserve">
     <value>Corrispondenza in</value>
-  </data>
-  <data name="Search_MinChars" xml:space="preserve">
-    <value>Inserisci almeno 2 caratteri per cercare.</value>
   </data>
   <data name="Camp_Plural" xml:space="preserve">
     <value>Barrios</value>
@@ -1164,9 +1151,6 @@
   <data name="ShiftsSummary_ManageShifts" xml:space="preserve">
     <value>Gestisci turni</value>
   </data>
-  <data name="Medical_Badge" xml:space="preserve">
-    <value>Medico</value>
-  </data>
   <data name="Privacy_Lead" xml:space="preserve">
     <value>Humans gestisce l'appartenenza a Nobodies Collective e tratta i dati personali in conformità con il GDPR e la legge spagnola sulla protezione dei dati (LOPDGDD).</value>
   </data>
@@ -1174,7 +1158,7 @@
     <value>Titolare del trattamento</value>
   </data>
   <data name="Privacy_DataControllerBody" xml:space="preserve">
-    <value>Un'associazione senza scopo di lucro spagnola registrata in Andalusia.</value>
+    <value>Un'associazione senza scopo di lucro spagnola con sede a Madrid (NIF G26726299).</value>
   </data>
   <data name="Privacy_DataControllerDPO" xml:space="preserve">
     <value>Per richieste sulla protezione dei dati, contatta il nostro Responsabile della Protezione dei Dati a:</value>
@@ -1364,7 +1348,7 @@
   <data name="Todo_DietaryMedical_Done" xml:space="preserve"><value>Grazie — abbiamo le tue informazioni</value></data>
   <data name="Todo_DietaryMedical_Action" xml:space="preserve"><value>Compila</value></data>
   <data name="Todo_DietaryMedical_NoShift_Pending" xml:space="preserve"><value>Raccontaci le tue esigenze alimentari per permetterci di prepararci quando ti iscriverai.</value></data>
-  <data name="Common_Optional" xml:space="preserve"><value>Optional</value></data>
+  <data name="Common_Optional" xml:space="preserve"><value>Facoltativo</value></data>
 
   <!-- ======================== -->
   <!-- Survey                   -->
@@ -1408,13 +1392,16 @@
   <data name="About_License_BSD2" xml:space="preserve"><value>richiede l'avviso di copyright nella documentazione.</value></data>
   <data name="About_License_BSD3MapLibre" xml:space="preserve"><value>richiede l'avviso di copyright; questa pagina soddisfa tale obbligo.</value></data>
   <data name="About_License_ISC" xml:space="preserve"><value>permissiva, funzionalmente equivalente alla BSD-2-Clause; richiede l'avviso di copyright.</value></data>
+  <data name="About_License_AGPL30" xml:space="preserve"><value>la stessa licenza di Humans; il codice sorgente completo di Humans è pubblico, il che la rispetta.</value></data>
+  <data name="About_License_CCBY40" xml:space="preserve"><value>richiede l'attribuzione; questa pagina soddisfa tale obbligo.</value></data>
   <data name="About_License_LGPL30" xml:space="preserve"><value>la libreria deve essere sostituibile dall'utente finale. Consumata come pacchetti NuGet non modificati (collegati dinamicamente), soddisfacendo gli obblighi LGPL.</value></data>
   <data name="About_License_MIT" xml:space="preserve"><value>richiede l'avviso di copyright; questa pagina soddisfa tale obbligo.</value></data>
   <data name="About_License_PostgreSQL" xml:space="preserve"><value>permissiva, simile alla MIT; richiede l'avviso di copyright.</value></data>
   <data name="About_License_SILOFL" xml:space="preserve"><value>liberamente utilizzabile e ridistribuibile; i font non possono essere venduti separatamente.</value></data>
+  <data name="About_License_SourceAvailableAt" xml:space="preserve"><value>Codice sorgente disponibile su</value></data>
   <data name="About_LicenseBody" xml:space="preserve"><value>Humans è software libero, rilasciato sotto la</value></data>
   <data name="About_LicenseComplianceHeading" xml:space="preserve"><value>Riepilogo conformità delle licenze</value></data>
-  <data name="About_LicenseComplianceSummary" xml:space="preserve"><value>Tutte le dipendenze di produzione usano licenze permissive o weak-copyleft. Nessuna violazione rilevata.</value></data>
+  <data name="About_LicenseComplianceSummary" xml:space="preserve"><value>Tutte le dipendenze di produzione usano licenze permissive, weak-copyleft o compatibili con AGPL. Nessuna violazione rilevata.</value></data>
   <data name="About_LicenseExplanation" xml:space="preserve"><value>Puoi usare, studiare, modificare e ridistribuire questo software. Se esegui una versione modificata e permetti ad altri di interagire con essa attraverso una rete, devi rendere disponibile il tuo codice sorgente modificato sotto la stessa licenza.</value></data>
   <data name="About_LicenseFullText" xml:space="preserve"><value>Testo completo della licenza:</value></data>
   <data name="About_LicenseHeading" xml:space="preserve"><value>Licenza</value></data>
@@ -1522,6 +1509,14 @@
   <data name="MarkdownHelp_TaskToDo" xml:space="preserve"><value>Da fare</value></data>
   <data name="MarkdownHelp_Title" xml:space="preserve"><value>Guida rapida a Markdown</value></data>
   <data name="Privacy_ThirdParty_GooglePolicyLink" xml:space="preserve"><value>Informativa sulla privacy di Google</value></data>
+  <data name="Privacy_ThirdParty_Gmail" xml:space="preserve"><value>Per recapitare le email che ti inviamo (il tuo indirizzo email, il nome e il contenuto del messaggio)</value></data>
+  <data name="Privacy_ThirdParty_GoogleMaps" xml:space="preserve"><value>Per la ricerca di località e le mappe (il luogo che cerchi e il tuo indirizzo IP, inviati dal tuo browser)</value></data>
+  <data name="Privacy_ThirdParty_Stripe" xml:space="preserve"><value>Per i pagamenti con carta nello Store (nome e indirizzo email dell'acquirente; i dati della carta vengono inseriti direttamente su Stripe)</value></data>
+  <data name="Privacy_ThirdParty_Holded" xml:space="preserve"><value>Per la contabilità dell'associazione (per i rimborsi spese: nome legale, burner name, IBAN, dettagli della spesa e ricevute; per le fatture dello Store: nome, codice fiscale, indirizzo e indirizzo email dell'acquirente)</value></data>
+  <data name="Privacy_ThirdParty_TicketTailor" xml:space="preserve"><value>Per la vendita e l'emissione dei biglietti (nome del titolare, indirizzo email e check-in)</value></data>
+  <data name="Privacy_ThirdParty_MailerLite" xml:space="preserve"><value>Per le mailing list (indirizzo email e appartenenza alle liste, ad esempio titolare di biglietto o volontario di turno; non condiviso se hai rifiutato le email di marketing)</value></data>
+  <data name="Privacy_ThirdParty_Anthropic" xml:space="preserve"><value>Per l'assistente di aiuto nell'app, solo quando lo usi (i tuoi messaggi, oltre al burner name, lingua, livello di adesione, ruoli, team e turni imminenti)</value></data>
+  <data name="Privacy_ThirdParty_PolicyLink" xml:space="preserve"><value>Informativa sulla privacy</value></data>
   <data name="Onboarding_BurnerNameLabel" xml:space="preserve"><value>Burner name</value></data>
   <data name="Onboarding_LegalFirstNameLabel" xml:space="preserve"><value>Nome legale</value></data>
   <data name="Onboarding_LegalLastNameLabel" xml:space="preserve"><value>Cognome legale</value></data>

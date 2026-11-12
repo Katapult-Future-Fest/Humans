@@ -16,7 +16,7 @@
 
 ## Business Context
 
-When Google Workspace sync removes a user's email address from a Google Group or revokes a Google Drive permission, Google itself sends nothing. Most removals are routine secondary-email cleanup (a Human has multiple `UserEmail` rows; the user or admin flips `IsGoogle` from address A to address B; sync removes A from groups/folders while B keeps full access). A smaller fraction are genuine loss-of-access (role change, team change, account deletion). Both look identical from the recipient's mailbox: silence.
+When Google Workspace sync removes a user's email address from a Google Group or revokes a Google Drive permission, Google itself sends nothing. Most removals are routine secondary-email cleanup (a Human has multiple `UserEmail` rows; the user or admin moves the Google Workspace identity from address A to address B; sync removes A from groups/folders while B keeps full access). A smaller fraction are genuine loss-of-access (role change, team change, account deletion). Both look identical from the recipient's mailbox: silence.
 
 This silence drives support load — *"why am I no longer in the team mailing list?"* — and hides mistakes: when sync removes someone in error, neither the user nor a coordinator finds out until access is missed.
 
@@ -50,12 +50,12 @@ Tracked in: peterdrier/Humans#639. Initial implementation: peterdrier/Humans#404
 - Body directs the user to contact their team coordinator if the removed address should still have had access
 
 ### US-41.3: Localized delivery
-**As a** Spanish / Catalan / German / French / Italian / English-speaking member
+**As a** Spanish / Catalan / German / French / Italian / Dutch / English-speaking member
 **I want to** receive removal notifications in my preferred language
 **So that** the message is actionable without translation
 
 **Acceptance Criteria:**
-- Templates exist in all six supported cultures (`en`, `es`, `de`, `it`, `fr`, `ca`)
+- Templates exist in all supported cultures (`en`, `es`, `de`, `it`, `fr`, `ca`, `nl`)
 - Recipient's `User.PreferredLanguage` selects the culture; missing, blank or unsupported falls back to `en`
 
 ### US-41.4: Suppression for known non-events
@@ -99,7 +99,7 @@ The send target in both variants is the address that was removed — the mailbox
 
 - All three templates render through `BrandedEmailBodyComposer` for the standard header / footer
 - All three are enqueued with `MessageCategory.System` — the existing outbox path suppresses the unsubscribe footer for system-category messages, which matches the spec's intent (action-confirmation notifications are not unsubscribable)
-- GoogleIntegration owns the copy: `GoogleIntegrationEmails` builds each `EmailMessage` from `GoogleIntegrationResource{,.es,.de,.it,.fr,.ca}.resx` (`src/Sections/Humans.GoogleIntegration/`) keyed `GoogleIntegration_Email_GoogleGroupRemoval_LossOfAccess_*`, `GoogleIntegration_Email_GoogleDriveRemoval_LossOfAccess_*`, `GoogleIntegration_Email_GoogleAccessRemoval_SecondaryCleanup_*`; Email supplies transport only (`memory/architecture/email-templates-live-in-sender.md`)
+- GoogleIntegration owns the copy: `GoogleIntegrationEmails` builds each `EmailMessage` from `GoogleIntegrationResource{,.es,.de,.it,.fr,.ca,.nl}.resx` (`src/Sections/Humans.GoogleIntegration/`) keyed `GoogleIntegration_Email_GoogleGroupRemoval_LossOfAccess_*`, `GoogleIntegration_Email_GoogleDriveRemoval_LossOfAccess_*`, `GoogleIntegration_Email_GoogleAccessRemoval_SecondaryCleanup_*`; Email supplies transport only (`memory/architecture/email-templates-live-in-sender.md`)
 - Resource-name fallback: if `resourceName` is missing, use `resourceIdentifier` (group email or URL); if both are missing, fall back to `(unknown)` rather than crashing
 
 ## Group-Email Derivation

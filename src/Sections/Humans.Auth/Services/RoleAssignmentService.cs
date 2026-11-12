@@ -1,7 +1,8 @@
+using System.Globalization;
+using System.Resources;
 using Humans.Auth.Data;
 using Humans.Auth.Contracts;
 using NodaTime;
-using Humans.Base.Attributes;
 using Humans.Base.Extensions;
 using Humans.Base.Constants;
 using Humans.Auth.Domain;
@@ -14,9 +15,6 @@ using Humans.Teams.Contracts;
 
 namespace Humans.Auth.Services;
 
-[DontFix(
-    reason: "Auth (crosscut) references vertical sections — IUserService for assignee/creator display stitching, ISystemTeamSync for system-team membership. Permanent exception pending Peter-led inversion.",
-    since: "2026-05-25")]
 internal sealed class RoleAssignmentService(
     IRoleAssignmentRepository repository,
     IUserService userService,
@@ -29,6 +27,11 @@ internal sealed class RoleAssignmentService(
     ILogger<RoleAssignmentService> logger) : IRoleAssignmentManagement, IUserDataContributor, IUserMerge
 {
     internal const string RoleAssignments = "RoleAssignments";
+
+    // role_assignments.Notes is varchar(2000).
+    internal const int MaxNotesLength = 2000;
+
+    private static readonly ResourceManager NoticeResources = new(typeof(AuthResource));
 
     public async Task<(IReadOnlyList<RoleAssignmentSummarySnapshot> Items, int TotalCount)> GetFilteredAsync(
         string? roleFilter, bool activeOnly, int page, int pageSize, Instant now,
@@ -100,6 +103,11 @@ internal sealed class RoleAssignmentService(
             return new RoleAssignmentResult(false, "UnknownRole");
         }
 
+        if (notes?.Length > MaxNotesLength)
+        {
+            return new RoleAssignmentResult(false, "NotesTooLong");
+        }
+
         var now = clock.GetCurrentInstant();
 
         var hasOverlap = await repository.HasOverlappingAssignmentAsync(
@@ -125,26 +133,11 @@ internal sealed class RoleAssignmentService(
         rowCache.Clear();
 
         await auditLogService.LogAsync(
-            AuthAuditActions.RoleAssigned, nameof(User), userId,
+            AuthAuditActions.RoleAssigned, AuditSubjectTypes.User, userId,
             $"'{roleName}'",
             assignerId);
 
-        // Best-effort in-app notification.
-        try
-        {
-            await notificationService.SendAsync(
-                AuthNotificationSources.RoleAssignmentChanged,
-                NotificationClass.Informational,
-                NotificationPriority.Normal,
-                $"You were assigned the {roleName} role",
-                [userId],
-                actionUrl: "/Profile",
-                cancellationToken: ct);
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Failed to dispatch RoleAssignmentChanged notification for user {UserId} role {Role}", userId, roleName);
-        }
+        await NotifyRoleChangedAsync(userId, roleName, assigned: true);
 
         if (string.Equals(roleName, RoleNames.Board, StringComparison.Ordinal))
         {
@@ -173,39 +166,27 @@ internal sealed class RoleAssignmentService(
             return new RoleAssignmentResult(false, "RoleNotActive");
         }
 
-        roleAssignment.ValidTo = now;
-        if (!string.IsNullOrWhiteSpace(notes))
+        var endedNotes = string.IsNullOrWhiteSpace(notes) ? roleAssignment.Notes
+            : string.IsNullOrEmpty(roleAssignment.Notes) ? $"Ended: {notes}"
+            : $"{roleAssignment.Notes} | Ended: {notes}";
+        if (endedNotes?.Length > MaxNotesLength)
         {
-            roleAssignment.Notes = string.IsNullOrEmpty(roleAssignment.Notes)
-                ? $"Ended: {notes}"
-                : $"{roleAssignment.Notes} | Ended: {notes}";
+            return new RoleAssignmentResult(false, "NotesTooLong");
         }
+
+        roleAssignment.ValidTo = now;
+        roleAssignment.Notes = endedNotes;
 
         await repository.UpdateAsync(roleAssignment, ct);
         // Evict before anything below reads roles back (the Board team sync).
         rowCache.Clear();
 
         await auditLogService.LogAsync(
-            AuthAuditActions.RoleEnded, nameof(User), roleAssignment.UserId,
+            AuthAuditActions.RoleEnded, AuditSubjectTypes.User, roleAssignment.UserId,
             $"'{roleAssignment.RoleName}'",
             enderId);
 
-        // Best-effort in-app notification.
-        try
-        {
-            await notificationService.SendAsync(
-                AuthNotificationSources.RoleAssignmentChanged,
-                NotificationClass.Informational,
-                NotificationPriority.Normal,
-                $"Your {roleAssignment.RoleName} role assignment has ended",
-                [roleAssignment.UserId],
-                actionUrl: "/Profile",
-                cancellationToken: ct);
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Failed to dispatch RoleAssignmentChanged notification for user {UserId} role {Role}", roleAssignment.UserId, roleAssignment.RoleName);
-        }
+        await NotifyRoleChangedAsync(roleAssignment.UserId, roleAssignment.RoleName, assigned: false);
 
         if (string.Equals(catalog.Canonical(roleAssignment.RoleName), RoleNames.Board, StringComparison.Ordinal))
         {
@@ -213,6 +194,39 @@ internal sealed class RoleAssignmentService(
         }
 
         return new RoleAssignmentResult(true);
+    }
+
+    private async Task NotifyRoleChangedAsync(Guid userId, string roleName, bool assigned)
+    {
+        // The role write committed; language lookup and delivery must finish independently of the request.
+        var culture = CultureInfo.GetCultureInfo(CultureCatalog.DefaultCultureCode);
+        try
+        {
+            var language = (await userService.GetUserInfoAsync(userId, CancellationToken.None))?.PreferredLanguage;
+            culture = CultureInfo.GetCultureInfo(
+                language.IsSupportedCultureCode() ? language! : CultureCatalog.DefaultCultureCode);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed to resolve role notification language for user {UserId}; using English", userId);
+        }
+
+        try
+        {
+            var key = assigned ? "Auth_Notification_RoleAssigned" : "Auth_Notification_RoleEnded";
+            await notificationService.SendAsync(
+                AuthNotificationSources.RoleAssignmentChanged,
+                NotificationClass.Informational,
+                NotificationPriority.Normal,
+                string.Format(culture, NoticeResources.GetString(key, culture)!, roleName),
+                [userId],
+                actionUrl: "/Profile",
+                cancellationToken: CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed to dispatch RoleAssignmentChanged notification for user {UserId} role {Role}", userId, roleName);
+        }
     }
 
     public Task<bool> IsUserAdminAsync(Guid userId, CancellationToken cancellationToken = default) =>

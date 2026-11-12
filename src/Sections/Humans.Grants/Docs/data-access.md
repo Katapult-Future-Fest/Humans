@@ -1,3 +1,8 @@
+<!-- freshness:triggers
+  src/Sections/Humans.Grants/**
+  tests/Humans.Grants.Tests/**
+-->
+
 # Grants — Data Access
 
 ## Grants
@@ -19,8 +24,7 @@ One partial class (`GrantService.*.cs`) registered once and resolved as `IGrantM
 | grant_program_managers | R/W (added/removed per program; deleted on erasure; re-keyed on merge) |
 | grants | R/W (deleted on erasure; re-keyed on merge, duplicate live grant revoked) |
 
-Cross-section calls via `IUserService` (merged ids, language, names), `IUserEmailService`
-(notification targets), `INotificationEmitter`, `IEmailService`, `IAuditLogService`, `ISettingsService` (events), plus the
+Cross-section calls via `IUserService` (merged ids, language, names and canonical notification targets), `INotificationEmitter`, `IEmailService`, `IAuditLogService`, `ISettingsService` (events), plus the
 section's own `GrantsEmails` builder and `IClock`. No `IMemoryCache`.
 
 ### GrantsEmails / GrantsEmailPreviews (Scoped)
@@ -30,3 +34,9 @@ No repository, no DB access, no cache. `GrantsEmails` builds `EmailMessage` valu
 gallery entry over it.
 
 ---
+
+### GrantNotices (internal, owned by GrantService)
+
+No repository or cache. Resolves recipients through `IUserService` and sends
+the section's localized copy through Email and Notifications; issue, resend and
+revoke call it after persist and audit. Not registered in DI.

@@ -4,12 +4,12 @@ using NodaTime;
 namespace Humans.Consent.Domain;
 
 /// <summary>
-/// Replaces the review columns on <c>profiles</c>, which Users keeps unwritten until the
-/// <c>consent.profile-review</c> data migration is done in production. The rejection state is Users'
-/// <c>users.State</c>; this row annotates it.
+/// The Consent Coordinator review. The rejection state is Users' <c>users.State</c>; this row annotates it.
 /// </summary>
 internal sealed class ConsentReview
 {
+    internal const int MaxTextLength = 4000;
+
     public Guid UserId { get; init; }
 
     /// <summary>Null until all required consents are signed.</summary>

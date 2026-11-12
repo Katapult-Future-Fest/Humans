@@ -64,17 +64,18 @@ documents from the legal-internal repo.
 
 ### LegalDocumentSyncRunner (Scoped)
 
-Repository: `IConsentRepository`.
+Repository: `ILegalDocumentRepository`.
 
 | Table | R/W |
 |-------|-----|
-| ConsentRecords | R |
+| LegalDocuments | R |
+| DocumentVersions | R/W (reads versions with a pending re-consent batch; `CompleteReConsentBatchAsync` clears the marker once a batch mails without failure) |
 
 The body of `SyncLegalDocumentsJob`. Runs
-`ILegalDocumentSyncManagement.SyncAllDocumentsAsync`, then, for each updated
-document, narrows the affected teams' active members down to those without a
-consent record for the new version — `GetPairsForUsersAndVersionsAsync` is its
-only repository call, read-only — and mails them the re-consent notice.
+`ILegalDocumentSyncManagement.SyncAllDocumentsAsync`, then, for each pending
+re-consent batch, narrows the affected teams' active members down to those without a
+consent record for the new version (through the section's own `IConsentService.GetConsentMapForUsersAsync`,
+not a `ConsentRecords` read) and mails them the re-consent notice.
 Cross-section calls via `IEmailService` plus the section's own `ConsentEmails`
 builder (`ReConsentsRequired`), `ITeamService` (team membership) and
 `IUserService`. No cache.
@@ -148,11 +149,16 @@ Repository: `IConsentReviewRepository` (Singleton, `IDbContextFactory<LegalDbCon
 The Consent Coordinator review (Users decomposition commit 12). Serves
 `IConsentService.GetConsentReviewAsync` / `GetConsentReviewsAsync` (forwarded
 by `ConsentService`, passed through `CachingConsentService` uncached), the
-`IConsentWrite` annotations, the `consent.profile-review` copy, and the
-`ConsentReview` export/erasure slice. Until the copy is done, a member with no
-row reads the legacy `profiles` review columns via `IUserService`; the copy
-also calls `IUserWrite.SetRejectedAsync` for a legacy rejection the stored
-state never recorded. No cache.
+`IConsentWrite` annotations and the `ConsentReview` export/erasure slice.
+Reads and writes use only `consent_reviews`; there is no legacy fallback or copy.
+`IUserService` resolves a merged-away id for reads and checks the raw profile exists
+for writes. No cache.
+
+### ConsentReviewQueueService (Scoped, internal; implements `IConsentReviewQueueService`)
+
+No repository. The Consent Coordinator review queue: reads reviews through `IConsentService`, people
+through `IUserService`, tiers and pending applications through `IGovernanceService`, signed/required counts
+through `IMembershipCalculator`, and clears or flags through the section's own `IConsentWrite`. No cache.
 
 ### ConsentReminderService (Scoped, internal; implements `IUserDataContributor`)
 

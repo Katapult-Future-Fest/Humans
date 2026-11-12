@@ -1,3 +1,4 @@
+using System.Transactions;
 using AwesomeAssertions;
 using Humans.AuditLog.Contracts;
 using Humans.Notifications.Contracts;
@@ -17,6 +18,49 @@ public sealed class ExpensesTransitionTests : PreapprovalsTestHarness
 {
     private static readonly Guid Report = Guid.NewGuid();
     private static readonly Guid OtherReport = Guid.NewGuid();
+
+    [HumansTheory]
+    [Xunit.InlineData("claim", true)]
+    [Xunit.InlineData("claim", false)]
+    [Xunit.InlineData("restamp", true)]
+    [Xunit.InlineData("restamp", false)]
+    [Xunit.InlineData("release", true)]
+    [Xunit.InlineData("release", false)]
+    [Xunit.InlineData("consume", true)]
+    [Xunit.InlineData("consume", false)]
+    public async Task ExpenseTransition_EmitsCompletionOnlyAfterTheReportCommits(string transition, bool commits)
+    {
+        var program = await SeedProgramAsync();
+        var person = SeedUser("Person");
+        var grant = await SeedGrantAsync(program, person,
+            status: string.Equals(transition, "claim", StringComparison.Ordinal) ? GrantStatus.Open : GrantStatus.Claimed,
+            expenseReportId: string.Equals(transition, "claim", StringComparison.Ordinal) ? null : Report);
+        var service = NewService();
+        NotificationResolve.ResolveBySourceKeyAsync(PreapprovalsNotificationSources.PreapprovalFileBy,
+                PreapprovalNotices.FileBySourceKey(grant.Id), person, Arg.Any<CancellationToken>())
+            .Returns(Task.FromException(new IOException("Inbox resolution unavailable")));
+        var afterCommit = new List<Func<CancellationToken, Task>>();
+        using (var scope = new TransactionScope(TransactionScopeOption.Required, TransactionScopeAsyncFlowOption.Enabled))
+        {
+            var result = transition switch
+            {
+                "claim" or "restamp" => await service.ClaimAsync(grant.Id, Report, person, Ct, afterCommit.Add),
+                "release" => await service.ReleaseAsync(grant.Id, Report, person, Ct, afterCommit.Add),
+                _ => await service.ConsumeAsync(grant.Id, Report, person, Ct, afterCommit.Add)
+            };
+            result.Refusal.Should().BeNull();
+            AuditLog.ReceivedCalls().Should().BeEmpty();
+            Notifications.ReceivedCalls().Should().BeEmpty();
+            NotificationResolve.ReceivedCalls().Should().BeEmpty();
+            if (commits) scope.Complete();
+        }
+        if (commits)
+            foreach (var complete in afterCommit) await complete(CancellationToken.None);
+
+        AuditLog.ReceivedCalls().Should().HaveCount(commits ? 1 : 0);
+        Notifications.ReceivedCalls().Should().HaveCount(commits && string.Equals(transition, "release", StringComparison.Ordinal) ? 1 : 0);
+        NotificationResolve.ReceivedCalls().Should().HaveCount(commits && string.Equals(transition, "claim", StringComparison.Ordinal) ? 1 : 0);
+    }
 
     [HumansFact]
     public async Task ListManagedGrantIds_EveryGrantOfTheirPrograms_UnderAnyIdTheyHeld()
@@ -47,7 +91,7 @@ public sealed class ExpensesTransitionTests : PreapprovalsTestHarness
         stored.Status.Should().Be(GrantStatus.Claimed);
         stored.ExpenseReportId.Should().Be(Report);
         await NotificationResolve.Received(1).ResolveBySourceKeyAsync(
-            PreapprovalsNotificationSources.PreapprovalFileBy, PreapprovalService.FileBySourceKey(grant.Id), person, Arg.Any<CancellationToken>());
+            PreapprovalsNotificationSources.PreapprovalFileBy, PreapprovalNotices.FileBySourceKey(grant.Id), person, Arg.Any<CancellationToken>());
         await AuditLog.Received(1).LogAsync(PreapprovalsAuditActions.PreapprovalGrantClaimed, AuditEntityTypes.Grant, grant.Id,
             Arg.Is<string>(d => d.Contains(Report.ToString())), person, Report, AuditEntityTypes.ExpenseReport);
     }
@@ -148,7 +192,7 @@ public sealed class ExpensesTransitionTests : PreapprovalsTestHarness
         stored.ExpenseReportId.Should().Be(Report);
         await Notifications.Received(1).SendAsync(PreapprovalsNotificationSources.PreapprovalFileBy, NotificationClass.Actionable, NotificationPriority.Normal,
             Arg.Any<string>(), Arg.Is<IReadOnlyList<Guid>>(r => r.Single() == person), Arg.Any<string?>(), Arg.Any<string?>(),
-            Arg.Any<string?>(), Arg.Any<string?>(), PreapprovalService.FileBySourceKey(grant.Id), Arg.Any<CancellationToken>());
+            Arg.Any<string?>(), Arg.Any<string?>(), PreapprovalNotices.FileBySourceKey(grant.Id), Arg.Any<CancellationToken>());
         await AuditLog.Received(1).LogAsync(PreapprovalsAuditActions.PreapprovalGrantReleased, AuditEntityTypes.Grant, grant.Id, Arg.Any<string>(), person, Report, AuditEntityTypes.ExpenseReport);
     }
 
@@ -197,7 +241,7 @@ public sealed class ExpensesTransitionTests : PreapprovalsTestHarness
         var manager = SeedUser("Manager");
         var grant = await SeedGrantAsync(program, status: GrantStatus.Claimed, expenseReportId: Report);
         var service = NewService();
-        (await service.RevokeAsync(grant.Id, "budget cut", manager, Ct)).Refusal.Should().BeNull();
+        (await service.RevokeAsync(program.Id, grant.Id, "budget cut", manager, Ct)).Refusal.Should().BeNull();
 
         (await service.ClaimAsync(grant.Id, Report, SeedUser(), Ct)).Refusal.Should().Contain("revoked");
         (await service.ConsumeAsync(grant.Id, Report, SeedUser(), Ct)).Refusal.Should().Contain("revoked");

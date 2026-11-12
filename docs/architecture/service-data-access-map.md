@@ -20,7 +20,7 @@ The goal is to identify cross-section table overlap, duplicated caching, and cac
 >
 > | DbContext | Owns |
 > |-----------|------|
-> | `UsersDbContext` | `Profiles`, `ContactFields`, `UserEmails`, `VolunteerHistoryEntries`, `AccountMergeRequests`, `CommunicationPreferences` (frozen legacy — Email owns preferences), `ProfileLanguages`, `EventParticipations` (frozen legacy — Tickets owns participation), plus the Identity base (`IdentityDbContext<User, IdentityRole<Guid>, Guid>`: `users`/`roles`/`user_roles`/`user_claims`/`user_logins`/`role_claims`/`user_tokens`). Own project, `src/Sections/Humans.Users/` (Profiles folded in — no separate Profiles project). |
+> | `UsersDbContext` | `Profiles`, `ContactFields`, `UserEmails`, `VolunteerHistoryEntries`, `AccountMergeRequests`, `ProfileLanguages`, plus the Identity base (`IdentityDbContext<User, IdentityRole<Guid>, Guid>`: `users`/`roles`/`user_roles`/`user_claims`/`user_logins`/`role_claims`/`user_tokens`). Own project, `src/Sections/Humans.Users/` (Profiles folded in — no separate Profiles project). |
 > | `TeamsDbContext` | `Teams`, `TeamMembers`, `TeamJoinRequests`, `TeamJoinRequestStateHistories`, `TeamRoleDefinitions`, `TeamRoleAssignments`, `TeamEarlyEntryGrants` — owned by `src/Sections/Humans.Teams`; `TeamRepository` injects `IDbContextFactory<TeamsDbContext>` |
 > | `AuditLogDbContext` | `AuditLogEntries` — owned by `src/Sections/Humans.AuditLog` (a *horizontal* section — see [AuditLog](../../src/Sections/Humans.AuditLog/Docs/data-access.md)) |
 > | `LegalDbContext` | `LegalDocuments`, `DocumentVersions`, `ConsentRecords`, `consent_reviews`, `consent_reminders` — own project, `src/Sections/Humans.Consent/Data/`. `ConsentRecords` lives here (not a separate Consent context) — Consent has never owned its own DbContext. |
@@ -30,7 +30,6 @@ The goal is to identify cross-section table overlap, duplicated caching, and cac
 > | `GovernanceDbContext` | `Applications`, `ApplicationStateHistories`, `BoardVotes`, `AssemblyVotes`, `AssemblyVoteOptions`, `AssemblyVoteRosterEntries`, `AssemblyBallots`, `AssemblyBallotHistories`, `AssemblyVotePeeks`, `governance_membership_tiers` (own project, `src/Sections/Humans.Governance/`) |
 > | `CampaignsDbContext` | `Campaigns`, `CampaignCodes`, `CampaignGrants` (own project, `src/Sections/Humans.Campaigns/`) |
 > | `GoogleIntegrationDbContext` | `GoogleResources`, `GoogleSyncOutboxEvents`, `SyncServiceSettings`, `GoogleSyncLog`, `google_workspace_identities` (own project, `src/Sections/Humans.GoogleIntegration/`; owns no table beyond these — see [Monitor](../../src/Sections/Humans.Monitor/Docs/data-access.md) for the related horizontal section) |
-> | `FeedbackDbContext` | `FeedbackReports`, `FeedbackMessages` (own project, `src/Sections/Humans.Feedback/`) |
 > | `CityPlanningDbContext` | `CityPlanningSettings`, `CampPolygons`, `CampPolygonHistories` (own project, `src/Sections/Humans.CityPlanning/`) |
 > | `BudgetDbContext` | `BudgetYears`, `BudgetGroups`, `BudgetCategories`, `BudgetLineItems`, `BudgetAuditLogs`, `TicketingProjections` (own project, `src/Sections/Humans.Budget/`) |
 > | `CampsDbContext` | `Camps`, `CampSeasons`, `CampHistoricalNames`, `CampImages`, `CampSettings`, `CampMembers`, `CampRoleDefinitions`, `CampRoleAssignments` (own project, `src/Sections/Humans.Camps/`) |
@@ -46,7 +45,9 @@ The goal is to identify cross-section table overlap, duplicated caching, and cac
 > | `ContainersDbContext` | `Containers`, `ContainerPlacements`, `ContainerImages` (own project, `src/Sections/Humans.Containers/`) |
 > | `ExpensesDbContext` | `ExpenseReports`, `ExpenseLines`, `ExpenseAttachments`, `HoldedExpenseOutboxEvents` (own project, `src/Sections/Humans.Expenses/`) |
 > | `FinanceDbContext` | `HoldedExpenseDocs`, `HoldedCategoryMap`, `HoldedCreditorContacts`, `HoldedDocSyncStates`, `HoldedManagedAccounts`, `SepaPayoutFiles`, `SepaPayoutTransfers`, `finance_payment_details` (own project, `src/Sections/Humans.Finance/`). The ledger mirror (`HoldedLedgerLines`, its sync state, the chart-of-accounts cache, and the API call log) lives in the separate `HoldedDbContext` below. |
-> | `HoldedDbContext` | `HoldedLedgerLines`, `HoldedSyncStates`, `HoldedAccounts`, `HoldedApiCalls` (own project, `src/Sections/Humans.Holded/`). The daybook-journal ledger mirror, chart-of-accounts cache, and Holded API call-log/metering — split out of Finance so the two sections that both touch Holded data stay structurally isolated from each other. |
+> | `HoldedDbContext` | `HoldedLedgerLines`, `HoldedSyncStates`, `HoldedAccounts`, `HoldedApiCalls`, `HoldedPurchaseDocs` (own project, `src/Sections/Humans.Holded/`). The daybook-journal ledger mirror, purchase-document mirror, chart-of-accounts cache, and Holded API call-log/metering — split out of Finance so the two sections that both touch Holded data stay structurally isolated from each other. |
+> | `PleoDbContext` | `PleoEntries`, `PleoEmployees`, `PleoAccounts`, `PleoBalances`, `PleoSyncStates`, `PleoCategories` (own project, `src/Sections/Humans.Pleo/`). The read-only Pleo mirror plus the hand-linked category → Holded account mapping. |
+> | `StripeDbContext` | `StripeBalanceTransactions`, `StripePayouts`, `StripeBalances`, `StripeSyncStates` (own project, `src/Sections/Humans.Stripe/`). The read-only Stripe mirror across every configured account. |
 > | `EventGuideDbContext` | `EventGuideSettings`, `EventCategories`, `EventVenues`, `Events`, `EventModerationActions`, `EventPreferences`, `EventFavourites` (own project, `src/Sections/Humans.Events/`; the Shifts-owned `EventSettings` / `EventParticipations` tables deliberately stay off this context, despite the name collision) |
 > | `StoreDbContext` | `Products`, `Orders`, `OrderLines`, `Payments`, `Invoices` (own project, `src/Sections/Humans.Store/`, table names `store_products` / `store_orders` / `store_order_lines` / `store_payments` / `store_invoices`) |
 > | `BackdoorDbContext` | `backdoor_api_keys` (own project, `src/Sections/Humans.Backdoor/`) |
@@ -54,6 +55,7 @@ The goal is to identify cross-section table overlap, duplicated caching, and cac
 > | `RideshareDbContext` | `RideshareTrips`, `RideshareRequests`, `RideshareInterests`, `RideshareSettings` (own project, `src/Sections/Humans.Rideshare/`, table names `rideshare_trips` / `rideshare_requests` / `rideshare_interests` / `rideshare_settings`) |
 > | `WorkgroupsDbContext` | `workgroups`, `workgroup_members`, `workgroup_meetings`, `workgroup_log_entries`, `workgroup_documents`, `workgroup_document_comments`, `workgroups_settings` (own project, `src/Sections/Humans.Workgroups/`) |
 > | `CantinaDbContext` | `cantina_dietary_profiles` (own project, `src/Sections/Humans.Cantina/`) |
+> | `GrantsDbContext` | `Programs` (`grant_programs`), `Managers` (`grant_program_managers`), `Grants` (`grants`) (own project, `src/Sections/Humans.Grants/`) |
 > | `PreapprovalsDbContext` | `pre_programs`, `pre_program_managers`, `pre_grants`, `pre_reminders_sent` (own project, `src/Sections/Humans.Preapprovals/`) |
 >
 > Each context applies its `IEntityTypeConfiguration` classes explicitly (no
@@ -78,7 +80,7 @@ The goal is to identify cross-section table overlap, duplicated caching, and cac
 >
 > At our small single-server scale this map is diagnostic, not gating —
 > **cross-section table reads are flagged as design-rule violations per
-> [`design-rules.md` §"Services own their data"](design-rules.md)**, but
+> [`design-rules.md`, *Service ownership*](design-rules.md#service-ownership)**, but
 > serve as a backlog rather than a blocker.
 
 ---
@@ -97,10 +99,12 @@ cross-section analysis, the cache inventory, and the out-of-service access appen
 
 ### AdminDatabaseDiagnosticsService (Scoped — `src/Humans.Web/Services/`)
 
-Repository: `IAdminDatabaseDiagnosticsRepository` (`src/Humans.Web/Repositories/`) —
-raw diagnostics over the database (migration-history status across every section's
-`__EFMigrationsHistory*` table, Hangfire lock clearing). No owning section, no owned
-application tables. No cross-section service calls, no `IMemoryCache`.
+Repository: `IAdminDatabaseDiagnosticsRepository` (`src/Humans.Web/Repositories/Admin/`, opens
+`SystemDbContext`) — raw diagnostics over the database: migration-history status across every
+section's `__EFMigrationsHistory*` table, Hangfire lock clearing, and the `/Debug/Database` page
+(server summary, per-table sizes and scan counts, indexes, connections, settings, extensions) read
+from PostgreSQL catalog and statistics views only — never a section's application tables. No owning
+section, no owned application tables. No cross-section service calls, no `IMemoryCache`.
 
 The member and admin dashboards have no orchestrator service: `/` and `/Admin` are
 Shell frames whose cards are section-contributed (`ISectionChrome` slots), each card
@@ -161,8 +165,8 @@ Every table is owned by exactly one repository; there are no HUM0025
    (`IRoleAssignmentWrite`), `IConsentService`,
    `ICampService`, `ITicketService`, `IGoogleSyncService`
    (consumed by `NotificationMeterProvider` for failed-sync-event counts;
-   foreign writes go through `IGoogleSyncWrite`), `ITeamResourceService`, `IHoldedFinanceService`
-   (writes via `IHoldedFinanceWrite`),
+   foreign writes go through `IGoogleSyncWrite`), `ITeamResourceService`, `IFinanceService`
+   (writes via `IFinanceWrite`),
    `ICampaignService` (consumed by `TicketQueryService`; writes via
    `ICampaignWrite`),
    `IEventService` (consumed by `EventsCardViewComponent`
@@ -178,13 +182,10 @@ Every table is owned by exactly one repository; there are no HUM0025
    read-only contracts the section's services implement directly. All keep
    the cross-section coupling minimal and `[SurfaceBudget]`-bounded.
 
-3. **`IProfileService` retired into `IUserService`.** The Profile-section
-   service surface is folded into `IUserService` as part of the
-   Users+Profile section merge; the interface's `[SurfaceBudget]` is
-   intentionally suspended during the merge.
-   `ProfileEditorService` and `ContactFieldService` remain in
-   `Humans.Users/Services/` as section-internal collaborators; the only
-   Application-layer service named `ProfileService` is a thin
+3. **Profile reads and writes go through `IUserService`.** The unified
+   User+Profile read-model sits behind `IUserService`; `ProfileEditorService`
+   and `ContactFieldService` live in `Humans.Users/Services/` as
+   section-internal collaborators, and `ProfileService` is a thin
    `IProfilePictureService` implementation for picture-bytes IO.
 
 4. **Tickets ↔ Profiles email lookup.**
@@ -213,7 +214,7 @@ Every table is owned by exactly one repository; there are no HUM0025
    `IUserService.GetAllUserInfosAsync`. It has no repository; the
    last-run marker
    (`SettingKeys.DriveActivityMonitorLastRunAt`) is read/written
-   through `ISettingsService` — a §15-compliant cross-section service
+   through `ISettingsService` — a contract-compliant cross-section service
    call, not a foreign repository read.
 
 7. **Settings' tables are owned by a single section/repository.**
@@ -307,7 +308,7 @@ Every table is owned by exactly one repository; there are no HUM0025
     memory (no new interface method), checks early entry via
     `IEarlyEntryService`, verifies supervisor roles via
     `IRoleAssignmentService`, and pulls the gate-crew roster via
-    `IShiftManagement` — all §15-compliant service-interface calls.
+    `IShiftManagement` — all contract-compliant service-interface calls.
     Its one cross-section **write** — projecting an admit onto the guest's
     participation record as `Attended` — goes through the
     owning `ITicketWrite.RecordParticipationAsync` (Tickets), so no
@@ -317,9 +318,9 @@ Every table is owned by exactly one repository; there are no HUM0025
 
 15. **The per-section DbContext split is complete — "one
     table, one repository" is a compile/schema-enforced boundary for
-    every table-owning section, with no shared context left.** 35 contexts
-    exist — see the full DbContext table in the intro Methodology block
-    above — each mapping **only** its own section's tables via explicit
+    every table-owning section, with no shared context left.** Every section
+    context (see the full DbContext table in the intro Methodology block
+    above) maps **only** its own section's tables via explicit
     `ApplyConfiguration` calls (no assembly scanning), so a section's
     repository cannot accidentally `Set<T>()` a foreign table without
     first injecting that section's `IDbContextFactory<T>` — a conspicuous,
@@ -338,8 +339,8 @@ Every table is owned by exactly one repository; there are no HUM0025
 16. **Backdoor is a key-authed machine API, not a table consumer.** The
     `/api/backdoor/*` controllers are thin orchestrators: each calls exactly
     one other section's read/triage contracts interface —
-    `IAgentTranscriptRead` (Agent), `IIssueTriage` (Issues), `IFeedbackTriage`
-    (Feedback), `ISurveyAnalysisRead` (Surveys) — and formats the result.
+    `IAgentTranscriptRead` (Agent), `IIssueTriage` (Issues),
+    `ISurveyAnalysisRead` (Surveys) — and formats the result.
     `IBackdoorApiKeyRepository` is the only repository Backdoor's own service
     touches, scoped to its one table, `backdoor_api_keys`. The four consumed
     interfaces exist solely for this machine surface and carry no other
@@ -362,7 +363,6 @@ separately below the key table.
 
 | Key | TTL | Type | Populated By | Invalidated By |
 |-----|-----|------|-------------|----------------|
-| `FeedbackBadgeCount` | 2 min | Static | **FeedbackService** (`GetActionableCountAsync`) | FeedbackService (evicts its own key) |
 | `NotificationMeters` | 2 min | Static | NotificationMeterProvider | TTL only |
 | `HoldedContacts` | 2 min | Static | **Finance** `Service` (Holded contact list) | expiry only |
 | `NavBadge:Voting:{userId}` | 2 min | Per-User | **ApplicationDecisionService** (`GetUnvotedApplicationCountAsync`) | ApplicationDecisionService (evicts its own key) |
@@ -392,17 +392,17 @@ separately below the key table.
 | `TrackedCache<Guid, CalendarEventInfo>` | Calendar | `Calendar.Event` | Per-Entity | CachingCalendarService warmup + lazy load | per-event `ReplaceAsync` after delegated write |
 | `TrackedCache<Guid, ApprovedEventView>` + category/venue/settings snapshots | Events | `Event.ApprovedEventView` | Per-Entity / Static | CachingEventService warmup + lazy load | inline per write |
 | `TrackedCache<Guid, UserConsentInfo>` | Consent | `Consent.UserConsentInfo` | Per-User | CachingConsentService lazy load | synchronous per-user evict on submit; merge reloads via `UserInfo.AllUserIds` |
-| `TrackedCache<Guid, LegalDocumentInfo>` | Legal | `Legal.LegalDocumentInfo` | Per-Entity | CachingLegalDocumentSyncService warmup + lazy load | `CachingLegalDocumentSyncService.InvalidateAll` (called directly by `LegalDocumentSyncService` after each write) |
+| `TrackedCache<Guid, ActiveRequiredLegalDocumentSnapshot>` | Legal | `Legal.LegalDocumentInfo` | Per-Entity | CachingLegalDocumentSyncService warmup + lazy load | `CachingLegalDocumentSyncService.InvalidateAll` (called directly by `LegalDocumentSyncService` after each write) |
 | `TrackedCache<Guid, RoleAssignmentRow>` | Auth | `Auth.RoleAssignmentRow` | Per-Entity | CachingRoleAssignmentService warmup + lazy load | wholesale `Clear()` by the inner `RoleAssignmentService` after each repository write |
-| `TrackedCache<int, RideshareSnapshot>` | Rideshare | `Rideshare.Snapshot` | Per-Year | CachingRideshareService lazy load | full `Clear()` after every delegated write |
+| `TrackedCache<Guid, RideshareSnapshot>` | Rideshare | `Rideshare.Snapshot` | Per-Event | CachingRideshareService lazy load | full `Clear()` after every delegated write |
 | `TrackedCache<byte, IReadOnlyList<WorkgroupInfo>>` | Workgroups | `Workgroups.Register` | Single entry | CachingWorkgroupService lazy load | full `Clear()` after every delegated write |
 | `TrackedCache<string, CachedVendorEventSummary>` | Tickets | `Tickets.VendorEventSummary` | Per-Entity (15-min freshness in value) | CachingTicketVendorService lazy load | own `GetOrdersAsync` pass-through (per event, after a successful pull) |
 | `TrackedCache<string, Dictionary<string, int>>` | Finance | `Finance.SepaStuckBankLines` | Single entry | `SepaBankBooking` sweep | `SepaBankBooking` (cleared when no line is stuck) |
 
 ### Cache Issues / Notes
 
-1. **Nav-badge caches are owned by services.** `FeedbackBadgeCount` is populated by
-   `FeedbackService`, and `NavBadge:Voting:{userId}` by `ApplicationDecisionService`.
+1. **Nav-badge caches are owned by services.** `NavBadge:Voting:{userId}` is populated by
+   `ApplicationDecisionService`.
    Notifications reads unread recipient counts and Issues reads actionable counts directly, without badge caches.
 
 2. **Ticket user holdings are tracked, not `IMemoryCache` keys.**
@@ -437,14 +437,14 @@ repositories directly, bypassing the service layer.
 None. Every write (`User`/`Profile`/`UserEmail`,
 system-team membership, dev barrio camp/season/lead via `ICampSeeding` /
 `ICampRoleSeeding`, city-planning team, role assignments, contact fields)
-goes through the owning section's service interface per design-rules §2c.
-`DevLoginController` injects `UserManager<User>`,
-`SignInManager<User>`, `IUserEmailService`, `IRoleAssignmentService`, and `DevPersonaSeeder`
+goes through the owning section's service interface per design-rules.md, *Service ownership*.
+`DevLoginController` injects `IUserSignInService`,
+`IUserEmailService`, `IRoleAssignmentService`, and `DevPersonaSeeder`
 (`src/Sections/Humans.Development/Services/DevPersonaSeeder.cs`, which
 itself owns no DbContext). `AdminController`'s direct DB reads go behind
 `IAdminDatabaseDiagnosticsService`. All web
 controllers (Email, Google, Profile, Board, Budget, CampAdmin, Guest,
-Unsubscribe, TeamAdmin, ShiftAdmin, Calendar, Feedback, Issues, Tickets,
+Unsubscribe, TeamAdmin, ShiftAdmin, Calendar, Issues, Tickets,
 Finance, DevLogin, etc.) go entirely through service interfaces.
 
 ### View Components (cache populators)
@@ -460,7 +460,7 @@ logic funnels into services even from jobs
 (e.g. `CleanupNotificationsJob` calls `INotificationRepository` via
 `NotificationService`; `LegalDocumentSyncService` runs via Hangfire and
 goes through its own repository). Specific jobs and their tables vary;
-treat each as an audit item per the section §15 carve-outs.
+treat each as an audit item per the caching-pattern carve-outs.
 
 ---
 
@@ -475,7 +475,6 @@ Controllers and components that touch `IMemoryCache` directly.
 | **GatePinThrottle** (`Humans.Gate/Services/Stores/`; used by `GateController` PIN claim / override) | TryGetValue / Set / Remove | `GatePinFailures:{key}` |
 | **GateVendorMirrorLedger** (`Humans.Gate/Services/Stores/`; used by `GateController` and `GateVendorBackfillAdminController`) | TryGetValue / Set (atomic claim) | `GateVendorMirrorSent:{vendorTicketId}` |
 
-The §15 work continues to push cache populators into the owning service
+The caching-pattern work continues to push cache populators into the owning service
 behind transparent decorators. No view component injects `IMemoryCache`; nav
-badge counts are owned by `FeedbackService` (`FeedbackBadgeCount`) and
-`ApplicationDecisionService` (`NavBadge:Voting:{userId}`).
+badge counts are owned by `ApplicationDecisionService` (`NavBadge:Voting:{userId}`).

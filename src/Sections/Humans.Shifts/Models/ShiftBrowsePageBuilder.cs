@@ -19,7 +19,6 @@ internal sealed record ShiftBrowsePageRequest(
     string? ToDate,
     string? Period,
     string? Day,
-    bool ShowFull,
     IReadOnlyList<Guid>? TagIds,
     string? Sort,
     IReadOnlyList<string>? Periods,
@@ -129,7 +128,6 @@ internal sealed class ShiftBrowsePageBuilder(
             FilterPeriods = activePeriods.Select(p => p.ToString()).ToList(),
             FilterDay = filterDay.HasValue ? request.Day : null,
             DayOptions = dayOptions,
-            ShowFullShifts = request.ShowFull,
             UserSignupShiftIds = userSignupShiftIds,
             UserSignupStatuses = userSignupStatuses,
             Departments = departments,
@@ -241,6 +239,7 @@ internal sealed class ShiftBrowsePageBuilder(
 
         var depts = await shiftManagement.GetDepartmentsWithRotasAsync(eventSettingsId, ct);
         return depts
+            .OrderBy(d => d.TeamName, StringComparer.Ordinal)
             .Select(d => new DepartmentOption { TeamId = d.TeamId, Name = d.TeamName })
             .ToList();
     }

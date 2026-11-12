@@ -16,9 +16,10 @@ internal sealed class ExpenseHoldedPublisher(
     IExpenseRepository repo,
     IFileStorage fileStorage,
     IUserService userService,
-    IHoldedClient holdedClient,
-    IHoldedFinanceService holdedFinance,
-    IHoldedFinanceWrite holdedFinanceWrite,
+    IHoldedService holded,
+    IHoldedWrite holdedWrite,
+    IFinanceService finance,
+    IFinanceWrite financeWrite,
     IAuditLogService auditLogService,
     ILogger logger) : IApplicationService
 {
@@ -54,7 +55,7 @@ internal sealed class ExpenseHoldedPublisher(
             seedAccountNum = priorLinked?.HoldedSupplierAccountNum;
         }
 
-        var holdedContactId = await holdedFinanceWrite.EnsureCreditorContactAsync(
+        var holdedContactId = await financeWrite.EnsureCreditorContactAsync(
             creditorUserId, report.PayeeName, burnerName, report.PayeeIban,
             seedContactId, seedAccountNum, ExpenseReportBackgroundProcessor.OutboxJobName, ct);
 
@@ -65,7 +66,7 @@ internal sealed class ExpenseHoldedPublisher(
         // and the doc still creates, just unbooked.
         var holdedAccountId = report.HoldedAccountId
             ?? (report.BudgetCategoryId is { } categoryId
-                ? await holdedFinance.GetHoldedAccountIdForCategoryAsync(categoryId, ct)
+                ? await finance.GetHoldedAccountIdForCategoryAsync(categoryId, ct)
                 : null);
 
         // 2–4. One purchase doc per bookable line. A report pushed before per-line docs resumes onto its single doc
@@ -82,14 +83,15 @@ internal sealed class ExpenseHoldedPublisher(
                 report, holdedContactId, holdedAccountId, now, ct);
         }
 
-        // 5. Resolve supplierRecord.num now that a payable exists. Best-effort: failing the event here would strand a
-        // created doc as permanently failed. Nothing retries; a null num stays until an admin binds it on
-        // /Finance/Creditors (where ListCreditorAccountsAsync's Unresolved half shows it) or a later report resolves it.
+        // 5. Resolve supplierRecord.num now that a payable exists, from the contact mirror (synced once when it lacks
+        // the number). Best-effort: failing the event here would strand a created doc as permanently failed. Nothing
+        // retries; a null num stays until an admin binds it on /Finance/Creditors (where ListCreditorAccountsAsync's Unresolved half shows it) or a later report resolves it.
         int? supplierAccountNum = null;
         try
         {
-            var contact = await holdedClient.GetContactAsync(holdedContactId, ct);
-            supplierAccountNum = contact.SupplierAccountNum;
+            supplierAccountNum = await MirroredAccountNumAsync(holdedContactId, ct);
+            if (supplierAccountNum is null && await holded.SyncContactsAsync(ct))
+                supplierAccountNum = await MirroredAccountNumAsync(holdedContactId, ct);
         }
         catch (HoldedTransientException ex)
         {
@@ -107,7 +109,7 @@ internal sealed class ExpenseHoldedPublisher(
         }
         await repo.SetHoldedContactLinkAsync(report.Id, holdedContactId, supplierAccountNum, now, ct);
         if (supplierAccountNum is not null)
-            await holdedFinanceWrite.SetCreditorAccountNumAsync(
+            await financeWrite.SetCreditorAccountNumAsync(
                 creditorUserId, supplierAccountNum.Value, ExpenseReportBackgroundProcessor.OutboxJobName, ct);
 
         await repo.MarkOutboxProcessedAsync(outboxEventId, now, ct);
@@ -118,6 +120,10 @@ internal sealed class ExpenseHoldedPublisher(
             pushedSummary,
             ExpenseReportBackgroundProcessor.OutboxJobName);
     }
+
+    private async Task<int?> MirroredAccountNumAsync(string contactId, CancellationToken ct) =>
+        (await holded.GetContactsAsync(ct)).Contacts
+            .FirstOrDefault(c => string.Equals(c.Id, contactId, StringComparison.Ordinal))?.SupplierAccountNum;
 
     /// <summary>What a per-line push writes as the document's description; Finance matches on it.</summary>
     internal static string DocDescription(string lineDescription) => $"ER: {lineDescription}";
@@ -176,7 +182,7 @@ internal sealed class ExpenseHoldedPublisher(
                     });
                 }
 
-                holdedDocId = await holdedClient.CreatePurchaseDocumentAsync(
+                holdedDocId = await holdedWrite.CreatePurchaseDocumentAsync(
                     new HoldedPurchaseDocumentInput
                     {
                         ContactId = holdedContactId,
@@ -215,9 +221,7 @@ internal sealed class ExpenseHoldedPublisher(
 
             await UploadLineAttachmentAsync(line, holdedDocId, now, ct);
 
-            var currentDoc = await holdedClient.GetPurchaseDocumentAsync(holdedDocId, ct);
-            if (currentDoc.ApprovedAt is null)
-                await holdedClient.ApprovePurchaseDocumentAsync(holdedDocId, ct);
+            await holdedWrite.EnsurePurchaseDocumentApprovedAsync(holdedDocId, ct);
         }
 
         var summary = pushedDocIds.Count switch
@@ -253,9 +257,7 @@ internal sealed class ExpenseHoldedPublisher(
             await UploadLineAttachmentAsync(line, holdedDocId, now, ct);
         }
 
-        var currentDoc = await holdedClient.GetPurchaseDocumentAsync(holdedDocId, ct);
-        if (currentDoc.ApprovedAt is null)
-            await holdedClient.ApprovePurchaseDocumentAsync(holdedDocId, ct);
+        await holdedWrite.EnsurePurchaseDocumentApprovedAsync(holdedDocId, ct);
     }
 
     /// <summary>Each upload is recorded so a re-run resumes instead of adding a second copy of earlier files.</summary>
@@ -266,12 +268,12 @@ internal sealed class ExpenseHoldedPublisher(
         if (line.Attachment.HoldedUploadedAt is not null) return;
 
         var bytes = await fileStorage.TryReadAsync(
-            ExpenseReportService.AttachmentKey(line.Attachment.Id, line.Attachment.Extension), ct);
+            ExpenseAttachments.AttachmentKey(line.Attachment.Id, line.Attachment.Extension), ct);
         if (bytes is null)
             throw new InvalidOperationException(
                 $"Attachment file for {line.Attachment.Id}{line.Attachment.Extension} could not be read from storage.");
         using var stream = new MemoryStream(bytes, writable: false);
-        await holdedClient.UploadAttachmentAsync(
+        await holdedWrite.UploadPurchaseAttachmentAsync(
             holdedDocId,
             new HoldedAttachmentInput
             {

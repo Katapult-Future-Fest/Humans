@@ -1,3 +1,4 @@
+using Humans.Teams.Services;
 using Humans.Base.Enums;
 using Humans.Base.Controllers;
 using Humans.Teams.Authorization;
@@ -18,7 +19,7 @@ public abstract class HumansTeamControllerBase(
 {
     protected IAuthorizationService AuthorizationService => authorizationService;
 
-    protected async Task<(IActionResult? ErrorResult, UserInfo User, TeamInfo Team)> ResolveTeamManagementAsync(string slug)
+    protected async Task<(IActionResult? ErrorResult, UserInfo User, TeamInfo Team)> ResolveTeamManagementAsync(string slug, CancellationToken ct = default)
     {
         return await ResolveTeamAccessAsync(
             slug,
@@ -28,10 +29,27 @@ public abstract class HumansTeamControllerBase(
                 var result = await authorizationService.AuthorizeAsync(
                     User, team, TeamOperationRequirement.ManageCoordinators);
                 return result.Succeeded;
-            });
+            }, ct);
     }
 
-    protected async Task<(IActionResult? ErrorResult, UserInfo User, TeamInfo Team)> ResolveEarlyEntryManagementAsync(string slug)
+    /// <summary>The team's managers, or a Teams reader (Board) who sees the page with <c>CanManage</c> false.</summary>
+    protected async Task<(IActionResult? ErrorResult, UserInfo User, TeamInfo Team, bool CanManage)> ResolveTeamViewAsync(
+        string slug, CancellationToken ct = default)
+    {
+        var canManage = false;
+        var (error, user, team) = await ResolveTeamAccessAsync(
+            slug,
+            static _ => true,
+            async (team, _) =>
+            {
+                canManage = (await authorizationService.AuthorizeAsync(
+                    User, team, TeamOperationRequirement.ManageCoordinators)).Succeeded;
+                return canManage || (await authorizationService.AuthorizeAsync(User, TeamsPolicies.Read)).Succeeded;
+            }, ct);
+        return (error, user, team, canManage);
+    }
+
+    protected async Task<(IActionResult? ErrorResult, UserInfo User, TeamInfo Team)> ResolveEarlyEntryManagementAsync(string slug, CancellationToken ct = default)
     {
         return await ResolveTeamAccessAsync(
             slug,
@@ -41,7 +59,7 @@ public abstract class HumansTeamControllerBase(
                 var result = await authorizationService.AuthorizeAsync(
                     User, team, TeamOperationRequirement.ManageEarlyEntry);
                 return result.Succeeded;
-            });
+            }, ct);
     }
 
     protected Task<(IActionResult? ErrorResult, UserInfo User, TeamInfo Team)> ResolveDepartmentAccessAsync(
@@ -68,11 +86,7 @@ public abstract class HumansTeamControllerBase(
             return (errorResult, null!, null!);
         }
 
-        var normalizedSlug = slug.ToLowerInvariant();
-        var teamsById = await teamService.GetTeamsAsync(ct);
-        var team = teamsById.Values.FirstOrDefault(
-            t => string.Equals(t.Slug, normalizedSlug, StringComparison.Ordinal)
-                 || string.Equals(t.CustomSlug, normalizedSlug, StringComparison.Ordinal));
+        var team = TeamSlugResolver.Find(await teamService.GetTeamsAsync(ct), slug);
         if (team is null || !teamFilter(team))
         {
             return (NotFound(), user, null!);

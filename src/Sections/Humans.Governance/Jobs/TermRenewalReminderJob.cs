@@ -51,6 +51,7 @@ internal sealed class TermRenewalReminderJob(
                     .ToDictionary(kv => kv.Key, kv => kv.Value);
 
             var sentCount = 0;
+            var failures = new List<Exception>();
             var now = clock.GetCurrentInstant();
 
             foreach (var application in expiringApplications)
@@ -72,8 +73,11 @@ internal sealed class TermRenewalReminderJob(
                 }
 
                 var email = applicant.Email;
-                if (email is null)
+                if (string.IsNullOrWhiteSpace(email))
                 {
+                    logger.LogWarning(
+                        "Skipping term renewal reminder for user {UserId} tier {Tier}: no notification email",
+                        application.UserId, application.MembershipTier);
                     continue;
                 }
 
@@ -88,7 +92,8 @@ internal sealed class TermRenewalReminderJob(
                         applicant.BurnerName,
                         application.MembershipTier.ToString(),
                         application.TermExpiresAt!.Value,
-                        language),
+                        language) with
+                    { DeliveryId = application.Id },
                         cancellationToken);
 
                     await applicationDecisionService.MarkRenewalReminderSentAsync(
@@ -109,7 +114,7 @@ internal sealed class TermRenewalReminderJob(
                             NotificationClass.Actionable,
                             NotificationPriority.Normal,
                             string.Format(culture, NoticeResources.GetString("Governance_Notification_TermRenewalReminder", culture)!, application.MembershipTier, expiryDate),
-                            [application.UserId],
+                            [applicant.Id],
                             body: NoticeResources.GetString("Governance_Notification_TermRenewalReminderBody", culture),
                             actionUrl: "/Governance/Applications",
                             actionLabel: NoticeResources.GetString("Governance_Notification_Renew", culture),
@@ -124,11 +129,15 @@ internal sealed class TermRenewalReminderJob(
                 }
                 catch (Exception ex)
                 {
+                    failures.Add(ex);
                     logger.LogError(ex,
                         "Failed to send term renewal reminder to user {UserId} for {Tier}",
                         application.UserId, application.MembershipTier);
                 }
             }
+
+            if (failures.Count > 0)
+                throw new AggregateException("Failed to complete one or more term renewal reminders.", failures);
 
             metrics.RecordJobRun("term_renewal_reminder", "success");
             logger.LogInformation(

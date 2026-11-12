@@ -99,7 +99,7 @@ public sealed class GoogleWorkspaceSyncServiceTests
             });
         var driveSync = new GoogleDriveAccessSyncService(
             [_driveSource], _drivePermissions, _userService, _identities, _userEmailService, _syncSettingsService,
-            _googleSyncLog, _removalNotifications, _resourceRepository, _teamService,
+            _googleSyncLog, Substitute.For<IGoogleSyncLogViewer>(), _removalNotifications, _resourceRepository, _teamService,
             Substitute.For<ITeamResourceManagement>(), clock,
             Substitute.For<ILogger<GoogleDriveAccessSyncService>>());
 
@@ -146,9 +146,7 @@ public sealed class GoogleWorkspaceSyncServiceTests
             RequiresApproval: false, IsPublicPage: false, IsHidden: false,
             IsPromotedToDirectory: false, CreatedAt: Instant.MinValue, Members: []);
         _syncSettingsService.GetModeAsync(SyncServiceType.GoogleGroups, ct).Returns(SyncMode.AddOnly);
-        _resourceRepository.GetActiveResourceCountsByTeamAsync(ct).Returns(new Dictionary<Guid, int> { [TestTeamId] = 1 });
-        _resourceRepository.GetActiveByTeamIdsAsync(Arg.Any<IReadOnlyCollection<Guid>>(), ct)
-            .Returns(new Dictionary<Guid, IReadOnlyList<GoogleResource>> { [TestTeamId] = [resource] });
+        _resourceRepository.GetActiveByResourceTypeAsync(GoogleResourceType.Group, ct).Returns([resource]);
         _teamService.GetTeamsAsync(ct).Returns(new Dictionary<Guid, TeamInfo> { [TestTeamId] = team });
         _groupProvisioning.GetGroupSettingsAsync(Arg.Any<string>(), ct)
             .Returns(new GroupSettingsGetResult(null, new GoogleClientError(404, "Group unavailable.")));
@@ -1175,7 +1173,7 @@ public sealed class GoogleWorkspaceSyncServiceTests
     {
         var ct = Xunit.TestContext.Current.CancellationToken;
         var resource = MakeDriveFolderResource(TestDriveFolderResourceId, TestTeamId, "folder-0");
-        _resourceRepository.GetActiveDriveFoldersAsync(ct).Returns([resource]);
+        _resourceRepository.GetActiveByResourceTypeAsync(GoogleResourceType.DriveFolder, ct).Returns([resource]);
         _teamService.GetTeamsAsync(ct).Returns(ExpectedMemberTeam());
         _drivePermissions.GetFileAsync("folder-0", ct).Returns(new DriveFileMetadataResult(
             new DriveFileMetadata("folder-0", "Child", ["folder-1"], null, null), null));
@@ -1229,7 +1227,7 @@ public sealed class GoogleWorkspaceSyncServiceTests
             IsActive = true
         };
 
-    private static UserInfo MakeUser(Guid userId, string email, GoogleEmailStatus status = GoogleEmailStatus.Unknown) =>
+    private static UserInfo MakeUser(Guid userId, string email) =>
         UserInfo.Create(
             new User
             {
@@ -1239,8 +1237,7 @@ public sealed class GoogleWorkspaceSyncServiceTests
                 Email = email
             },
             [new UserEmail { Id = Guid.NewGuid(), UserId = userId, Email = email,
-                IsVerified = true, IsGoogle = true, GoogleEmailStatus = (LegacyGoogleEmailStatus)status }],
-            [], [], null, []);
+                IsVerified = true, }], [], null);
 
     // Admin retries: the service writes the audit entry.
 

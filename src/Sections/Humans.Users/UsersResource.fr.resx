@@ -46,7 +46,6 @@
   <data name="Users_Profile_Title" xml:space="preserve">
     <value>Mon profil</value>
   </data>
-  <data name="Users_BreadcrumbNavigation" xml:space="preserve"><value>Fil d’Ariane</value></data>
   <data name="Users_Profile_ActionRequired" xml:space="preserve">
     <value>Action requise :</value>
   </data>
@@ -215,9 +214,6 @@
   <data name="Users_ProfileEdit_TierLocked" xml:space="preserve">
     <value>Votre catégorie est verrouillée car vous avez une candidature active ou en attente.</value>
   </data>
-  <data name="Users_ProfileEdit_MotivationHelp" xml:space="preserve">
-    <value>Minimum 50 caractères. Cela aide le Conseil à comprendre vos objectifs.</value>
-  </data>
   <data name="Users_ProfileEdit_BurnerNamePlaceholder" xml:space="preserve">
     <value>Le nom sous lequel on vous connaît</value>
   </data>
@@ -235,9 +231,6 @@
   </data>
   <data name="Users_ProfileEdit_LegalNameHelp" xml:space="preserve">
     <value>Requis pour les documents officiels et les signatures.</value>
-  </data>
-  <data name="Users_ProfileEdit_Select" xml:space="preserve">
-    <value>Sélectionner</value>
   </data>
   <data name="Users_ProfileEdit_City" xml:space="preserve">
     <value>Ville</value>
@@ -363,6 +356,9 @@
   </data>
   <data name="Users_Emails_AddNew" xml:space="preserve">
     <value>Ajouter une adresse e-mail</value>
+  </data>
+  <data name="Users_Emails_NewEmailLabel" xml:space="preserve">
+    <value>Nouvelle adresse e-mail</value>
   </data>
   <data name="Users_Emails_MergeWarningTitle" xml:space="preserve">
     <value>Fusionner des comptes ?</value>
@@ -546,7 +542,7 @@
     <value>Vérification de l'adresse e-mail</value>
   </data>
   <data name="Users_VerifyEmail_GoToSettings" xml:space="preserve">
-    <value>Accéder aux paramètres de l'e-mail préféré</value>
+    <value>Accéder aux paramètres e-mail</value>
   </data>
   <data name="Users_VerifyEmail_GoHome" xml:space="preserve">
     <value>Retour à l'accueil</value>
@@ -703,7 +699,7 @@
   <data name="Users_Email_EmailVerification_Body" xml:space="preserve">
     <value>&lt;h2&gt;Vérification de l'adresse e-mail&lt;/h2&gt;
 &lt;p&gt;Bonjour {0},&lt;/p&gt;
-&lt;p&gt;Vous avez demandé à définir &lt;strong&gt;{1}&lt;/strong&gt; comme adresse e-mail préférée.&lt;/p&gt;
+&lt;p&gt;Vous avez demandé à ajouter &lt;strong&gt;{1}&lt;/strong&gt; à votre compte.&lt;/p&gt;
 &lt;p&gt;Cliquez sur le lien ci-dessous pour vérifier cette adresse :&lt;/p&gt;
 &lt;p&gt;&lt;a href="{2}" style="display:inline-block; padding:12px 24px; background-color:#0d6efd; color:#ffffff; text-decoration:none; border-radius:6px; font-weight:bold; font-size:16px;"&gt;Vérifier l'adresse e-mail&lt;/a&gt;&lt;/p&gt;
 &lt;p&gt;Ce lien expire dans 24 heures.&lt;/p&gt;
@@ -748,6 +744,9 @@
   <data name="Users_Profile_EmailAlreadyAdded" xml:space="preserve">
     <value>Cette adresse e-mail figure déjà dans ton compte.</value>
   </data>
+  <data name="Users_Profile_EmailVerifiedOnAnotherAccount" xml:space="preserve">
+    <value>Cette adresse e-mail est déjà vérifiée sur un autre compte.</value>
+  </data>
   <data name="Users_Profile_EmailMergePending" xml:space="preserve">
     <value>Une demande de fusion est déjà en attente pour cette adresse e-mail.</value>
   </data>
@@ -775,4 +774,49 @@
   <data name="Users_Medical_RevealsTitle" xml:space="preserve"><value>Qui a consulté ces informations</value></data>
   <data name="Users_Medical_RevealsEmpty" xml:space="preserve"><value>Personne n'a consulté tes informations médicales.</value></data>
   <data name="Users_Medical_RevealedBy" xml:space="preserve"><value>Consulté par</value></data>
+  <data name="Users_Birthdays_Title" xml:space="preserve">
+    <value>Calendrier des anniversaires</value>
+  </data>
+  <data name="Users_Birthdays_Count" xml:space="preserve">
+    <value>{0} anniversaires en {1}</value>
+  </data>
+  <data name="Users_Birthdays_Count_One" xml:space="preserve">
+    <value>{0} anniversaire en {1}</value>
+  </data>
+  <data name="Users_Birthdays_None" xml:space="preserve">
+    <value>Aucun anniversaire en {0}.</value>
+  </data>
+  <data name="Users_Birthdays_Privacy" xml:space="preserve">
+    <value>Seuls les humans ayant renseigné leur anniversaire sont affichés.</value>
+  </data>
+  <data name="Users_Map_Title" xml:space="preserve">
+    <value>Carte des Humans</value>
+  </data>
+  <data name="Users_Map_Count" xml:space="preserve">
+    <value>{0} humans avec localisation</value>
+  </data>
+  <data name="Users_Map_None" xml:space="preserve">
+    <value>Aucun human n'a encore renseigné sa localisation.</value>
+  </data>
+  <data name="Users_Map_Privacy" xml:space="preserve">
+    <value>Seuls les humans ayant renseigné leur localisation sont affichés. La localisation est approximative et basée sur la ville.</value>
+  </data>
+  <data name="Users_Birthdays_CardDescription" xml:space="preserve"><value>Découvre qui fête son anniversaire ce mois-ci.</value></data>
+  <data name="Users_Map_CardDescription" xml:space="preserve"><value>Découvre où se trouvent les humans dans le monde.</value></data>
+  <data name="Users_Profile_Participation" xml:space="preserve">
+    <value>Participation</value>
+  </data>
+  <data name="Users_Profile_Settings" xml:space="preserve">
+    <value>Paramètres</value>
+  </data>
+  <data name="Users_Profile_ShowAllCv" xml:space="preserve">
+    <value>Tout afficher ({0})</value>
+  </data>
+  <data name="Users_Profile_NewLayoutNote" xml:space="preserve">
+    <value>Aperçu d'une nouvelle mise en page. La page actuelle :</value>
+  </data>
+  <data name="Users_Medical_NoneOnFile" xml:space="preserve"><value>Aucune condition médicale enregistrée.</value></data>
+  <data name="Users_Medical_RevealFailed" xml:space="preserve"><value>Impossible de charger les informations médicales.</value></data>
+  <data name="Users_Medical_RevealTitle" xml:space="preserve"><value>Afficher les informations médicales (chaque consultation est enregistrée dans le journal d'audit)</value></data>
+  <data name="Users_Profile_InvalidLocation" xml:space="preserve"><value>Choisissez un lieu valide.</value></data>
 </root>

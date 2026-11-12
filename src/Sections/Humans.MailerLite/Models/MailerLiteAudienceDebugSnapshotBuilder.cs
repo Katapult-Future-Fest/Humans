@@ -37,13 +37,13 @@ internal static class MailerLiteAudienceDebugSnapshotBuilder
         }
         catch (HttpRequestException ex)
         {
-            logger.LogWarning(ex, "MailerLite read failed for audience {AudienceKey}", audience.Key);
+            logger.LogWarning("MailerLite read failed for audience {AudienceKey}: {StatusCode}", audience.Key, ex.StatusCode);
             mlError = $"MailerLite read failed: {ex.StatusCode?.ToString() ?? "no response"}.";
             subscribers = null;
         }
-        catch (TaskCanceledException ex) when (!ct.IsCancellationRequested)
+        catch (TaskCanceledException) when (!ct.IsCancellationRequested)
         {
-            logger.LogWarning(ex, "MailerLite read timed out for audience {AudienceKey}", audience.Key);
+            logger.LogWarning("MailerLite read timed out for audience {AudienceKey}", audience.Key);
             mlError = "MailerLite read timed out.";
             subscribers = null;
         }
@@ -66,8 +66,8 @@ internal static class MailerLiteAudienceDebugSnapshotBuilder
         foreach (var uid in expectedIds)
         {
             if (!byUserId.TryGetValue(uid, out var u)) continue;
-            var email = NotificationTargetEmail(u);
-            if (email is null) continue;
+            var email = u.Email;
+            if (string.IsNullOrWhiteSpace(email)) continue;
             expected.Add(new DebugExpectedRow(uid, u.BurnerName, email));
         }
 
@@ -188,17 +188,6 @@ internal static class MailerLiteAudienceDebugSnapshotBuilder
         var lastPage = rowCount == 0 ? 1 : (rowCount - 1) / size + 1;
         var page = Math.Clamp(state.Page, 1, lastPage);
         return state with { Page = page, PageSize = size };
-    }
-
-    private static string? NotificationTargetEmail(UserInfo u)
-    {
-        var primary = u.UserEmails
-            .Where(e => e.IsVerified && e.IsPrimary)
-            .Select(e => e.Email)
-            .FirstOrDefault();
-        if (primary is not null) return primary;
-        // Same fallback as IUserEmailService.GetNotificationTargetEmailsAsync.
-        return u.IdentityEmailColumn;
     }
 
     internal sealed record DebugSnapshot(

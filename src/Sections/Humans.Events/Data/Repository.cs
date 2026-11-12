@@ -242,16 +242,15 @@ internal sealed class EventRepository(IDbContextFactory<EventGuideDbContext> fac
         await ctx.SaveChangesAsync(ct);
     }
 
-    public async Task<int> AssignEventSettingsIdsAsync(
-        IReadOnlyDictionary<Guid, Guid> eventSettingsIdByEventId, CancellationToken ct = default)
+    public async Task SaveImportedEventsAsync(
+        IReadOnlyList<Event> created, IReadOnlyList<Event> updated, CancellationToken ct = default)
     {
+        if (created.Count == 0 && updated.Count == 0) return;
         await using var ctx = await factory.CreateDbContextAsync(ct);
-        var ids = eventSettingsIdByEventId.Keys.ToList();
-        var rows = await ctx.Events.Where(e => ids.Contains(e.Id) && e.EventSettingsId == null).ToListAsync(ct);
-        foreach (var row in rows)
-            row.EventSettingsId = eventSettingsIdByEventId[row.Id];
+        foreach (var guideEvent in updated)
+            ctx.Entry(guideEvent).State = EntityState.Modified;
+        ctx.Events.AddRange(created);
         await ctx.SaveChangesAsync(ct);
-        return rows.Count;
     }
 
     public async Task<IReadOnlyList<Event>> GetApprovedEventsAsync(
@@ -317,7 +316,7 @@ internal sealed class EventRepository(IDbContextFactory<EventGuideDbContext> fac
         var groups = await ctx.Events
             .AsNoTracking()
             .Where(e => moderationStatuses.Contains(e.Status))
-            .Where(e => eventSettingsId == null || e.EventSettingsId == null || e.EventSettingsId == eventSettingsId)
+            .Where(e => eventSettingsId == null || e.EventSettingsId == eventSettingsId)
             .GroupBy(e => e.Status)
             .Select(g => new { Status = g.Key, Count = g.Count() })
             .ToListAsync(ct);
@@ -328,11 +327,7 @@ internal sealed class EventRepository(IDbContextFactory<EventGuideDbContext> fac
     public async Task<IReadOnlyList<Event>> GetEventsByStatusAsync(EventStatus status, CancellationToken ct = default)
     {
         await using var ctx = await factory.CreateDbContextAsync(ct);
-        var query = ctx.Events
-            .AsNoTracking()
-            .Include(e => e.Category)
-            .Include(e => e.EventVenue)
-            .Include(e => e.EventModerationActions)
+        var query = WithDetails(ctx.Events.AsNoTracking())
             .Where(e => e.Status == status);
 
         return await query.ToListAsync(ct);
@@ -363,11 +358,11 @@ internal sealed class EventRepository(IDbContextFactory<EventGuideDbContext> fac
             .AsNoTracking()
             .Where(e => e.CampId != null &&
                         (e.Status == EventStatus.Pending || e.Status == EventStatus.Approved))
-            .Where(e => eventSettingsId == null || e.EventSettingsId == null || e.EventSettingsId == eventSettingsId)
-            .Select(e => new { e.Id, e.CampId, e.Title, e.StartAt, e.DurationMinutes, e.Status })
+            .Where(e => eventSettingsId == null || e.EventSettingsId == eventSettingsId)
+            .Select(e => new { e.Id, e.CampId, e.Title, e.StartAt, e.DurationMinutes, e.Status, e.IsRecurring, e.RecurrenceDays })
             .ToListAsync(ct);
 
-        return rows.Select(r => new CampEventOverlap(r.Id, r.CampId, r.Title, r.StartAt, r.DurationMinutes, r.Status))
+        return rows.Select(r => new CampEventOverlap(r.Id, r.CampId, r.Title, r.StartAt, r.DurationMinutes, r.Status, r.IsRecurring, r.RecurrenceDays))
                    .ToList();
     }
 

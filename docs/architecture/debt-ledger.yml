@@ -23,7 +23,7 @@
 # citing its id in the PR. Shape, `status:` values and `root:` linking:
 # memory/process/debt-ledger-additions.md.
 version: 1
-next_id: 105
+next_id: 110
 recent_sections: [Campaigns, Feedback, Governance]
 themes:
   - id: grandfathered-hum0028-invalidators
@@ -62,7 +62,7 @@ themes:
     detect: "build:HUM_USER_DISPLAYNAME"
     review: light
     last_swept: 2026-10-22
-    remaining: 3
+    remaining: 2
     notes: >-
       Production reported users.legacy-gdpr-tombstones pending: 0, done: true
       on 2026-10-22. Retired its data-migration registration, name-shape
@@ -77,7 +77,7 @@ themes:
     detect: "grep -rl --include='*.cs' 'pragma warning disable CS0618' src | wc -l"
     review: light
     last_swept: 2026-10-21
-    remaining: 3
+    remaining: 2
     notes: >-
       Swept 2026-10-21: the cross-section nav reads are gone, and 6 pragmas
       (CurrentUserEnricher, HttpCurrentUserContext, AccountController,
@@ -103,7 +103,7 @@ themes:
       and IMagicLinkService.VerifyLoginTokenAsync (returns `bool` now). The
       marker cannot return (Base -> Users.Contracts cycle), so that interface
       stays review-guarded.
-      Convert to DTO/Info returns (read-model pattern, design-rules §15).
+      Convert to DTO/Info returns (read-model pattern, design-rules.md, *Section caching pattern*).
       Remove each fixed locator line from the baseline file — never add lines.
   - id: baseline-display-sort
     title: Display sorting below the presentation layer
@@ -152,33 +152,16 @@ themes:
     title: One-off inbox items
     detect: "cat docs/architecture/debt-ledger.yml src/Sections/*/Docs/debt.yml 2>/dev/null | grep -c '^  - added:'"
     review: per-item
-    last_swept: 2026-10-30
-    remaining: 5
+    last_swept: 2026-11-05
+    remaining: 0
     notes: >-
       Each inbox entry carries its own review tier and a stable `id`; an item is
       closed by deleting its row and citing the id in the PR — ids are never
       recycled. Shape, id format and `status:` values:
-      memory/process/debt-ledger-additions.md. Count re-measured 2026-10-30
+      memory/process/debt-ledger-additions.md. Count re-measured 2026-11-05
       across the central ledger plus every src/Sections/*/Docs/debt.yml.
 inbox:
-  # Seeded from the open items in docs/architecture/tech-debt-2026-04-23.md.
-  - added: 2026-10-21
-    id: CENTRAL-89
-    what: "Retirement PR for data migration finance.iban-to-payment-details (Users decomposition, Finance): once GET /api/data-migrations reports it done on production, delete the migration and these legacy readers: PaymentDetailsService's legacy fallback (LegacyIban) and ProfileInfo.Iban with its HUM_PROFILE_IBAN obsolete; Users' erase line that nulls Profile.Iban stays until the USERS drop row. Quote the production reading and date in the PR; it is the standing approval for the matching USERS drop row (memory/architecture/no-drops-until-prod-verified.md)."
-    review: panel
-  - added: 2026-10-21
-    id: CENTRAL-92
-    what: "Retirement PR for data migration consent.profile-review (Users decomposition, Consent): once GET /api/data-migrations reports it done on production, delete the migration and these legacy readers: ConsentReviewService's LegacyReview fallback, UserInfo.IsRejected's legacy arm and the UserStateClassifier profile.RejectedAt arm, the obsolete ProfileInfo review fields (HUM_PROFILE_REVIEW), LegacyConsentCheckStatus, the UserFixtures.StateFor pragma, and Users' export/erase of the legacy review columns. Quote the production reading and date in the PR; it is the standing approval for the matching USERS drop row (memory/architecture/no-drops-until-prod-verified.md)."
-    review: panel
-  - added: 2026-10-21
-    id: CENTRAL-93
-    what: "Retirement PR for data migration tickets.event-participations (Users decomposition, Tickets): once GET /api/data-migrations reports it done on production, delete the migration and these legacy readers: EventParticipationService's LegacyRows, fallback, write seed and cleared-row handling, UserInfo.EventParticipations and its pragmas (HUM_USER_PARTICIPATIONS), LegacyEventParticipationInfo, the Legacy* participation enums and the Users LegacyEventParticipations export slice. Quote the production reading and date in the PR; it is the standing approval for the matching USERS drop row (memory/architecture/no-drops-until-prod-verified.md)."
-    review: panel
-  - added: 2026-10-21
-    id: CENTRAL-94
-    what: "Retirement PR for data migration email.communication-preferences (Users decomposition, Email): once GET /api/data-migrations reports it done on production, delete the migration and these legacy readers: CommunicationPreferenceService's legacy fallback and cleared-row semantics, UserInfo.CommunicationPreferences (HUM_USER_COMMPREFS), LegacyMessageCategory, and Users' LegacyCommunicationPreferences export slice and erase. Quote the production reading and date in the PR; it is the standing approval for the matching USERS drop row (memory/architecture/no-drops-until-prod-verified.md)."
-    review: panel
-  - added: 2026-10-21
-    id: CENTRAL-95
-    what: "Retirement PR for data migration google.workspace-identities (Users decomposition, GoogleIntegration): once GET /api/data-migrations reports it done on production, delete the migration and these legacy readers: WorkspaceIdentityService's legacy fallback, UserEmailInfo.IsGoogle/GoogleEmailStatus (HUM_USER_GOOGLE_IDENTITY), LegacyGoogleEmailStatus, the merge re-FK's IsGoogle = false, and the Users export keys IsGoogle/GoogleEmailStatus. Quote the production reading and date in the PR; it is the standing approval for the matching USERS drop row (memory/architecture/no-drops-until-prod-verified.md)."
-    review: panel
+  - added: 2026-11-06
+    id: CENTRAL-109
+    what: "memory/architecture/person-search.md shows a PersonSearchFields.ManageAll member that no longer exists (git grep -n ManageAll finds only that atom and an old run file). Found by the Users section-doctor run."
+    review: light

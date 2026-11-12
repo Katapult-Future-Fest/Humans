@@ -74,9 +74,9 @@ The feature matches **each entity's own public fields only** — no cross-modal 
 **So that** I find what I'm looking for without typing exactly the right field
 
 **Acceptance Criteria:**
-- **Humans** match via `IUserService.SearchUsersAsync` with `PersonSearchFields.PublicAll` (`Name | Bio`, per `memory/architecture/person-search.md`) — the resolved display name plus the `Bio` bucket: bio, city, contribution-interests, CV, pronouns, `AllActiveProfiles`-visible ContactFields, and publicly-exposed emails. The bit-flag's existing fields are unchanged — humans inherit the same scope as `/Profile/Search` for non-admin viewers. Emergency-contact data and admin-only fields are never searchable.
+- **Humans** match via `IUserService.SearchUsersAsync` with `PersonSearchFields.PublicAll` (`Name | Bio`, per `memory/architecture/person-search.md`) — the resolved display name plus the `Bio` bucket: bio, city, contribution-interests, CV, pronouns, `AllActiveProfiles`-visible ContactFields, and publicly-exposed emails. Emergency-contact data and admin-only fields are never searchable.
 - **Teams** match on `Team.Name` only.
-- **Camps** match on the public-year `CampSeason.Name` only.
+- **Camps** match on the active event's `CampSeason.Name` only.
 - **Shifts** (rotas) match on `Rota.Name` only.
 - Teams, Camps, Shifts, and Humans additionally match by pasting the entity's own id (a `Guid.TryParse` fast-path scored as an exact match). For humans the pasted UserId resolves against the cached snapshot (`CachingUserService`) and is reported as a `User ID` match; rejected profiles are excluded, and `ExactName` queries skip id resolution so a GUID-shaped burner name matches by name, never by id collision.
 - **Events** match on `Event.Title` or `Event.Description` and are filtered to `Status = Approved` only, via `IEventService.SearchAsync` — event copy is short and free-form so description text is often the load-bearing name signal users remember. A Title match scores via the standard exact/prefix/contains rubric; a Description-only match uses the same three tiers halved (50/40/30) so it's still surfaced but always ranks below every Title match, and orders sensibly against other description-only hits instead of tying (nobodies-collective/Humans#1062).
@@ -91,7 +91,7 @@ The feature matches **each entity's own public fields only** — no cross-modal 
 
 **Acceptance Criteria — these govern *text* queries. GUID queries are a sanctioned exception; see US-GS.5.**
 - Hidden teams (`Team.IsHidden = true`) are excluded for everyone.
-- Camps are filtered to the public-status set (`CampSeasonStatus.Active` or `Full`) for the public year — same gate as the public camp directory.
+- Camps are filtered to the public-status set (`CampSeasonStatus.Active` or `Full`) for the active event — same gate as the public camp directory.
 - Rotas are filtered to `IsVisibleToVolunteers = true` for everyone.
 - Events are filtered to `Status = Approved`; submissions in `Draft`, `Pending`, `Rejected`, `ResubmitRequested`, or `Withdrawn` are never returned, matching the public `/Events/Browse` surface.
 - Admin-only profile fields (verified emails, non-public ContactFields) are never returned through `/Search`, regardless of role. Admins use the existing per-section admin pages (`/Teams` admin, `/Camps` admin, `/Users/Admin`) for privileged views.
@@ -124,7 +124,7 @@ If privileged search is added later, the right shape is per-bucket scope (TeamsA
 
 ## Architecture
 
-`ISearchService` is a thin orchestrator (the Search section, `src/Sections/Humans.Search`). It owns no tables, has no repository, and reaches every other section through public service interfaces only — no direct repository fan-out, no cross-section table access. Per design-rules §6, the section that owns a table owns the query against it; the orchestrator just merges and ranks within each type bucket.
+`ISearchService` is a thin orchestrator (the Search section, `src/Sections/Humans.Search`). It owns no tables, has no repository, and reaches every other section through public service interfaces only — no direct repository fan-out, no cross-section table access. Per design-rules.md, *No cross-domain joins*, the section that owns a table owns the query against it; the orchestrator just merges and ranks within each type bucket.
 
 ```
 SearchController
@@ -150,7 +150,7 @@ a Description-only match, per US-GS.3). No bucket scores in the orchestrator any
 | Name (prefix)   |   80  |
 | Name (contains) |   60  |
 
-Display ordering is a presentation concern and lives in `SearchController.BuildViewModel` per `memory/architecture/display-sort-in-controllers.md` — the service returns scored but unsorted buckets. Each non-human bucket sorts by `Score desc, SortKey asc` at the controller; the humans bucket sorts by relevance (`OrderByRelevance()`: `Score` desc, then `BurnerName`), matching `/Profile/Search`.
+Display ordering is a presentation concern and lives in `SearchController.BuildViewModel` per `memory/architecture/display-sort-in-controllers.md` — the service returns scored but unsorted buckets. Each non-human bucket sorts by `Score desc, SortKey asc` at the controller; the humans bucket sorts by relevance (`OrderByRelevance()`: `Score` desc, then `BurnerName`).
 
 Counts reflect every match — there is no cap, so the chip count is the true number of hits the user can scroll to. There is no separate `CountMatchingAsync` per section; the buckets are already the full result set.
 
@@ -170,7 +170,7 @@ Counts reflect every match — there is no cap, so the chip count is the true nu
 
 `/Search` renders type-grouped sections, in order: **Humans**, **Teams**, **Camps**, **Shifts**, **Events**. Each section is hidden when its bucket is empty. The Events section and chip are also hidden when `Features:Events` is off (the view reads `IConfiguration` directly for this gate).
 
-- **Humans** are rendered one row at a time by Users' own `<vc:user-search-result>` (see `memory/architecture/person-search.md`). Search holds ids and the match context Users' own search produced, and builds no display model — `/Profile/Search` renders the same component (nobodies-collective/Humans#1062).
+- **Humans** are rendered one row at a time by Users' own `<vc:user-search-result>` (see `memory/architecture/person-search.md`). Search holds ids and the match context Users' own search produced, and builds no display model (nobodies-collective/Humans#1062).
 - **Teams / Camps / Shifts / Events** are rendered the same way: `_GlobalSearchSection` switches on the row's `Type` and emits that section's own component — `<vc:teams-search-result team-id>`, `<vc:camps-search-result camp-id>`, `<vc:shifts-search-result rota-id>`, `<vc:events-search-result event-id>`. Search projects no `Title`/`Subtitle`/`Url` for any of them (nobodies-collective/Humans#1062). Every bucket keys by the entity's `Guid`; a component that needs a slug for its link fetches it from the entity it just loaded.
 
 A type-filter chip row at the top (All | Humans | Teams | Camps | Shifts | Events) preserves the query and toggles the active filter. Counts on each chip reflect the full match count.

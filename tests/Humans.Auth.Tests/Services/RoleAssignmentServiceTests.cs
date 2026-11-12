@@ -1,4 +1,7 @@
 using AwesomeAssertions;
+using System.Globalization;
+using System.Resources;
+using Humans.Base.Extensions;
 using Xunit;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -199,6 +202,43 @@ public sealed class RoleAssignmentServiceTests : AuthTestHarness
     }
 
     [HumansFact]
+    public async Task AssignRoleAsync_NotesOverColumnLimit_RefusedWithoutWriting()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var userId = Guid.NewGuid();
+        await SeedUserAsync(userId, "Target");
+
+        var refused = await _service.AssignRoleAsync(
+            userId, RoleNames.Board, Guid.NewGuid(), new string('x', 2001), ct);
+        var accepted = await _service.AssignRoleAsync(
+            userId, RoleNames.Admin, Guid.NewGuid(), new string('x', 2000), ct);
+
+        refused.ErrorKey.Should().Be("NotesTooLong");
+        accepted.Success.Should().BeTrue();
+        (await AuthDb.RoleAssignments.AsNoTracking().Where(r => r.UserId == userId)
+            .Select(r => r.RoleName).ToListAsync(ct)).Should().Equal(RoleNames.Admin);
+    }
+
+    [HumansFact]
+    public async Task EndRoleAsync_AppendedNotesOverColumnLimit_RefusedAndRoleStaysActive()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var userId = Guid.NewGuid();
+        await SeedUserAsync(userId, "Target");
+        var existingNotes = new string('x', 1990);
+        var assignment = await AddAssignmentAsync(
+            userId, RoleNames.Board, Clock.GetCurrentInstant() - Duration.FromDays(1), null,
+            notes: existingNotes);
+
+        var result = await _service.EndRoleAsync(assignment.Id, Guid.NewGuid(), "stepping down", ct);
+
+        result.ErrorKey.Should().Be("NotesTooLong");
+        var row = await AuthDb.RoleAssignments.AsNoTracking().SingleAsync(r => r.Id == assignment.Id, ct);
+        row.ValidTo.Should().BeNull();
+        row.Notes.Should().Be(existingNotes);
+    }
+
+    [HumansFact]
     public async Task EndRoleAsync_AlreadyEnded_ReturnsRoleNotActive()
     {
         var userId = Guid.NewGuid();
@@ -229,6 +269,52 @@ public sealed class RoleAssignmentServiceTests : AuthTestHarness
 
         result.Success.Should().BeFalse();
         result.ErrorKey.Should().Be("RoleNotActive");
+    }
+
+    [HumansTheory]
+    [MemberData(nameof(SupportedCultures.All), MemberType = typeof(SupportedCultures))]
+    [InlineData("")]
+    [InlineData("not-a-culture")]
+    [InlineData("pt")]
+    [InlineData("lookup-fails")]
+    public async Task RoleChanges_NotifyInTheRecipientsLanguage(string language)
+    {
+        using var actorCulture = new Humans.Base.Extensions.CultureScope("en");
+        var userId = Guid.NewGuid();
+        var actorId = Guid.NewGuid();
+        await SeedUserAsync(userId, "Target");
+        var user = (await _userService.GetUserInfoAsync(userId, TestContext.Current.CancellationToken))!;
+        if (string.Equals(language, "lookup-fails", StringComparison.Ordinal))
+            _userService.GetUserInfoAsync(userId, Arg.Any<CancellationToken>())
+                .Returns(ValueTask.FromException<UserInfo?>(new IOException("Directory unavailable")));
+        else
+            _userService.GetUserInfoAsync(userId, Arg.Any<CancellationToken>())
+                .Returns(user with { PreferredLanguage = language });
+
+        var assigned = await _service.AssignRoleAsync(userId, RoleNames.Board, actorId, null,
+            TestContext.Current.CancellationToken);
+        var row = await AuthDb.RoleAssignments.AsNoTracking().SingleAsync(r => r.UserId == userId,
+            TestContext.Current.CancellationToken);
+        var ended = await _service.EndRoleAsync(row.Id, actorId, null, TestContext.Current.CancellationToken);
+
+        assigned.Success.Should().BeTrue();
+        ended.Success.Should().BeTrue();
+        var notices = Notifier.ReceivedCalls().ToList();
+        notices.Should().HaveCount(2);
+        var expected = CultureInfo.GetCultureInfo(CultureCatalog.SupportedCultureCodes.Contains(language, StringComparer.Ordinal)
+            ? language : CultureCatalog.DefaultCultureCode);
+        var resources = new ResourceManager(typeof(AuthResource));
+        notices[0].GetArguments()[3].Should().Be(
+            string.Format(expected, resources.GetString("Auth_Notification_RoleAssigned", expected)!, RoleNames.Board));
+        notices[1].GetArguments()[3].Should().Be(
+            string.Format(expected, resources.GetString("Auth_Notification_RoleEnded", expected)!, RoleNames.Board));
+        foreach (var notice in notices)
+        {
+            notice.GetArguments()[4].Should().BeEquivalentTo(new[] { userId });
+            notice.GetArguments()[6].Should().Be("/Profile");
+            notice.GetArguments()[10].Should().Be(CancellationToken.None);
+        }
+        await _systemTeamSync.Received(2).SyncBoardTeamAsync(Arg.Any<SyncReport?>(), Arg.Any<CancellationToken>());
     }
 
     [HumansFact]
@@ -607,7 +693,8 @@ public sealed class RoleAssignmentServiceTests : AuthTestHarness
     }
 
     private async Task<RoleAssignment> AddAssignmentAsync(
-        Guid userId, string roleName, Instant validFrom, Instant? validTo, Guid? createdByUserId = null)
+        Guid userId, string roleName, Instant validFrom, Instant? validTo, Guid? createdByUserId = null,
+        string? notes = null)
     {
         var assignment = new RoleAssignment
         {
@@ -617,7 +704,8 @@ public sealed class RoleAssignmentServiceTests : AuthTestHarness
             ValidFrom = validFrom,
             ValidTo = validTo,
             CreatedAt = validFrom,
-            CreatedByUserId = createdByUserId ?? Guid.NewGuid()
+            CreatedByUserId = createdByUserId ?? Guid.NewGuid(),
+            Notes = notes
         };
 
         AuthDb.RoleAssignments.Add(assignment);

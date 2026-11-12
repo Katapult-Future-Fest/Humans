@@ -71,7 +71,6 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
             Substitute.For<Humans.GoogleIntegration.Contracts.ITeamResourceService>(),
             Substitute.For<Humans.Shifts.Contracts.IShiftService>(),
             Substitute.For<Humans.Settings.Contracts.ISettingsService>(),
-            userService,
             _roleAssignmentService);
     }
 
@@ -363,7 +362,6 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         SeedTeamMember(team.Id, user.Id);
         await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        // Warm the cache + inverse index.
         var before = await _service.GetUserTeamMembershipsAsync(user.Id, TestContext.Current.CancellationToken);
         before.Should().HaveCount(1);
 
@@ -415,7 +413,6 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         SeedTeamMember(team.Id, user.Id);
         await SaveAllAsync(TestContext.Current.CancellationToken);
 
-        // First call drives warmup (which uses repository, not inner service).
         await _service.GetUserTeamMembershipsAsync(user.Id, TestContext.Current.CancellationToken);
 
         // The inner ITeamManagementService is an unconfigured NSubstitute mock; if the
@@ -632,7 +629,6 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         await SaveAllAsync(TestContext.Current.CancellationToken);
         var ct = TestContext.Current.CancellationToken;
 
-        // Warm the cache so we can observe invalidation by counter.
         await _service.GetTeamAsync(team.Id, ct);
         var before = _service.BulkInvalidations;
 
@@ -792,6 +788,19 @@ public sealed class CachingTeamServiceTests : TeamsTestHarness
         hit.Name.Should().Be("Kitchenette");
         hit.Score.Should().Be(StringSearchExtensions.ExactNameScore,
             because: "an id paste is as exact as a match gets");
+    }
+
+    [HumansFact]
+    public async Task SearchAsync_LimitKeepsTheHighestScoringMatch()
+    {
+        SeedTeam("A Kitchen");
+        SeedTeam("Kitchen Crew");
+        var exact = SeedTeam("Kitchen");
+        await SaveAllAsync(TestContext.Current.CancellationToken);
+
+        var results = await _service.SearchAsync("Kitchen", 1, TestContext.Current.CancellationToken);
+
+        results.Should().ContainSingle().Which.TeamId.Should().Be(exact.Id);
     }
 
     [HumansFact]

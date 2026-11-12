@@ -27,7 +27,6 @@ Business requirements, user stories, data model, and workflows for each feature 
 | [Email Flag Violations — Admin & Self Remediation](../src/Sections/Humans.Users/Docs/features/email-flag-violations-remediation.md) | Recovery surface for stuck `UserEmail` IsGoogle/IsPrimary duplicates with admin scan page and self-service clear actions |
 | [Feature 21: Email Outbox](../src/Sections/Humans.Email/Docs/features/email-outbox.md) | Outbox pattern for reliable transactional email delivery with retry and crash recovery |
 | [`[ExpiresOn]` — Hard removal deadlines](features/global/expires-on-deadline.md) | Analyzer-enforced removal deadlines that escalate deprecation warnings to errors on a fixed date |
-| [Feedback System](../src/Sections/Humans.Feedback/Docs/features/feedback-system.md) | Retired (nobodies-collective/Humans#977) — closed to new reports and Admin-only; superseded by Issues |
 | [Expense Reimbursement Process](../src/Sections/Humans.Finance/Docs/expense-reimbursement-process.md) | End-to-end business process for an expense: submission, coordinator endorsement, Finance approval, Holded booking and SEPA payout |
 | [SEPA Payout of Creditor Balances](../src/Sections/Humans.Finance/Docs/features/sepa-payout.md) | `/Finance/Creditors` and `/Finance/Sepa`: generate a pain.001.001.09 SEPA Credit Transfer file for member creditor balances and book settled transfers back into Holded |
 | [Gate Admissions](../src/Sections/Humans.Gate/Docs/features/gate-admissions.md) | Gate QR scanning on rugged tablets deciding entry against ticket validity, photo-ID name check, and Early Entry grants — shipped design draft; `src/Sections/Humans.Gate/Docs/Gate.md` is the authoritative current-state doc |
@@ -47,6 +46,7 @@ Business requirements, user stories, data model, and workflows for each feature 
 | [Membership Status Partition](../src/Sections/Humans.Governance/Docs/features/membership-status.md) | Six-bucket mutually exclusive status model computed by `PartitionUsersAsync` and used by the Admin dashboard — the Admin /Humans list and Volunteers team sync each compute their own status buckets independently now |
 | [Membership Tiers](../src/Sections/Humans.Governance/Docs/features/membership-tiers.md) | Four-tier membership model (Volunteer / Colaborador / Asociado / Board) with three tiers managed in-system |
 | [Assembly Votes](../src/Sections/Humans.Governance/Docs/features/assembly-votes.md) | Binding recorded votes of the Asociados on Assembly motions — frozen roster at open, embargoed tally, append-only ballot history, IRV counting |
+| [Grants](../src/Sections/Humans.Grants/Docs/features/grants.md) | Program-based entitlements (cheaper ticket, early entry, staying late) issued by hand or by a source section such as Low Income, with revoke, resend and holder notices |
 | [In-App Guide](../src/Sections/Humans.Guide/Docs/features/in-app-guide.md) | Embedded `/Guide` rendering of the `docs/guide/` markdown with role-aware filtering and in-app navigation |
 | [Issues System](../src/Sections/Humans.Issues/Docs/features/issues-system.md) | In-app issue tracker routing bugs/features/questions by section to the right role-holders, with reporter↔handler threads |
 | [Legal Documents & Consent Management](../src/Sections/Humans.Consent/Docs/features/legal-documents-consent.md) | GDPR-compliant document version tracking with immutable consent audit trail, team-scoped, multi-language, configurable through admin GUI |
@@ -102,7 +102,7 @@ Terse, authoritative invariant docs for each major section: concepts, data model
 |----------|-------------|
 | [Admin Shell](sections/admin-shell.md) | Frame-only section providing the shared admin sidebar, breadcrumb, and dashboard skeleton — owns no tables |
 | [Agent](../src/Sections/Humans.Agent/Docs/Agent.md) | Conversational helper backed by Anthropic Claude, available to authenticated consented users when `AgentSettings.Enabled = true` |
-| [Audit Log](../src/Sections/Humans.AuditLog/Docs/AuditLog.md) | Append-only system audit trail capturing actor, action, entity, and timestamp; enforced append-only per design-rules §12 |
+| [Audit Log](../src/Sections/Humans.AuditLog/Docs/AuditLog.md) | Append-only system audit trail capturing actor, action, entity, and timestamp; enforced append-only per design-rules.md, *Append-only entities* |
 | [Auth](../src/Sections/Humans.Auth/Docs/Auth.md) | Temporal role assignments, magic-link login/signup, and claims transformation |
 | [Backdoor](../src/Sections/Humans.Backdoor/Docs/Backdoor.md) | The machine surface — every key-authed API an agent talks to, under `/api/backdoor/*`, gated by one personal key per human |
 | [Budget](../src/Sections/Humans.Budget/Docs/Budget.md) | Fiscal-year budgets (Draft/Active/Closed) with groups, categories, line items, and an append-only audit log |
@@ -115,31 +115,33 @@ Terse, authoritative invariant docs for each major section: concepts, data model
 | [Debug](../src/Sections/Humans.Debug/Docs/Debug.md) | Developer/diagnostics section: admin-only pages exposing operational insight (client demographics, request health) that no domain section owns — owns no tables |
 | [Development](../src/Sections/Humans.Development/Docs/Development.md) | Dev-only tooling: persona sign-in and fixture seeding, never reachable in Production — owns no tables |
 | [Early Entry](../src/Sections/Humans.EarlyEntry/Docs/EarlyEntry.md) | Cross-source Early Entry: who may enter the site before gates open, on which day, and because of what — owns no data, fans out over every contributing section |
-| [Email](../src/Sections/Humans.Email/Docs/Email.md) | Transactional email outbox: queue, render, deliver, retry, and pause/resume — backs campaign sends, onboarding, shift, and feedback emails |
+| [Email](../src/Sections/Humans.Email/Docs/Email.md) | Transactional email outbox: queue, render, deliver, retry, and pause/resume — backs campaign sends, onboarding, and shift emails |
 | [Events](../src/Sections/Humans.Events/Docs/Events.md) | Event programming: submission, moderation, browsing, export, and preference management for festival events |
 | [Expenses](../src/Sections/Humans.Expenses/Docs/Expenses.md) | Expense reports submitted by members and approved by Finance Admin; approval books into Holded async, and paid/unpaid status is read back from the member's Holded creditor ledger rather than stamped on the report — payment itself happens externally, with no SEPA-file generation in the app |
-| [Feedback](../src/Sections/Humans.Feedback/Docs/Feedback.md) | Retired — closed to new reports and Admin-only; the historical archive of in-app reports (bugs, feature requests, questions) with screenshots and conversation threads |
 | [Finance](../src/Sections/Humans.Finance/Docs/Finance.md) | Treasurer's reality side of money — actuals, reconciliation, and treasurer-facing operational data sharing keys with Budget |
 | [Gate](../src/Sections/Humans.Gate/Docs/Gate.md) | Gate ticket scanning that decides entry at the event door and writes the durable admission record — distinct from the read-only Scanner section, which must never check anyone in |
 | [Gdpr](../src/Sections/Humans.Gdpr/Docs/Gdpr.md) | GDPR Article 15 export orchestrator — fans out to every section that holds personal data and merges the slices into the JSON the human downloads; owns no tables and no pages |
 | [Google Integration](../src/Sections/Humans.GoogleIntegration/Docs/GoogleIntegration.md) | Shared-Drive-only sync for Drive folders, Groups, and Workspace accounts with reconciliation and Drive-activity monitoring |
 | [Governance](../src/Sections/Humans.Governance/Docs/Governance.md) | Colaborador and Asociado tier applications, Board voting workflow, and term lifecycle (not volunteer onboarding) |
+| [Grants](../src/Sections/Humans.Grants/Docs/Grants.md) | Entitlements to a person (cheaper ticket, early entry, staying late): issuer rules, one live grant per person, expiry, source write contract, and notices |
 | [Guide](../src/Sections/Humans.Guide/Docs/Guide.md) | The in-app `/Guide` renderer for `docs/guide/` markdown with role-scoped block filtering |
 | [Holded Connector](../src/Sections/Humans.Holded/Docs/Holded-connector.md) | Thin typed-`HttpClient` surface to the Holded accounting API, shared by Expenses (purchase documents), Finance (provisioning, document sync, SEPA booking), Store (sales documents) and Workgroups (expense accounts). Owned by the Holded section; owns no tables |
 | [Holded](../src/Sections/Humans.Holded/Docs/Holded.md) | The ledger mirror: a local, re-derivable copy of Holded's daybook and chart of accounts, plus the sync that maintains it and the `/Holded` admin screen |
 | [Issues](../src/Sections/Humans.Issues/Docs/Issues.md) | In-app issue tracker (bugs, features, questions) with screenshots, role-routed triage, and a reporter↔handler conversation thread |
 | [Consent](../src/Sections/Humans.Consent/Docs/Consent.md) | GitHub-synced legal documents, per-version append-only consent records, and the Consent Coordinator audit/review queue |
+| [Low Income](../src/Sections/Humans.LowIncome/Docs/LowIncome.md) | Stub for the future Low Income process: one Admin-only page that gives or removes a person's Low Income grant, which lives in Grants |
 | [MailerLite](../src/Sections/Humans.MailerLite/Docs/MailerLite.md) | Humans ↔ MailerLite synchronisation: inbound import and outbound audience management |
 | [Monitor](../src/Sections/Humans.Monitor/Docs/Monitor.md) | Operator-facing monitoring of the Google Workspace estate: detect unrequested permission changes, and show the Google-sync audit trail for one resource or one human |
 | [Notifications](../src/Sections/Humans.Notifications/Docs/Notifications.md) | In-app notification fan-out (stored events plus per-user inbox) and live meter counts (computed) |
 | [Onboarding](../src/Sections/Humans.Onboarding/Docs/Onboarding.md) | Pure orchestrator over Profiles, Consent, Teams, and Governance — owns no tables |
+| [Pleo](../src/Sections/Humans.Pleo/Docs/Pleo.md) | Read-only mirror of the Pleo card wallet (entries, chart, cardholders, balance), the category → Holded account mapping, and the `/Pleo` admin pages with the wallet reconciliation |
 | [Rideshare](../src/Sections/Humans.Rideshare/Docs/Rideshare.md) | Members-only map board for organizing rides to and from the burn — offers, requests, and a lightweight interest lifecycle, no booking or payment |
 | [Scanner](../src/Sections/Humans.Scanner/Docs/Scanner.md) | In-browser camera tools for barcode decode (`/Scanner/Barcode`) and read-only ticket lookup (`/Scanner/Tickets`); no owned tables |
 | [Search](../src/Sections/Humans.Search/Docs/Search.md) | Orchestrator behind the global `/Search` page — fans out to five sections' read surfaces, scores each independently, owns no tables |
 | [Settings](../src/Sections/Humans.Settings/Docs/Settings.md) | App-wide `system_settings` key/value store every section may read and write, plus `settings_event`, the app-wide event calendar and active-cycle record |
 | [Shifts](../src/Sections/Humans.Shifts/Docs/Shifts.md) | Event shifts, rotas, signups, range blocks, event settings, general availability, and per-event volunteer profiles |
 | [Store](../src/Sections/Humans.Store/Docs/Store.md) | Per-camp catalog ordering, multi-method payments, and consolidated Holded factura issuance for Camp Lead purchases |
-| [Stripe](../src/Sections/Humans.Stripe/Docs/Stripe.md) | The payments connector — Checkout Session creation, webhook signature verification, fee lookups, boot-time key probes; owns no tables and no UI |
+| [Stripe](../src/Sections/Humans.Stripe/Docs/Stripe.md) | The payments connector — Checkout Session creation, webhook signature verification, fee lookups, boot-time key probes — plus the read-only Stripe mirror (ledger, payouts, balance, reserves) and the `/Stripe` pages |
 | [Survey](../src/Sections/Humans.Surveys/Docs/Surveys.md) | First-party, GDPR-compliant surveys: author typed/branching multi-language surveys, send tokenised email invitations to a resolved audience, collect responses across three anonymity tiers (invite link or public slug), and read results in-app, via CSV/JSON export, or a key-authed analysis API |
 | [Teams](../src/Sections/Humans.Teams/Docs/Teams.md) | Departments and sub-teams, join requests, role definitions, team pages, and linked Google resources |
 | [Tickets](../src/Sections/Humans.Tickets/Docs/Tickets.md) | External ticket vendor sync (orders + attendees), Stripe-fee enrichment, auto-matching by email, event-participation derivation |
@@ -164,7 +166,6 @@ The end-user guide for the Humans app, organized by role within each section.
 | [Email](guide/Email.md) | Personal `@nobodies.team` mailboxes and team group emails: how they work and how to send "as" your team |
 | [Events](guide/Events.md) | Browse the festival programme and submit your own events; moderators approve submissions into the public guide |
 | [Expenses](guide/Expenses.md) | Submit expense reports and track reimbursement; FinanceAdmin reviews |
-| [Feedback](guide/Feedback.md) | Retired predecessor to Issues — Admins triage the historical queue; report bugs and ideas via `/Issues` instead |
 | [Google Integration](guide/GoogleIntegration.md) | Wires teams up to Google Workspace: Group, Shared Drive, Workspace accounts, and Drive activity monitoring |
 | [Governance](guide/Governance.md) | Tier applications, Board votes, and coordinator/admin role assignments — not Volunteer onboarding |
 | [Issues](guide/Issues.md) | File a bug, feature request, or question and talk it through in one thread with whoever handles that part of the app |
@@ -211,26 +212,26 @@ Design specs and implementation plans preserved for historical context. These do
 
 | Directory | Contents |
 |-----------|----------|
-| [plans/](plans/) | Programme-level plans and audits — the Q3 transition gate ladder, the G0 section audit, the demolition and frozen-section inventories, the section dependency DAG, and the cross-section FK-cut inventory |
+| [plans/](plans/) | The cross-section FK-cut inventory |
 | [superpowers/specs/](superpowers/specs/) | Feature design specifications |
-| [superpowers/plans/](superpowers/plans/) | Feature implementation plans |
 
 ## Architecture
 
-Clean Architecture with four layers:
+Vertical sections over a shared base:
 
 ```
-Web             Controllers, Views, ViewModels
-Application     Interfaces, DTOs, Services (business logic), Use Cases
-Infrastructure  EF Core, Repositories, Stores, Caching Decorators, Jobs, Integrations
-Domain          Entities, Enums, Value Objects
+Humans.Web             Shell: layouts, page composition, platform context
+Sections/Humans.<X>    One section each: controllers, views, services, repository, DbContext, migrations
+Humans.Base            Bottom of the graph: role markers, architecture attributes, TrackedCache, shared view layer
 ```
 
 | Document | Description |
 |----------|-------------|
-| [Design Rules](architecture/design-rules.md) | Persistence, service ownership, repository / store / decorator pattern, cross-domain join ban, authorization, migration strategy |
+| [Design Rules](architecture/design-rules.md) | The regulations under the hard rules: layering, service and table ownership, repository layer, join ban, cross-service calls, crosscuts and fan-out, Shell seams, personal data, authorization, append-only entities, the caching pattern |
+| [Base](../src/Humans.Base/Docs/Base.md) | What `Humans.Base` holds: markers, attributes, `TrackedCache`, the persistence seam, the Users/Audit/Gdpr cores, the shared view layer |
+| [Shell](../src/Humans.Web/Docs/Shell.md) | What `Humans.Web` holds and the seam catalog: how section contributions are composed into nav, admin, jobs, policies and settings |
 | [Conventions](architecture/conventions.md) | Domain invariants, transactions, integration, time/config, rendering (Razor vs fetch), testing, exception rule, smell checklist |
-| [Dependency Graph](architecture/dependency-graph.md) | Service-to-service dependency graph, current vs target edges, circular dependency analysis |
+| [Dependency Graph](architecture/dependency-graph.md) | Section-to-section project-reference graph, generated from the `.csproj` files |
 | [Project Rules Catalog](../memory/INDEX.md) | Atomic rules (one per file under `memory/<bucket>/`). `architecture/coding-rules.md` is now a stub redirecting here. |
 | [Code Review Rules](architecture/code-review-rules.md) | Hard-reject rules for code review |
 | [Service / Data Access Map](architecture/service-data-access-map.md) | Per-service table access inventory |

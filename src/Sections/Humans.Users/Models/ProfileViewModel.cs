@@ -11,13 +11,10 @@ internal sealed class ProfileViewModel
 {
     public Guid Id { get; set; }
     public Guid UserId { get; set; }
-    public string Email { get; set; } = string.Empty;
-    public string DisplayName { get; set; } = string.Empty;
-    public string? ProfilePictureUrl { get; set; }
+    public string PageTitle { get; set; } = string.Empty;
 
     public bool HasCustomProfilePicture { get; set; }
 
-    public string? CustomProfilePictureUrl { get; set; }
 
     [Required(ErrorMessage = "Validation_Required")]
     [StringLength(100, ErrorMessage = "Validation_MaxLength")]
@@ -46,8 +43,10 @@ internal sealed class ProfileViewModel
     [StringLength(2, ErrorMessage = "Validation_MaxLength")]
     public string? CountryCode { get; set; }
 
+    [Range(-90d, 90d, ErrorMessage = "Validation_Range")]
     public double? Latitude { get; set; }
 
+    [Range(-180d, 180d, ErrorMessage = "Validation_Range")]
     public double? Longitude { get; set; }
 
     [StringLength(512, ErrorMessage = "Validation_MaxLength")]
@@ -144,10 +143,6 @@ internal sealed class ProfileViewModel
     /// </summary>
     public bool IsTierLocked { get; set; }
 
-    public string? EffectiveProfilePictureUrl => HasCustomProfilePicture
-        ? CustomProfilePictureUrl
-        : ProfilePictureUrl;
-
     public string? FormattedBirthday
     {
         get
@@ -196,7 +191,6 @@ internal sealed class ProfileViewModel
 
 internal sealed class TeamMembershipViewModel
 {
-    public Guid TeamId { get; set; }
     public string TeamName { get; set; } = string.Empty;
     public string TeamSlug { get; set; } = string.Empty;
     public bool IsCoordinator { get; set; }
@@ -380,6 +374,6 @@ internal sealed class NoShowHistoryItem
     public string ShiftLabel { get; set; } = string.Empty;
     public string DepartmentName { get; set; } = string.Empty;
     public string ShiftDateLabel { get; set; } = string.Empty;
-    public string? MarkedByName { get; set; }
+    public Guid? MarkedByUserId { get; set; }
     public string? MarkedAtLabel { get; set; }
 }

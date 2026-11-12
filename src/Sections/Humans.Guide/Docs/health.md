@@ -128,7 +128,8 @@ exactly one home.
 - ~~**An anonymous way in.**~~ Settled 2026-09-11: the link was missing, not the branch dead.
   `Section.cs` contributes a `Guide` item to the member top nav through `ISectionNav`, with
   no `Visible` predicate, so a signed-out reader can reach the pages the filter's anonymous
-  branch was always written to serve.
+  branch was always written to serve. The top-nav link was dropped 2026-11-05 to shorten the bar;
+  signed-out readers now reach `/Guide` only by URL.
 
 ## 6. Deliberately not done
 
@@ -138,7 +139,7 @@ exactly one home.
   read routes are `[AllowAnonymous]` and no longer reachable only from the signed-in menu, which
   puts them outside AGENTS.md's admin/operator localization exemption. Answer unchanged —
   translating four pieces of page furniture around English content buys a reader nothing, so the
-  exemption is stated here rather than earned by a six-culture resx set (Peter, 2026-09-14).
+  exemption is stated here rather than earned by a localized resx set (Peter, 2026-09-14).
 - **Fence state is line-scanned, not parsed.** `GuideSegmenter` decides whether a `##` is a
   heading by tracking fence delimiters itself rather than walking Markdig's block AST. That buys
   byte-exact rejoining (invariant 13) and one parse per render instead of two; it costs coverage

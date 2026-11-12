@@ -77,7 +77,7 @@ public sealed class WorkgroupServiceBudgetTests : WorkgroupsTestHarness
             .Returns(async _ =>
             {
                 await cancellation.CancelAsync();
-                return new HoldedExpenseAccountRef(62900170, "account", "Workgroups", !linkExisting);
+                return new ExpenseAccountRef(62900170, "account", "Workgroups", !linkExisting);
             });
 
         var result = (await NewService().SetBudgetAsync(group.Id, actor, new WorkgroupBudgetSave(100m, requested), cancellation.Token)).Value;
@@ -102,11 +102,13 @@ public sealed class WorkgroupServiceBudgetTests : WorkgroupsTestHarness
         var repository = Substitute.For<IWorkgroupRepository>();
         repository.GetWorkgroupAsync(group.Id, Arg.Any<CancellationToken>())
             .Returns(c => real.GetWorkgroupAsync(group.Id, c.Arg<CancellationToken>()));
-        repository.UpdateWorkgroupAsync(Arg.Any<Workgroup>(), Arg.Any<CancellationToken>())
+        repository.UpdateWorkgroupAsync(Arg.Any<Workgroup>(), Arg.Any<CancellationToken>(),
+                Arg.Any<IReadOnlyList<WorkgroupLogEntry>?>(), Arg.Any<IReadOnlyList<WorkgroupMember>?>())
             .Returns(async c =>
             {
                 c.Arg<CancellationToken>().Should().Be(cancellation.Token);
-                await real.UpdateWorkgroupAsync(c.Arg<Workgroup>(), c.Arg<CancellationToken>());
+                await real.UpdateWorkgroupAsync(c.Arg<Workgroup>(), c.Arg<CancellationToken>(),
+                    c.Arg<IReadOnlyList<WorkgroupLogEntry>?>(), c.Arg<IReadOnlyList<WorkgroupMember>?>());
                 await cancellation.CancelAsync();
             });
         repository.AddLogEntryAsync(Arg.Any<WorkgroupLogEntry>(), Arg.Any<CancellationToken>())
@@ -215,7 +217,7 @@ public sealed class WorkgroupServiceBudgetTests : WorkgroupsTestHarness
     {
         var workgroup = await SeedWorkgroupAsync();
         Finance.CreateOrLinkExpenseAccountAsync(Arg.Any<string>(), Arg.Any<int?>(), Arg.Any<CancellationToken>())
-            .Returns<HoldedExpenseAccountRef>(_ => throw new InvalidOperationException("Holded has no expense account 1."));
+            .Returns<ExpenseAccountRef>(_ => throw new InvalidOperationException("Holded has no expense account 1."));
 
         var act = () => NewService().SetBudgetAsync(workgroup.Id, SeedUser(), new WorkgroupBudgetSave(10m, 1), Ct);
 
@@ -227,10 +229,27 @@ public sealed class WorkgroupServiceBudgetTests : WorkgroupsTestHarness
     }
 
     [HumansFact]
-    public async Task ListExpenseAccounts_HoldedFails_ReturnsEmpty()
+    public async Task ListExpenseAccounts_UsesActiveExpenseAccountsFromTheMirror()
     {
-        Holded.ListExpenseAccountsAsync(Arg.Any<CancellationToken>())
-            .Returns<IReadOnlyList<HoldedExpenseAccountDto>>(_ => throw new HttpRequestException("Holded down"));
+        var expense = new HoldedChartAccountInfo(62900007, "Sound", null, null, false, 0m);
+        Holded.GetChartAsync(Ct).Returns(Task.FromResult<IReadOnlyList<HoldedChartAccountInfo>>(
+        [
+            new(57200001, "Bank", null, null, false, 0m),
+            new(59999999, "Below expenses", null, null, false, 0m),
+            expense,
+            new(62900008, "Archived expense", null, null, true, 0m),
+            new(70000000, "Income", null, null, false, 0m)
+        ]));
+
+        (await NewService().ListExpenseAccountsAsync(Ct)).Should().Equal(expense);
+        await Holded.Received(1).GetChartAsync(Ct);
+    }
+
+    [HumansFact]
+    public async Task ListExpenseAccounts_MirrorFails_ReturnsEmpty()
+    {
+        Holded.GetChartAsync(Arg.Any<CancellationToken>())
+            .Returns<IReadOnlyList<HoldedChartAccountInfo>>(_ => throw new InvalidOperationException("Mirror unavailable"));
 
         (await NewService().ListExpenseAccountsAsync(Ct)).Should().BeEmpty();
     }

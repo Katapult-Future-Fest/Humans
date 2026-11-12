@@ -27,27 +27,24 @@ public class TeamAdminControllerTicketLookupTests
             // UserInfo.BurnerName reads User.BurnerName, so it is seeded there.
             new User { Id = id, PreferredLanguage = "en", BurnerName = burnerName },
             userEmails: [],
-            eventParticipations: [],
             externalLogins: [],
             profile: new Profile
             {
                 Id = Guid.NewGuid(),
                 UserId = id,
                 BurnerName = burnerName,
-                IsApproved = true,
                 CreatedAt = Instant.FromUtc(2026, 1, 1, 0, 0),
                 UpdatedAt = Instant.FromUtc(2026, 1, 1, 0, 0),
             },
             contactFields: [],
             profileLanguages: [],
-            volunteerHistory: [],
-            communicationPreferences: []);
+            volunteerHistory: []);
 
     // No profile => UserInfo.IsActive == false (deleted/rejected/stub).
     private static UserInfo InactiveHuman(Guid id) =>
         UserInfoFactory.Create(
             new User { Id = id, PreferredLanguage = "en" },
-            [], [], [], profile: null, [], [], [], []);
+            [], [], profile: null, [], [], []);
 
     [HumansFact]
     public void BuildRows_ActiveMatchedHuman_ReturnsOneRow()

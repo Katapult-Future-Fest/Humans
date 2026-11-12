@@ -4,7 +4,7 @@
   src/Sections/Humans.Users/Controllers/ProfileController.cs
   src/Sections/Humans.Users/Views/ProfileEmails/Emails.cshtml
   src/Sections/Humans.Users/Domain/ContactField.cs
-  src/Sections/Humans.Users.Contracts/UserEmail.cs
+  src/Humans.Base/Users/UserEmail.cs
   src/Sections/Humans.Users/Data/Configurations/**
 -->
 <!-- freshness:flag-on-change
@@ -46,7 +46,7 @@ Members need to share contact information (Signal, Telegram, WhatsApp, Discord, 
   - Coordinators + Board (coordinators and board)
   - My teams (members sharing a team with me)
   - All active members
-- Default visibility is "All active members"
+- There is no default: the member must choose a level for each field, and a save without one is rejected
 
 ### US-10.3: View Contact Fields on Profile
 **As a** member viewing another member's profile
@@ -237,8 +237,6 @@ UserEmail
 ├── IsVerified: bool
 ├── Provider: string?            ← OAuth provider ("Google" today) that owns this row; null = no OAuth identity linked
 ├── ProviderKey: string?         ← OAuth subject/key for the linked identity
-├── IsGoogle: bool               ← frozen; Google identity is GoogleIntegration's
-├── GoogleEmailStatus            ← frozen LegacyGoogleEmailStatus; sync status is GoogleIntegration's
 ├── IsPrimary: bool              ← exactly one verified email per user (DB column still named IsNotificationTarget)
 ├── Visibility: ContactFieldVisibility? ← null = hidden from profile
 ├── VerificationSentAt: Instant?

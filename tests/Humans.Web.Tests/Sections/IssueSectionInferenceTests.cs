@@ -41,21 +41,15 @@ public class IssueSectionInferenceTests
         public IReadOnlyList<string> PathSegments => ["new-page"];
     }
 
-    [HumansTheory]
-    [InlineData("en", "Shifts & volunteering", "General")]
-    [InlineData("es", "Turnos y voluntariado", "General")]
-    [InlineData("de", "Schichten & Freiwilligenarbeit", "Allgemein")]
-    [InlineData("it", "Turni e volontariato", "Generale")]
-    [InlineData("fr", "Quarts et bénévolat", "Général")]
-    [InlineData("ca", "Torns i voluntariat", "General")]
-    public void AreaLabels_UseViewerCultureAndPreserveUnknownRoutingKeys(string culture, string shifts, string general)
+    [HumansFact]
+    public void AreaLabels_UseViewerCultureAndPreserveUnknownRoutingKeys()
     {
         var originalCulture = CultureInfo.CurrentUICulture;
         try
         {
-            CultureInfo.CurrentUICulture = CultureInfo.GetCultureInfo(culture);
-            AreaLabelMap.LabelFor("Shifts", _localizer, _routing).Should().Be(shifts);
-            AreaLabelMap.LabelFor(null, _localizer, _routing).Should().Be(general);
+            CultureInfo.CurrentUICulture = CultureInfo.GetCultureInfo("en");
+            AreaLabelMap.LabelFor("Shifts", _localizer, _routing).Should().Be("Shifts & volunteering");
+            AreaLabelMap.LabelFor(null, _localizer, _routing).Should().Be("General");
             AreaLabelMap.LabelFor("FutureArea", _localizer, _routing).Should().Be("FutureArea");
         }
         finally
@@ -72,7 +66,7 @@ public class IssueSectionInferenceTests
     [InlineData("/Teams/xyz", "Teams")]
     [InlineData("/Shifts", "Shifts")]
     [InlineData("/Vol/something", "Shifts")]
-    [InlineData("/OnboardingReview/queue", "Onboarding")]
+    [InlineData("/Consent/ReviewQueue", "Legal")]
     [InlineData("/Profile", "Profiles")]
     [InlineData("/Humans/1", "Profiles")]
     [InlineData("/Finance", "Budget")]

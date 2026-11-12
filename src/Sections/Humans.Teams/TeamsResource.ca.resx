@@ -43,7 +43,6 @@
     <data name="Teams_MyTeams_Title" xml:space="preserve">
     <value>Els meus equips</value>
   </data>
-  <data name="Teams_BreadcrumbNavigation" xml:space="preserve"><value>Ruta de navegació</value></data>
   <data name="Teams_JoinTeam_Title" xml:space="preserve">
     <value>Unir-se a {0}</value>
     <comment>{0} = team name</comment>
@@ -388,7 +387,7 @@
     <value>Gestionar Rols</value>
   </data>
   <data name="Teams_TeamDetail_SubTeams" xml:space="preserve">
-    <value>Sub-teams</value>
+    <value>Subequips</value>
   </data>
   <data name="Teams_PublicDirectory" xml:space="preserve">
     <value>Equips</value>
@@ -404,33 +403,6 @@
   </data>
   <data name="Teams_EditTeamPage_Saved" xml:space="preserve">
     <value>Pàgina de l'equip actualitzada.</value>
-  </data>
-  <data name="Teams_Birthdays_Title" xml:space="preserve">
-    <value>Calendari d'aniversaris</value>
-  </data>
-  <data name="Teams_Birthdays_Count" xml:space="preserve">
-    <value>{0} aniversaris a {1}</value>
-  </data>
-  <data name="Teams_Birthdays_Count_One" xml:space="preserve">
-    <value>{0} aniversaris a {1}</value>
-  </data>
-  <data name="Teams_Birthdays_None" xml:space="preserve">
-    <value>No hi ha aniversaris a {0}.</value>
-  </data>
-  <data name="Teams_Birthdays_Privacy" xml:space="preserve">
-    <value>Només es mostren els humans que han establert el seu aniversari.</value>
-  </data>
-  <data name="Teams_Map_Title" xml:space="preserve">
-    <value>Mapa de Humans</value>
-  </data>
-  <data name="Teams_Map_Count" xml:space="preserve">
-    <value>{0} humans amb ubicació</value>
-  </data>
-  <data name="Teams_Map_None" xml:space="preserve">
-    <value>Cap human no ha establert encara la seva ubicació.</value>
-  </data>
-  <data name="Teams_Map_Privacy" xml:space="preserve">
-    <value>Només es mostren els humans que han establert la seva ubicació. La ubicació és aproximada i es basa en la ciutat.</value>
   </data>
   <data name="Teams_TeamAdmin_AddMember" xml:space="preserve">
     <value>Afegeix membre</value>
@@ -546,4 +518,11 @@
     <value>El teu missatge s’ha enviat a {0}.</value>
   </data>
   <data name="Teams_SendMessage_OptedOut" xml:space="preserve"><value>Aquesta persona ha decidit no rebre missatges.</value></data>
+  <data name="Teams_Notification_JoinRequestSubmitted" xml:space="preserve"><value>Nova sol·licitud per unir-se a {0}</value></data>
+  <data name="Teams_Notification_MemberJoined" xml:space="preserve"><value>{0} s’ha unit a {1}</value></data>
+  <data name="Teams_Notification_JoinRequestSubmittedBody" xml:space="preserve"><value>{0} ha sol·licitat unir-se a {1}.</value></data>
+  <data name="Teams_Notification_MemberJoinedBody" xml:space="preserve"><value>{0} s’ha unit a {1}.</value></data>
+  <data name="Teams_Notification_ReviewRequest" xml:space="preserve"><value>Revisa la sol·licitud</value></data>
+  <data name="Teams_Notification_ViewMembers" xml:space="preserve"><value>Mostra els membres</value></data>
+  <data name="Teams_Notification_Someone" xml:space="preserve"><value>Algú</value></data>
 </root>

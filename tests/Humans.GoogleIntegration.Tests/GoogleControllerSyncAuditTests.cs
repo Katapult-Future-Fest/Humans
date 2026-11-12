@@ -33,7 +33,7 @@ public sealed class GoogleControllerSyncAuditTests
         controller.HttpContext.User = new ClaimsPrincipal(new ClaimsIdentity(
             [new Claim(ClaimTypes.NameIdentifier, actorId.ToString())], "test"));
         _users.GetUserInfoAsync(actorId, Arg.Any<CancellationToken>()).Returns(
-            UserInfo.Create(new User { Id = actorId }, [], [], [], null, []));
+            UserInfo.Create(new User { Id = actorId }, [], [], null));
         controller.TempData = new TempDataDictionary(controller.HttpContext, Substitute.For<ITempDataProvider>());
         const string warning = "Account created; ask an admin to reset the password.";
         _provisioning.ProvisionNobodiesEmailAsync(targetId, "person", actorId)
@@ -98,7 +98,7 @@ public sealed class GoogleControllerSyncAuditTests
         var controller = BuildSut(TestContext.Current.CancellationToken);
         controller.HttpContext.User = new ClaimsPrincipal(new ClaimsIdentity(
             [new Claim(ClaimTypes.NameIdentifier, actorId.ToString())], "test"));
-        var actor = UserInfo.Create(new User { Id = actorId, BurnerName = "Admin" }, [], [], [], null, []);
+        var actor = UserInfo.Create(new User { Id = actorId, BurnerName = "Admin" }, [], [], null);
         _users.GetUserInfoAsync(actorId, Arg.Any<CancellationToken>()).Returns(actor);
         controller.TempData = new TempDataDictionary(controller.HttpContext, Substitute.For<ITempDataProvider>());
         var settings = Substitute.For<ISyncSettingsService>();
@@ -118,6 +118,30 @@ public sealed class GoogleControllerSyncAuditTests
             await settings.Received(1).UpdateModeAsync(SyncServiceType.GoogleDrive, SyncMode.None,
                 actorId, Arg.Any<CancellationToken>());
         }
+    }
+
+    [HumansFact]
+    public async Task EmailFlagViolations_OrdersByBurnerNameIgnoringCase()
+    {
+        var token = TestContext.Current.CancellationToken;
+        var first = Guid.NewGuid();
+        var second = Guid.NewGuid();
+        var emails = Substitute.For<IUserEmailService>();
+        emails.GetEmailFlagViolationsAsync(token).Returns(
+            [new UserEmailFlagViolation(second, 2, 0, true), new UserEmailFlagViolation(first, 2, 2, true)]);
+        _users.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), token)
+            .Returns(new Dictionary<Guid, UserInfo>
+            {
+                [first] = UserInfo.Create(new User { Id = first, BurnerName = "aaron" }, [], [], null),
+                [second] = UserInfo.Create(new User { Id = second, BurnerName = "Zara" }, [], [], null)
+            });
+
+        var result = (await BuildSut(token).EmailFlagViolations(emails, token))
+            .Should().BeOfType<ViewResult>().Subject;
+        result.Model.Should().BeAssignableTo<IReadOnlyList<UserEmailFlagViolation>>().Subject
+            .Select(v => v.UserId).Should().Equal(first, second);
+        await _users.Received(1).GetUserInfosAsync(
+            Arg.Is<IReadOnlyCollection<Guid>>(ids => ids.Count == 2 && ids.Contains(first) && ids.Contains(second)), token);
     }
 
     private GoogleController BuildSut(CancellationToken token) => new(

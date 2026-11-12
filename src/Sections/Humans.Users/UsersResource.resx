@@ -35,7 +35,6 @@
   <!-- Profile (view + edit)    -->
   <!-- ======================== -->
   <data name="Users_Profile_Title" xml:space="preserve"><value>My Profile</value></data>
-  <data name="Users_BreadcrumbNavigation" xml:space="preserve"><value>Breadcrumb</value></data>
   <data name="Users_Profile_ActionRequired" xml:space="preserve"><value>Action Required:</value></data>
   <data name="Users_Profile_PendingConsents" xml:space="preserve"><value>You have {0} pending consent(s) to review.</value><comment>{0} = pending count</comment></data>
   <data name="Users_Profile_ReviewNow" xml:space="preserve"><value>Review now</value></data>
@@ -100,14 +99,12 @@
   <data name="Users_ProfileEdit_TierVolunteerDesc" xml:space="preserve"><value>You want to come to the event, contribute your energy, work a shift or join a team. No formal commitment to the association's governance. Most people fall here and that's completely valid.</value></data>
   <data name="Users_ProfileEdit_TierChangeNote" xml:space="preserve"><value>Note: You can always apply to change this later on.</value></data>
   <data name="Users_ProfileEdit_TierLocked" xml:space="preserve"><value>Your tier is locked because you have an active or pending application.</value></data>
-  <data name="Users_ProfileEdit_MotivationHelp" xml:space="preserve"><value>Minimum 50 characters. This helps the Board understand your goals.</value></data>
   <data name="Users_ProfileEdit_BurnerNamePlaceholder" xml:space="preserve"><value>The name you go by</value></data>
   <data name="Users_ProfileEdit_BurnerNameHelp" xml:space="preserve"><value>This is your public display name, visible to everyone.</value></data>
   <data name="Users_ProfileEdit_BurnerNameMatchesLegalName" xml:space="preserve"><value>Your burner name appears to match your legal name. Consider using a different name to protect your privacy — this name is visible to all humans.</value></data>
   <data name="Users_ProfileEdit_BurnerNameCollisionOne" xml:space="preserve"><value>There is 1 other human with the name '{1}' — please make sure we can tell which one is you!</value></data>
   <data name="Users_ProfileEdit_BurnerNameCollisionMany" xml:space="preserve"><value>There are {0} other humans with the name '{1}' — please make sure we can tell which one is you!</value></data>
   <data name="Users_ProfileEdit_LegalNameHelp" xml:space="preserve"><value>Required for official documents and signing.</value></data>
-  <data name="Users_ProfileEdit_Select" xml:space="preserve"><value>Select</value></data>
   <data name="Users_ProfileEdit_City" xml:space="preserve"><value>City</value></data>
   <data name="Users_ProfileEdit_CityHelp" xml:space="preserve"><value>Search for your city to set your location.</value></data>
   <data name="Users_ProfileEdit_CurrentLocation" xml:space="preserve"><value>Current location:</value></data>
@@ -171,6 +168,7 @@
   <data name="Users_Emails_Description" xml:space="preserve"><value>Manage your email addresses. Your sign-in email is always included. Add additional emails, set which one receives notifications, and control profile visibility.</value></data>
   <data name="Users_Emails_YourEmails" xml:space="preserve"><value>Your Email Addresses</value></data>
   <data name="Users_Emails_AddNew" xml:space="preserve"><value>Add Email Address</value></data>
+  <data name="Users_Emails_NewEmailLabel" xml:space="preserve"><value>New email address</value></data>
   <data name="Users_Emails_MergeWarningTitle" xml:space="preserve"><value>Merging accounts?</value></data>
   <data name="Users_Emails_MergeWarningBody" xml:space="preserve"><value>Account merge is for combining two accounts that belong to the same person (for example, an old email and a new email that are both yours). It is not a way to share or transfer tickets, bookings, or other items between two different people. To transfer a ticket to another human, use the ticket transfer feature at /Tickets/Transfers.</value></data>
   <data name="Users_Emails_VerificationWillBeSent" xml:space="preserve"><value>A verification email will be sent to this address.</value></data>
@@ -379,6 +377,9 @@
   <data name="Users_Profile_EmailAlreadyAdded" xml:space="preserve">
     <value>This email address is already in your account.</value>
   </data>
+  <data name="Users_Profile_EmailVerifiedOnAnotherAccount" xml:space="preserve">
+    <value>This email address is already verified on another account.</value>
+  </data>
   <data name="Users_Profile_EmailMergePending" xml:space="preserve">
     <value>A merge request is already pending for this email address.</value>
   </data>
@@ -406,4 +407,31 @@
   <data name="Users_Medical_RevealsTitle" xml:space="preserve"><value>Who has looked at this</value></data>
   <data name="Users_Medical_RevealsEmpty" xml:space="preserve"><value>Nobody has looked at your medical details.</value></data>
   <data name="Users_Medical_RevealedBy" xml:space="preserve"><value>Looked at by</value></data>
+  <data name="Users_Birthdays_Title" xml:space="preserve"><value>Birthday Calendar</value></data>
+  <data name="Users_Birthdays_Count" xml:space="preserve"><value>{0} birthdays in {1}</value></data>
+  <data name="Users_Birthdays_Count_One" xml:space="preserve"><value>{0} birthday in {1}</value></data>
+  <data name="Users_Birthdays_None" xml:space="preserve"><value>No birthdays in {0}.</value></data>
+  <data name="Users_Birthdays_Privacy" xml:space="preserve"><value>Only humans who have set their birthday are shown.</value></data>
+  <data name="Users_Map_Title" xml:space="preserve"><value>Humans Map</value></data>
+  <data name="Users_Map_Count" xml:space="preserve"><value>{0} humans with location</value></data>
+  <data name="Users_Map_None" xml:space="preserve"><value>No humans have set their location yet.</value></data>
+  <data name="Users_Map_Privacy" xml:space="preserve"><value>Only humans who have set their location are shown. Location is approximate and based on city.</value></data>
+  <data name="Users_Birthdays_CardDescription" xml:space="preserve"><value>See who is celebrating this month.</value></data>
+  <data name="Users_Map_CardDescription" xml:space="preserve"><value>See where humans are around the world.</value></data>
+  <data name="Users_Profile_Participation" xml:space="preserve">
+    <value>Participation</value>
+  </data>
+  <data name="Users_Profile_Settings" xml:space="preserve">
+    <value>Settings</value>
+  </data>
+  <data name="Users_Profile_ShowAllCv" xml:space="preserve">
+    <value>Show all ({0})</value>
+  </data>
+  <data name="Users_Profile_NewLayoutNote" xml:space="preserve">
+    <value>Preview of a new layout. The current page:</value>
+  </data>
+  <data name="Users_Medical_NoneOnFile" xml:space="preserve"><value>No medical conditions on file.</value></data>
+  <data name="Users_Medical_RevealFailed" xml:space="preserve"><value>Could not load the medical details.</value></data>
+  <data name="Users_Medical_RevealTitle" xml:space="preserve"><value>Show medical details (every look is recorded in the audit log)</value></data>
+  <data name="Users_Profile_InvalidLocation" xml:space="preserve"><value>Select a valid location.</value></data>
 </root>

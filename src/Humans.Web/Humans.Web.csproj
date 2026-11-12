@@ -22,6 +22,7 @@
     <ProjectReference Include="..\Sections\Humans.GoogleIntegration\Humans.GoogleIntegration.csproj" />
     <ProjectReference Include="..\Sections\Humans.Governance.Contracts\Humans.Governance.Contracts.csproj" />
     <ProjectReference Include="..\Sections\Humans.Holded\Humans.Holded.csproj" />
+    <ProjectReference Include="..\Sections\Humans.Pleo\Humans.Pleo.csproj" />
     <ProjectReference Include="..\Sections\Humans.Notifications.Contracts\Humans.Notifications.Contracts.csproj" />
     <ProjectReference Include="..\Sections\Humans.Onboarding.Contracts\Humans.Onboarding.Contracts.csproj" />
     <ProjectReference Include="..\Sections\Humans.Shifts.Contracts\Humans.Shifts.Contracts.csproj" />
@@ -44,7 +45,6 @@
     <ProjectReference Include="..\Sections\Humans.Email\Humans.Email.csproj" />
     <ProjectReference Include="..\Sections\Humans.Events\Humans.Events.csproj" />
     <ProjectReference Include="..\Sections\Humans.Expenses\Humans.Expenses.csproj" />
-    <ProjectReference Include="..\Sections\Humans.Feedback\Humans.Feedback.csproj" />
     <ProjectReference Include="..\Sections\Humans.Finance\Humans.Finance.csproj" />
     <ProjectReference Include="..\Sections\Humans.Gate\Humans.Gate.csproj" />
     <ProjectReference Include="..\Sections\Humans.Onboarding\Humans.Onboarding.csproj" />

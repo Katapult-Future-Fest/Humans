@@ -1,3 +1,5 @@
+using System.Transactions;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using AwesomeAssertions;
 using Humans.Base.Enums;
@@ -25,7 +27,7 @@ public sealed class CampRepositoryTests : IDisposable
         var insert = () => repo.AddAssignmentAsync(row, Xunit.TestContext.Current.CancellationToken);
 
         if (duplicate)
-            (await insert()).Should().BeFalse();
+            (await insert()).Assigned.Should().BeFalse();
         else
             (await insert.Should().ThrowAsync<DbUpdateException>()).Which.Should().BeSameAs(failure);
     }
@@ -35,6 +37,25 @@ public sealed class CampRepositoryTests : IDisposable
         public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
             DbContextEventData eventData, InterceptionResult<int> result,
             CancellationToken cancellationToken = default) => throw failure;
+    }
+
+    private sealed class MergeTransactionProbe(bool failMemberRemoval) : SaveChangesInterceptor
+    {
+        public List<string?> TransactionIds { get; } = [];
+        public TransactionStatus? CompletedStatus { get; private set; }
+
+        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            var transaction = Transaction.Current;
+            if (TransactionIds.Count == 0 && transaction is not null)
+                transaction.TransactionCompleted += (_, completed) =>
+                    CompletedStatus = completed.Transaction!.TransactionInformation.Status;
+            TransactionIds.Add(transaction?.TransactionInformation.LocalIdentifier);
+            if (failMemberRemoval && TransactionIds.Count == 2)
+                throw new IOException("merged member removal failed");
+            return ValueTask.FromResult(result);
+        }
     }
 
     private readonly CampsDbContext _dbContext;
@@ -155,20 +176,33 @@ public sealed class CampRepositoryTests : IDisposable
         _dbContext.CampSeasons.Add(season);
         await _dbContext.SaveChangesAsync(ct);
 
-        (await _repo.SeasonExistsAsync(camp.Id, eventId, unassignedYear: null, ct)).Should().BeTrue();
-        (await _repo.SeasonExistsAsync(camp.Id, Guid.NewGuid(), unassignedYear: 2026, ct)).Should().BeFalse();
+        (await _repo.SeasonExistsAsync(camp.Id, eventId, ct)).Should().BeTrue();
+        (await _repo.SeasonExistsAsync(camp.Id, Guid.NewGuid(), ct)).Should().BeFalse();
     }
 
     [HumansFact]
-    public async Task SeasonExistsAsync_CountsAnUnassignedSeasonOnlyForItsYear()
+    public async Task EventScopedWrites_IgnoreUnassignedAndOtherEvents()
     {
         var ct = Xunit.TestContext.Current.CancellationToken;
-        var camp = await SeedCampAsync("other-year");
-        await SeedSeasonAsync(camp.Id, 2026, CampSeasonStatus.Active);
+        var camp = await SeedCampAsync("unassigned");
+        var current = BuildSeason(camp.Id, CampSeasonStatus.Active, 2026);
+        var unassigned = BuildSeason(camp.Id, CampSeasonStatus.Active, 2026);
+        var other = BuildSeason(camp.Id, CampSeasonStatus.Active, 2026);
+        current.EventSettingsId = Guid.NewGuid();
+        other.EventSettingsId = Guid.NewGuid();
+        _dbContext.CampSeasons.AddRange(current, unassigned, other);
+        await _dbContext.SaveChangesAsync(ct);
 
-        (await _repo.SeasonExistsAsync(camp.Id, Guid.NewGuid(), unassignedYear: 2026, ct)).Should().BeTrue();
-        (await _repo.SeasonExistsAsync(camp.Id, Guid.NewGuid(), unassignedYear: 2027, ct)).Should().BeFalse();
-        (await _repo.SeasonExistsAsync(camp.Id, Guid.NewGuid(), unassignedYear: null, ct)).Should().BeFalse();
+        (await _repo.SeasonExistsAsync(camp.Id, Guid.NewGuid(), ct)).Should().BeFalse();
+        (await _repo.SeasonExistsAsync(camp.Id, current.EventSettingsId.Value, ct)).Should().BeTrue();
+        var lockDate = new LocalDate(2026, 6, 1);
+        (await _repo.SetNameLockDateForEventAsync(current.EventSettingsId.Value, lockDate, ct)).Should().Be(1);
+        await _dbContext.Entry(current).ReloadAsync(ct);
+        await _dbContext.Entry(unassigned).ReloadAsync(ct);
+        await _dbContext.Entry(other).ReloadAsync(ct);
+        current.NameLockDate.Should().Be(lockDate);
+        unassigned.NameLockDate.Should().NotBe(lockDate);
+        other.NameLockDate.Should().NotBe(lockDate);
     }
 
     [HumansFact]
@@ -226,8 +260,7 @@ public sealed class CampRepositoryTests : IDisposable
         _dbContext.CampSettings.Add(new CampSettings
         {
             Id = Guid.NewGuid(),
-            PublicYear = 2026,
-            OpenSeasons = [2026]
+            PublicYear = 2026
         });
         await _dbContext.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
@@ -249,40 +282,6 @@ public sealed class CampRepositoryTests : IDisposable
 
         (await _repo.GetEventSettingsAsync(ct)).Should().ContainSingle()
             .Which.Should().BeEquivalentTo(new CampEventSettings { EventSettingsId = eventId, RegistrationOpen = false });
-    }
-
-    [HumansFact]
-    public async Task AddMissingEventSettingsAsync_LeavesExistingRowsAlone()
-    {
-        var ct = Xunit.TestContext.Current.CancellationToken;
-        var closed = Guid.NewGuid();
-        var fresh = Guid.NewGuid();
-        await _repo.SetRegistrationOpenAsync(closed, false, ct);
-
-        var added = await _repo.AddMissingEventSettingsAsync(
-            new Dictionary<Guid, bool> { [closed] = true, [fresh] = true }, ct);
-
-        added.Should().Be(1);
-        (await _repo.GetEventSettingsAsync(ct)).Should().BeEquivalentTo(
-        [
-            new CampEventSettings { EventSettingsId = closed, RegistrationOpen = false },
-            new CampEventSettings { EventSettingsId = fresh, RegistrationOpen = true },
-        ]);
-    }
-
-    [HumansFact]
-    public async Task AssignSeasonEventIdsAsync_WritesOnlySeasonsWithoutAnEventId()
-    {
-        var ct = Xunit.TestContext.Current.CancellationToken;
-        var season = await SeedCampWithSeasonAsync("event-id-camp");
-        var target = Guid.NewGuid();
-
-        (await _repo.GetSeasonsWithoutEventIdAsync(ct)).Select(s => s.Id).Should().Contain(season.Id);
-        (await _repo.AssignSeasonEventIdsAsync(new Dictionary<Guid, Guid> { [season.Id] = target }, ct)).Should().Be(1);
-        (await _repo.AssignSeasonEventIdsAsync(new Dictionary<Guid, Guid> { [season.Id] = Guid.NewGuid() }, ct)).Should().Be(0);
-
-        (await _dbContext.CampSeasons.AsNoTracking().SingleAsync(s => s.Id == season.Id, ct)).EventSettingsId.Should().Be(target);
-        (await _repo.GetSeasonsWithoutEventIdAsync(ct)).Select(s => s.Id).Should().NotContain(season.Id);
     }
 
     [HumansFact]
@@ -321,8 +320,10 @@ public sealed class CampRepositoryTests : IDisposable
         assignment.CampMember.UserId.Should().Be(target);
     }
 
-    [HumansFact]
-    public async Task ReassignMembershipsToUserAsync_FoldsRolesAndDropsSourceMember_WhenTargetAlreadyMemberOfSeason()
+    [HumansTheory]
+    [Xunit.InlineData(false)]
+    [Xunit.InlineData(true)]
+    public async Task ReassignMembershipsToUserAsync_CommitsRoleFoldingAndMemberRemovalTogether(bool failMemberRemoval)
     {
         var ct = Xunit.TestContext.Current.CancellationToken;
         var season = await SeedCampWithSeasonAsync("collide-camp");
@@ -337,7 +338,26 @@ public sealed class CampRepositoryTests : IDisposable
         await SeedAssignmentAsync(season.Id, leadDef.Id, targetMember.Id);
         await SeedAssignmentAsync(season.Id, workshopDef.Id, sourceMember.Id);
 
-        await _repo.ReassignMembershipsToUserAsync(source, target, _clock.GetCurrentInstant(), ct);
+        var probe = new MergeTransactionProbe(failMemberRemoval);
+        var options = new DbContextOptionsBuilder<CampsDbContext>(
+                (DbContextOptions<CampsDbContext>)_dbContext.GetService<IDbContextOptions>())
+            .AddInterceptors(probe).Options;
+        var repo = new CampRepository(new TestDbContextFactory<CampsDbContext>(options));
+        if (failMemberRemoval)
+        {
+            Func<Task> merge = () => repo.ReassignMembershipsToUserAsync(source, target, _clock.GetCurrentInstant(), ct);
+            await merge.Should().ThrowAsync<IOException>();
+        }
+        else
+        {
+            await repo.ReassignMembershipsToUserAsync(source, target, _clock.GetCurrentInstant(), ct);
+        }
+
+        probe.TransactionIds.Should().HaveCount(2).And.NotContainNulls();
+        probe.TransactionIds.Distinct(StringComparer.Ordinal).Should().ContainSingle();
+        probe.CompletedStatus.Should().Be(failMemberRemoval ? TransactionStatus.Aborted : TransactionStatus.Committed);
+        Transaction.Current.Should().BeNull();
+        if (failMemberRemoval) return;
 
         // Source's duplicate membership is gone; survivor keeps exactly one for the season.
         (await _dbContext.CampMembers.AsNoTracking().CountAsync(m => m.UserId == source, ct)).Should().Be(0);
@@ -383,6 +403,9 @@ public sealed class CampRepositoryTests : IDisposable
         var target = Guid.NewGuid();
         await SeedMemberAsync(season.Id, source, CampMemberStatus.Active);
 
+        using var scope = new TransactionScope(TransactionScopeOption.Required,
+            new TransactionOptions { IsolationLevel = IsolationLevel.ReadCommitted },
+            TransactionScopeAsyncFlowOption.Enabled);
         await _repo.ReassignMembershipsToUserAsync(source, target, _clock.GetCurrentInstant(), ct);
         // Second run finds nothing left on source — must be a safe no-op, not a duplicate or throw.
         await _repo.ReassignMembershipsToUserAsync(source, target, _clock.GetCurrentInstant(), ct);
@@ -390,6 +413,8 @@ public sealed class CampRepositoryTests : IDisposable
         (await _dbContext.CampMembers.AsNoTracking().CountAsync(m => m.UserId == source, ct)).Should().Be(0);
         (await _dbContext.CampMembers.AsNoTracking()
             .CountAsync(m => m.UserId == target && m.CampSeasonId == season.Id, ct)).Should().Be(1);
+        Transaction.Current!.TransactionInformation.Status.Should().Be(TransactionStatus.Active);
+        scope.Complete();
     }
 
     [HumansFact]
@@ -491,8 +516,7 @@ public sealed class CampRepositoryTests : IDisposable
         _dbContext.CampSettings.Add(new CampSettings
         {
             Id = Guid.NewGuid(),
-            PublicYear = 2026,
-            OpenSeasons = [2026]
+            PublicYear = 2026
         });
         await _dbContext.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
     }

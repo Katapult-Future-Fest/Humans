@@ -35,24 +35,11 @@ internal sealed class UserEmailConfiguration : IEntityTypeConfiguration<UserEmai
             .IsRequired();
 
         // One row per (Provider, ProviderKey) is enforced in UserEmailService, not by an index.
-        // IsGoogle / GoogleEmailStatus are frozen (GoogleIntegration owns the Workspace identity)
-        // and stay mapped until their drop PR.
         builder.Property(e => e.Provider)
             .HasMaxLength(64);
 
         builder.Property(e => e.ProviderKey)
             .HasMaxLength(256);
-
-        builder.Property(e => e.IsGoogle)
-            .IsRequired();
-
-        // Frozen per-address Google sync status: string-converted enum, Unknown default/sentinel.
-        builder.Property(e => e.GoogleEmailStatus)
-            .HasConversion<string>()
-            .HasMaxLength(50)
-            .HasDefaultValue(LegacyGoogleEmailStatus.Unknown)
-            .HasSentinel(LegacyGoogleEmailStatus.Unknown)
-            .IsRequired();
 
         builder.HasOne<User>()
             .WithMany(u => u.UserEmails)

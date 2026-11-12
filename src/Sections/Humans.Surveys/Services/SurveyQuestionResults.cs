@@ -24,12 +24,11 @@ internal static class SurveyQuestionResults
                     // branched/optional questions aren't seen by everyone, so the total would skew low.
                     var answeredCount = answers.Count(a => a.SelectedOptionValues.Count > 0);
                     var optionCounts = question.Options
-                        .OrderBy(o => o.Order)
                         .Select(o =>
                         {
                             var count = answers.Count(a => a.SelectedOptionValues.Contains(o.Value, StringComparer.Ordinal));
                             var percent = answeredCount == 0 ? 0d : (double)count / answeredCount * 100d;
-                            return new OptionCount(o.Value, o.Label.Resolve(culture, culture), count, percent);
+                            return new OptionCount(o.Value, o.Label.Resolve(culture, culture), count, percent) { Order = o.Order };
                         })
                         .ToList();
                     return new QuestionAggregate(question.Id, prompt, question.Type, optionCounts, [], null, []);
@@ -38,8 +37,8 @@ internal static class SurveyQuestionResults
             case SurveyQuestionType.Rating:
                 {
                     var values = answers.Where(a => a.RatingValue.HasValue).Select(a => a.RatingValue!.Value).ToList();
-                    var min = question.RatingMin ?? (values.Count > 0 ? values.Min() : 0);
-                    var max = question.RatingMax ?? (values.Count > 0 ? values.Max() : min);
+                    var min = question.RatingMin ?? 1;
+                    var max = question.RatingMax ?? 5;
                     var distribution = new List<RatingBucket>();
                     for (long v = min; v <= max; v++)
                     {

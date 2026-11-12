@@ -136,10 +136,68 @@ public sealed class ConsentServiceTests : ConsentTestHarness
             State = UserFixtures.StateFor(profile),
         },
         userEmails: [],
-        eventParticipations: [],
         externalLogins: [],
-        profile: profile,
-        communicationPreferences: []);
+        profile: profile);
+
+    [HumansFact]
+    public async Task GetRequiredConsentRowsForUserAsync_PicksLatestEffectiveVersion_AndSkipsFutureOnlyDocuments()
+    {
+        var oldVersion = Version(Clock.GetCurrentInstant().Minus(Duration.FromDays(60)));
+        var currentVersion = Version(Clock.GetCurrentInstant().Minus(Duration.FromDays(1)));
+        var pendingVersion = Version(Clock.GetCurrentInstant().Plus(Duration.FromDays(1)));
+        var futureOnly = Version(Clock.GetCurrentInstant().Plus(Duration.FromDays(7)));
+
+        var userId = Guid.NewGuid();
+        _legalDocumentSyncService.GetActiveRequiredDocumentsForTeamsAsync(
+                Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(new List<ActiveRequiredLegalDocumentSnapshot>
+            {
+                Doc("Privacy", pendingVersion, oldVersion, currentVersion),
+                Doc("Statutes", futureOnly)
+            });
+
+        var rows = await _service.GetRequiredConsentRowsForUserAsync(
+            userId, Guid.NewGuid(), TestContext.Current.CancellationToken);
+
+        rows.Should().ContainSingle(because: "a document with no effective version yet yields no row");
+        rows[0].DocumentVersionId.Should().Be(currentVersion.Id,
+            because: "the row binds to the latest version already in effect, not a future one");
+    }
+
+    [HumansFact]
+    public async Task GetRequiredConsentRowsForUserAsync_OrdersUnsignedFirst_ThenByTitleOrdinal()
+    {
+        var signedVersion = Version(Clock.GetCurrentInstant().Minus(Duration.FromDays(1)));
+        var unsignedB = Version(Clock.GetCurrentInstant().Minus(Duration.FromDays(1)));
+        var unsignedA = Version(Clock.GetCurrentInstant().Minus(Duration.FromDays(1)));
+
+        var userId = Guid.NewGuid();
+        _legalDocumentSyncService.GetActiveRequiredDocumentsForTeamsAsync(
+                Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(new List<ActiveRequiredLegalDocumentSnapshot>
+            {
+                Doc("Alpha Signed", signedVersion),
+                Doc("Beta Unsigned", unsignedB),
+                Doc("Aardvark Unsigned", unsignedA)
+            });
+        SeedConsentRecord(userId, signedVersion.Id);
+        await SaveAllAsync(TestContext.Current.CancellationToken);
+
+        var rows = await _service.GetRequiredConsentRowsForUserAsync(
+            userId, Guid.NewGuid(), TestContext.Current.CancellationToken);
+
+        rows.Select(r => r.Title).Should().Equal(
+            "Aardvark Unsigned", "Beta Unsigned", "Alpha Signed");
+        rows.Select(r => r.Signed).Should().Equal(false, false, true);
+    }
+
+    private ActiveRequiredLegalDocumentSnapshot Doc(
+        string name, params LegalDocumentVersionSnapshot[] versions) =>
+        new(Guid.NewGuid(), name, Guid.NewGuid(), "Volunteers", Clock.GetCurrentInstant(), versions);
+
+    private static LegalDocumentVersionSnapshot Version(Instant effectiveFrom) =>
+        new(Guid.NewGuid(), Guid.NewGuid(), "Doc", 7, "v1.0",
+            new Dictionary<string, string>(StringComparer.Ordinal), effectiveFrom, false, effectiveFrom, null);
 
     [HumansFact]
     public async Task SubmitConsentAsync_FinalSignature_RestoresSuspensionWithAWarmConsentCache()
@@ -163,6 +221,51 @@ public sealed class ConsentServiceTests : ConsentTestHarness
             .Should().Contain(versionId);
         await _membershipCalculator.Received(1).HasAllRequiredConsentsAsync(userId, CancellationToken.None);
         await _humanLifecycleService.Received(1).RestoreConsentSuspensionAsync(userId, CancellationToken.None);
+    }
+
+    [HumansFact]
+    public async Task SubmitConsentAsync_LostSaveAcknowledgement_EvictsEveryMergedAlias()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var userId = Guid.NewGuid();
+        var sourceId = Guid.NewGuid();
+        var info = WrapInUserInfo(userId, UserFixtures.Profile(
+            burnerName: "Burner", firstName: "First", lastName: "Last",
+            createdAt: Clock.GetCurrentInstant())) with
+        { MergedUserIds = [sourceId] };
+        foreach (var id in info.AllUserIds)
+            _userService.GetUserInfoAsync(id, Arg.Any<CancellationToken>()).Returns(info);
+        var versionId = Guid.NewGuid();
+        SeedDocumentVersion(versionId, "Privacy Policy",
+            new Dictionary<string, string>(StringComparer.Ordinal) { ["es"] = "text" });
+        foreach (var id in info.AllUserIds)
+            (await _cache.GetConsentedVersionIdsAsync(id, ct)).Should().BeEmpty();
+
+        var repository = Substitute.For<IConsentRepository>();
+        var persisted = new ConsentRepository(LegalDbFactory);
+        var failure = new IOException("Persistence acknowledgement failed");
+        repository.AddAsync(Arg.Any<ConsentRecord>(), Arg.Any<CancellationToken>())
+            .Returns(async call =>
+            {
+                await persisted.AddAsync(call.ArgAt<ConsentRecord>(0), call.ArgAt<CancellationToken>(1));
+                throw failure;
+            });
+        var service = new ConsentService(repository, _cache, _legalDocumentSyncService,
+            _humanLifecycleService, _userService,
+            new ServiceLocatorBuilder().With(_membershipCalculator).Build(),
+            _metrics, Clock, NullLogger<ConsentService>.Instance);
+
+        var submit = () => service.SubmitConsentAsync(sourceId, versionId, true, "127.0.0.1", "Agent", ct);
+        (await submit.Should().ThrowAsync<IOException>()).Which.Should().BeSameAs(failure);
+
+        (await LegalDb.ConsentRecords.SingleAsync(ct)).UserId.Should().Be(userId);
+        foreach (var id in info.AllUserIds)
+            (await _cache.GetConsentedVersionIdsAsync(id, ct)).Should().Contain(versionId);
+        (await _cache.SubmitConsentAsync(sourceId, versionId, true, "127.0.0.1", "Agent", ct))
+            .ErrorKey.Should().Be("AlreadyConsented");
+        _metrics.DidNotReceive().RecordConsentGiven();
+        await _membershipCalculator.DidNotReceive()
+            .HasAllRequiredConsentsAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>());
     }
 
     [HumansTheory]
@@ -713,10 +816,7 @@ public sealed class ConsentServiceTests : ConsentTestHarness
     [HumansFact]
     public async Task GetConsentMapForUsersAsync_InputContainsBothSourceAndTarget_DoesNotThrow()
     {
-        // Regression: when the input list contains both a source tombstone id and its merge
-        // target, the chain-follow path used to append the source id again
-        // without dedup. The downstream repo's `userIds.ToDictionary(id =>
-        // id, ...)` then threw ArgumentException on the duplicate key.
+        // Source and target in one batch: ids must be deduped before the repository's ToDictionary.
         var sourceId = Guid.NewGuid();
         var targetId = Guid.NewGuid();
         var unrelatedId = Guid.NewGuid();
@@ -742,7 +842,6 @@ public sealed class ConsentServiceTests : ConsentTestHarness
                             createdAt: Clock.GetCurrentInstant()))
                         : targetInfo)));
 
-        // Input contains both source and target — duplicate-id risk path.
         var result = await _service.GetConsentMapForUsersAsync([sourceId, targetId, unrelatedId], TestContext.Current.CancellationToken);
 
         result.Should().ContainKey(targetId);

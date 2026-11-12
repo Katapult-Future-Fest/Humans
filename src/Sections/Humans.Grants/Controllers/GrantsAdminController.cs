@@ -1,6 +1,6 @@
-using Humans.Base.Authorization;
 using Humans.Base.Controllers;
 using Humans.Grants.Authorization;
+using Humans.Grants.Contracts;
 using Humans.Grants.Models;
 using Humans.Grants.Services;
 using Humans.Settings.Contracts;
@@ -12,10 +12,10 @@ using NodaTime;
 namespace Humans.Grants.Controllers;
 
 /// <summary>
-/// The class policy admits any program manager; each action names its own policy too, and per-program operations are
-/// checked against the program resource.
+/// The class policy admits any program manager and Board; each action names its own policy too, and per-program
+/// operations are checked against the program resource, which denies Board every change.
 /// </summary>
-[Authorize(Policy = GrantsPolicies.Manage)]
+[Authorize(Policy = GrantProgramsPolicy.Name)]
 [Route("Grants/Admin")]
 internal sealed class GrantsAdminController(
     IGrantManagement grants,
@@ -27,23 +27,25 @@ internal sealed class GrantsAdminController(
     [HttpGet("")]
     public async Task<IActionResult> Index(CancellationToken ct)
     {
-        var (error, user) = await ResolveCurrentUserOrChallengeAsync(ct);
+        var (error, _) = await ResolveCurrentUserOrChallengeAsync(ct);
         if (error is not null) return error;
 
-        var canAdminister = GrantsPolicyHandler.IsAdministering(User);
-        var programs = await grants.GetProgramsAsync(ct);
-        if (!canAdminister)
-            programs = programs.Where(p => user.AllUserIds.Any(p.IsManager)).ToList();
+        var programs = new List<ProgramInfo>();
+        foreach (var program in await grants.GetProgramsAsync(ct))
+        {
+            if ((await authorization.AuthorizeAsync(User, program, ProgramOperationRequirement.View)).Succeeded)
+                programs.Add(program);
+        }
         return View(new AdminIndexViewModel
         {
             Today = grants.Today,
             Programs = programs.OrderBy(p => p.Status).ThenByDescending(p => p.Year).ThenBy(p => p.Name, StringComparer.OrdinalIgnoreCase).ToList(),
-            CanAdminister = canAdminister
+            CanAdminister = (await authorization.AuthorizeAsync(User, GrantsPolicies.Manage)).Succeeded
         });
     }
 
     [HttpGet("New")]
-    [Authorize(Policy = PolicyNames.BoardOrAdmin)]
+    [Authorize(Policy = GrantsPolicies.Manage)]
     public async Task<IActionResult> New(CancellationToken ct)
     {
         var active = await settings.GetActiveEventSettingsAsync(ct);
@@ -51,7 +53,7 @@ internal sealed class GrantsAdminController(
     }
 
     [HttpPost("New")]
-    [Authorize(Policy = PolicyNames.BoardOrAdmin)]
+    [Authorize(Policy = GrantsPolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> New(ProgramFormViewModel model, CancellationToken ct)
     {
@@ -72,23 +74,20 @@ internal sealed class GrantsAdminController(
     [HttpGet("{programId:guid}")]
     public async Task<IActionResult> Program(Guid programId, CancellationToken ct)
     {
-        var (program, forbidden) = await AuthorizedAsync(programId, ProgramOperationRequirement.Manage, ct);
+        var (program, forbidden) = await AuthorizedAsync(programId, ProgramOperationRequirement.View, ct);
         if (forbidden is not null) return forbidden;
 
-        var ids = program!.Grants.Select(g => g.IssuedByUserId)
-            .Concat(program.Grants.Select(g => g.RevokedByUserId).OfType<Guid>())
-            .Concat(program.ManagerUserIds).Distinct().ToList();
         return View(new AdminProgramViewModel
         {
-            Program = program,
+            Program = program!,
             Today = grants.Today,
-            CanAdminister = GrantsPolicyHandler.IsAdministering(User),
-            People = await UserService.GetUserInfosAsync(ids, ct)
+            CanAdminister = (await authorization.AuthorizeAsync(User, program, ProgramOperationRequirement.Administer)).Succeeded,
+            CanManage = (await authorization.AuthorizeAsync(User, program, ProgramOperationRequirement.Manage)).Succeeded,
         });
     }
 
     [HttpGet("{programId:guid}/Edit")]
-    [Authorize(Policy = PolicyNames.BoardOrAdmin)]
+    [Authorize(Policy = GrantsPolicies.Manage)]
     public async Task<IActionResult> Edit(Guid programId, CancellationToken ct)
     {
         var (program, forbidden) = await AuthorizedAsync(programId, ProgramOperationRequirement.Administer, ct);
@@ -97,7 +96,7 @@ internal sealed class GrantsAdminController(
     }
 
     [HttpPost("{programId:guid}/Edit")]
-    [Authorize(Policy = PolicyNames.BoardOrAdmin)]
+    [Authorize(Policy = GrantsPolicies.Manage)]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Edit(Guid programId, ProgramFormViewModel model, CancellationToken ct)
     {
@@ -119,7 +118,7 @@ internal sealed class GrantsAdminController(
     }
 
     [HttpPost("{programId:guid}/Issue")]
-    [Authorize(Policy = GrantsPolicies.Manage)]
+    [Authorize(Policy = GrantProgramsPolicy.Name)]
     [ValidateAntiForgeryToken]
     public Task<IActionResult> Issue(Guid programId, Guid[] userIds, LocalDate? expiresOn, CancellationToken ct) =>
         ManageAsync(programId, async actor =>
@@ -129,18 +128,18 @@ internal sealed class GrantsAdminController(
         }, ct);
 
     [HttpPost("{programId:guid}/Grants/{grantId:guid}/Revoke")]
-    [Authorize(Policy = GrantsPolicies.Manage)]
+    [Authorize(Policy = GrantProgramsPolicy.Name)]
     [ValidateAntiForgeryToken]
     public Task<IActionResult> Revoke(Guid programId, Guid grantId, string? reason, CancellationToken ct) =>
         ManageAsync(programId, async actor =>
-            ((GrantMutationResult)await grants.RevokeGrantAsync(grantId, reason, actor, ct), "Grant revoked"), ct, grantId);
+            ((GrantMutationResult)await grants.RevokeGrantAsync(programId, grantId, reason, actor, ct), "Grant revoked"), ct);
 
     [HttpPost("{programId:guid}/Grants/{grantId:guid}/Resend")]
-    [Authorize(Policy = GrantsPolicies.Manage)]
+    [Authorize(Policy = GrantProgramsPolicy.Name)]
     [ValidateAntiForgeryToken]
     public Task<IActionResult> Resend(Guid programId, Guid grantId, CancellationToken ct) =>
         ManageAsync(programId, async actor =>
-            ((GrantMutationResult)await grants.ResendNoticeAsync(grantId, actor, ct), "Notice sent again"), ct, grantId);
+            ((GrantMutationResult)await grants.ResendNoticeAsync(programId, grantId, actor, ct), "Notice sent again"), ct);
 
     /// <summary>Loads the program and checks the operation against it; 404 and 403 as results.</summary>
     private async Task<(ProgramInfo? Program, IActionResult? Error)> AuthorizedAsync(
@@ -154,14 +153,12 @@ internal sealed class GrantsAdminController(
 
     /// <summary>A grant of another program is 404, so a manager of A never acts on B's grants.</summary>
     private async Task<IActionResult> ManageAsync(
-        Guid programId, Func<Guid, Task<(GrantMutationResult Result, string Success)>> act, CancellationToken ct,
-        Guid? grantId = null)
+        Guid programId, Func<Guid, Task<(GrantMutationResult Result, string Success)>> act, CancellationToken ct)
     {
         var (error, user) = await ResolveCurrentUserOrChallengeAsync(ct);
         if (error is not null) return error;
-        var (program, forbidden) = await AuthorizedAsync(programId, ProgramOperationRequirement.Manage, ct);
+        var (_, forbidden) = await AuthorizedAsync(programId, ProgramOperationRequirement.Manage, ct);
         if (forbidden is not null) return forbidden;
-        if (grantId is { } id && program!.Grants.All(g => g.Id != id)) return NotFound();
         if (!ModelState.IsValid)
         {
             logger.LogWarning("Rejected malformed grant action on {ProgramId} by {UserId}", programId, user.Id);
@@ -169,6 +166,7 @@ internal sealed class GrantsAdminController(
         }
 
         var (result, success) = await act(user.Id);
+        if (result.NotFound) return NotFound();
         if (result.Refusal is { } refusal)
             SetError(refusal);
         else
@@ -178,7 +176,6 @@ internal sealed class GrantsAdminController(
 
     private async Task<ProgramFormViewModel> FillAsync(ProgramFormViewModel model, CancellationToken ct)
     {
-        model.People = await UserService.GetUserInfosAsync(model.ManagerUserIds, ct);
         model.Events = (await settings.GetAllEventSettingsAsync(ct))
             .Where(e => e.Status != EventSettingsStatus.Deleted)
             .OrderByDescending(e => e.GateOpeningDate)

@@ -19,10 +19,10 @@ Application reads through these properties are a vestigial coupling to ASP.NET I
 silently fall back to `base.Email` when `UserEmails` is not loaded, which is the wrong answer.
 The canonical read paths are:
 
-- `UserInfo.Email` / `UserInfo.PrimaryEmail` (the materialised UserEmails projection on the §15
+- `UserInfo.Email` / `UserInfo.PrimaryEmail` (the materialised UserEmails projection on the
   cached snapshot).
-- `IUserEmailService.GetPrimaryEmailAsync(userId, ct)` — direct UserEmails lookup.
-- `IUserEmailRepository.GetByUserIdReadOnlyAsync(userId, ct)` for raw rows.
+- `IUserService.GetUserInfoAsync(userId, ct)` for the resolved human’s email snapshot.
+- `IUserService.GetRawUserInfoAsync(userId, ct)` for an exact account’s snapshot, including its owned email rows; per-id erasure must not resolve forward to a survivor.
 - For OAuth identity lookups: `AspNetUserLogins` via `UserManager.{Add,Find,Remove}LoginAsync`.
 
 ## Enforcement

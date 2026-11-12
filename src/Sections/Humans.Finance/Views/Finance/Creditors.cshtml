@@ -11,32 +11,36 @@
         Model.SortBy == col ? label + (Model.SortDir == "asc" ? " ▲" : " ▼") : label;
 }
 
-<div class="d-flex justify-content-between align-items-center mb-4">
-    <h1 class="mb-0">Creditor Accounts</h1>
-    <div class="d-flex gap-2">
-        <a asp-action="Sepa" class="btn btn-outline-secondary"
-           title="Generated payout files, their transfers, and the button that books each payment into Holded.">
-            <i class="fa-solid fa-file-invoice-dollar me-1"></i>SEPA transfers
-        </a>
-        <a asp-action="HoldedDuplicates" class="btn btn-outline-secondary"
-           title="Expense lines whose Holded document was created twice, and the button that removes the extras.">
-            <i class="fa-solid fa-clone me-1"></i>Duplicate docs
-        </a>
-        <a asp-action="ExpenseRecon" class="btn btn-outline-secondary"
-           title="Approved expense lines against the Holded documents and creditor balances.">
-            <i class="fa-solid fa-scale-balanced me-1"></i>Expense recon
-        </a>
-        <a href="/Holded" class="btn btn-outline-secondary"
-           title="Ledger mirror status, sync buttons and the full account list live on the Holded admin screen.">
-            <i class="fa-solid fa-rotate me-1"></i>Holded sync
-        </a>
-        <a asp-controller="BudgetAdmin" asp-action="Index" class="btn btn-outline-secondary">
-            <i class="fa-solid fa-arrow-left me-1"></i>Back to Finance
-        </a>
-    </div>
-</div>
+<page-header title="Creditor Accounts">
+    <a asp-action="Sepa" class="btn btn-outline-secondary"
+       title="Generated payout files, their transfers, and the button that books each payment into Holded.">
+        <i class="fa-solid fa-file-invoice-dollar me-1"></i>SEPA transfers
+    </a>
+    <a asp-action="HoldedDuplicates" class="btn btn-outline-secondary"
+       title="Expense lines whose Holded document was created twice, and the button that removes the extras.">
+        <i class="fa-solid fa-clone me-1"></i>Duplicate docs
+    </a>
+    <a asp-action="ExpenseRecon" class="btn btn-outline-secondary"
+       title="Approved expense lines against the Holded documents and creditor balances.">
+        <i class="fa-solid fa-scale-balanced me-1"></i>Expense recon
+    </a>
+    <a href="/Holded" class="btn btn-outline-secondary"
+       title="Ledger mirror status, sync buttons and the full account list live on the Holded admin screen.">
+        <i class="fa-solid fa-rotate me-1"></i>Holded sync
+    </a>
+    <a asp-controller="BudgetAdmin" asp-action="Index" class="btn btn-outline-secondary">
+        <i class="fa-solid fa-arrow-left me-1"></i>Back to Finance
+    </a>
+</page-header>
 
-@if (Model.DuplicateFlaggedAccounts > 0)
+@if (Model.UnavailableReason is { } unavailable)
+{
+    <div class="alert alert-danger">
+        <i class="fa-solid fa-circle-exclamation me-1"></i>
+        <strong>Creditor accounts are not shown and no payout can be generated.</strong> @unavailable
+    </div>
+}
+else if (Model.DuplicateFlaggedAccounts > 0)
 {
     <div class="alert alert-danger">
         <i class="fa-solid fa-clone me-1"></i>
@@ -80,23 +84,6 @@
     </div>
 }
 
-<p class="text-muted">
-    Holded creditor accounts (40000000–41999999). <strong>Balance</strong> is shown from the member's
-    side: a positive figure is money the organisation owes them, a negative one is money they owe it.
-    Holded's own view of the same account, debit and credit as posted, is linked from each statement.
-    Bind a member to an account from their expense report, and unbind here. An account should carry
-    exactly one member — a row showing two is flagged and needs one of them cleared.
-</p>
-
-<p class="text-muted">
-    <strong>Pay out</strong> ticks the accounts to include in a SEPA credit-transfer file for the
-    bank's "Enviar ficheros". Only single-bound accounts with a positive balance and an IBAN on their
-    Holded contact can be paid; the amount defaults to the full balance and a partial payout leaves
-    the remainder owed. Nothing here marks a report or a member as paid — the balance clears when the
-    payment is booked in Holded and the next ledger sync picks it up. Book it from
-    <a asp-action="Sepa">SEPA transfers</a> once the file is with the bank.
-</p>
-
 @if (Model.Unresolved.Count > 0)
 {
     <div class="card mb-4 border-warning">
@@ -105,10 +92,10 @@
         </div>
         <div class="card-body">
             <p class="text-muted">
-                These members pushed an expense report but their Holded creditor-account number never
-                resolved — neither the one-shot push lookup nor Holded's own contact list has a number
-                for them. There is no automatic retry; bind each one manually once you know their
-                creditor account (40000000–41999999) in Holded.
+                These members' Holded contact is missing from Holded's contact list, or carries no
+                creditor account (40000000–41999999) yet. Their stored account number is not used: it may
+                be stale. There is no automatic retry; bind each one manually once you know their creditor
+                account in Holded.
             </p>
             <table class="table table-sm align-middle mb-0">
                 <thead><tr><th>Member</th><th>Source</th><th>Bind to account</th></tr></thead>
@@ -116,7 +103,7 @@
                 @foreach (var b in Model.Unresolved)
                 {
                     <tr>
-                        <td>@b.MemberName</td>
+                        <td><vc:human user-id="@b.UserId" link="None" /></td>
                         <td class="text-muted small">@b.Source</td>
                         <td>
                             <form authorize-policy="@Humans.Finance.Contracts.FinancePolicies.Manage" asp-action="BindCreditor" method="post" class="d-flex gap-2 align-items-center">
@@ -137,7 +124,10 @@
     </div>
 }
 
-@if (!Model.Accounts.Any())
+@if (Model.UnavailableReason is not null)
+{
+}
+else if (!Model.Accounts.Any())
 {
     <div class="card"><div class="card-body text-center py-5 text-muted">
         No creditor balances cached yet — run the ledger-mirror sync from
@@ -149,7 +139,7 @@ else
 {
     @* Standalone, not wrapped around the table: each row already carries an Unbind form, and HTML
        forbids nesting one form in another. The payout inputs join this one by id instead. *@
-    <form authorize-policy="@Humans.Finance.Contracts.FinancePolicies.Manage" id="sepaForm" asp-action="GenerateSepa" method="post"
+    <form authorize-policy="@Humans.Finance.Contracts.FinancePolicies.Manage" id="sepaForm" asp-action="ReviewSepa" method="post"
           class="d-flex justify-content-end align-items-center gap-2 mb-3">
         @Html.AntiForgeryToken()
         @if (Model.Sepa.IsAvailable)
@@ -159,7 +149,7 @@ else
                    class="form-control form-control-sm" style="max-width: 7rem"
                    step="0.01" min="0.01" required value="@Amount(Model.Sepa.MaxPerTransfer)" />
             <button type="submit" class="btn btn-primary">
-                <i class="fa-solid fa-file-arrow-down me-1"></i>Generate SEPA file
+                <i class="fa-solid fa-file-arrow-down me-1"></i>Review SEPA file
             </button>
         }
         else
@@ -191,6 +181,7 @@ else
                         <a asp-action="Creditors" asp-route-sort="name" asp-route-dir="@ToggleDir("name")"
                            class="text-decoration-none">@Header("Name", "name")</a>
                     </th>
+                    <th title="Country of the Holded IBAN and its domestic currency. Transfers outside the EEA cost a bank fee.">IBAN</th>
                     <th class="text-end">
                         <a asp-action="Creditors" asp-route-sort="balance" asp-route-dir="@ToggleDir("balance")"
                            class="text-decoration-none">@Header("Balance", "balance")</a>
@@ -234,6 +225,14 @@ else
                                 </div>
                             </div>
                         }
+                        else if (r.Bindings.Count == 1 && r.PendingPayoutFileName is not null && r.HasDuplicateDocuments == false)
+                        {
+                            <a asp-action="Sepa" class="badge rounded-pill text-bg-warning text-decoration-none"
+                               data-bs-toggle="tooltip"
+                               title="In payout file @r.PendingPayoutFileName, not booked yet. Don't pay again until it is booked or withdrawn.">
+                                <i class="fa-solid fa-paper-plane me-1"></i>in flight
+                            </a>
+                        }
                         else if (r.HasDuplicateDocuments == true)
                         {
                             <a asp-action="HoldedDuplicates" class="small text-danger">@r.NotPayableReason</a>
@@ -257,6 +256,22 @@ else
                         }
                     </td>
                     <td>@(string.IsNullOrWhiteSpace(r.Name) ? "—" : r.Name)</td>
+                    <td class="text-nowrap">
+                        @if (r.IbanCountry is not { } country)
+                        {
+                            <span class="text-muted">—</span>
+                        }
+                        else if (r.IbanOutsideEea)
+                        {
+                            <span class="badge text-bg-warning" title="Outside the EEA: the bank charges a fee for this transfer.">
+                                <i class="fa-solid fa-triangle-exclamation me-1"></i>@country · @(r.IbanCurrency ?? "?")
+                            </span>
+                        }
+                        else
+                        {
+                            <span class="text-muted">@country · @r.IbanCurrency</span>
+                        }
+                    </td>
                     <td class="text-end text-nowrap">
                         @if (r.Balance is { } bal)
                         {
@@ -313,7 +328,7 @@ else
                             @foreach (var b in r.Bindings)
                             {
                                 <div class="d-flex align-items-center gap-2 mb-1">
-                                    <span><i class="fa-solid fa-link me-1 text-success"></i>@b.MemberName</span>
+                                    <span><i class="fa-solid fa-link me-1 text-success"></i><vc:human user-id="@b.UserId" link="None" /></span>
                                     <span class="text-muted small">(@b.Source)</span>
                                     <form authorize-policy="@Humans.Finance.Contracts.FinancePolicies.Manage" asp-action="UnbindCreditor" method="post" class="d-inline"
                                           data-confirm="Clear @b.MemberName's creditor account binding? Their next expense push will resolve it again from Holded.">
@@ -332,15 +347,6 @@ else
     </div>
 
     <script>
-        // Idempotency guard: success answers with a download, so the page never navigates and a second click would
-        // write a second payout file. A reload re-enables it, and the balances are stale by then anyway.
-        document.getElementById('sepaForm')?.addEventListener('submit', function (e) {
-            var btn = e.target.querySelector('button[type="submit"]');
-            if (!btn) return;
-            btn.disabled = true;
-            btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>Generating…';
-        });
-
         // Display only: the selection posts from #sepaForm, and only payable rows carry a checkbox.
         (function () {
             var owedOnly = document.getElementById('owedOnly');
@@ -355,3 +361,23 @@ else
         })();
     </script>
 }
+
+<div class="text-muted small mt-4">
+    <p>
+        Holded creditor accounts (40000000–41999999). <strong>Balance</strong> is shown from the member's
+        side: a positive figure is money the organisation owes them, a negative one is money they owe it.
+        Holded's own view of the same account, debit and credit as posted, is linked from each statement.
+        Bind a member to an account from their expense report, and unbind here. An account should carry
+        exactly one member; a row showing two is flagged and needs one of them cleared.
+    </p>
+    <p class="mb-0">
+        <strong>Pay out</strong> ticks the accounts to include in a SEPA credit-transfer file for the
+        bank's "Enviar ficheros"; you confirm the batch before the file is generated. Only single-bound
+        accounts with a positive balance and an IBAN on their Holded contact can be paid; the amount
+        defaults to the full balance and a partial payout leaves the remainder owed.
+        <span class="badge rounded-pill text-bg-warning"><i class="fa-solid fa-paper-plane me-1"></i>in flight</span>
+        means a transfer to that account is in a file not yet booked, so don't pay it again. The balance
+        clears when the payment is booked in Holded and the next ledger sync picks it up. Book it from
+        <a asp-action="Sepa">SEPA transfers</a> once the file is with the bank.
+    </p>
+</div>

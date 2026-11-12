@@ -4,7 +4,7 @@ using Microsoft.Extensions.Caching.Memory;
 namespace Humans.Web.Tests.Architecture.Rules;
 
 /// <summary>
-/// Under the §15 caching pattern a service caches through a decorator or not at all; the allowlist holds the
+/// Under the section caching pattern (design-rules.md) a service caches through a decorator or not at all; the allowlist holds the
 /// reviewed exceptions.
 /// </summary>
 public class ApplicationServicesTakeNoMemoryCacheRule
@@ -18,10 +18,7 @@ public class ApplicationServicesTakeNoMemoryCacheRule
         SectionType("Humans.Shifts.Services.ShiftManagementService"),
         // Nav-badge counts: each wraps a real query and evicts its own key. AdminDashboardService is not here: its
         // reads are already served by CachingUserService.
-        SectionType("Humans.Feedback.Services.FeedbackService"),  // FeedbackService.BadgeCacheKey
         SectionType("Humans.Governance.Services.ApplicationDecisionService"),  // ApplicationDecisionService.VotingBadgeCacheKey(userId)
-        // CacheKeys.HoldedContacts, 2-min TTL, so admin pages don't call Holded live on every load.
-        SectionType("Humans.Finance.Services.Service"),
         // Rendered guide pages fetched from GitHub: not an entity read, and Guide owns no tables to decorate, so the
         // service is the cache.
         SectionType("Humans.Guide.Services.GuideContentService"),
@@ -60,7 +57,7 @@ public class ApplicationServicesTakeNoMemoryCacheRule
 
         violations.Should().BeEmpty(
             because: "application services must not hold IMemoryCache unless they are on the " +
-                     "§15-allowlist; add to Allowlist only after explicit review and add a " +
+                     "caching-pattern allowlist; add to Allowlist only after explicit review and add a " +
                      "comment explaining the caching rationale");
     }
 }

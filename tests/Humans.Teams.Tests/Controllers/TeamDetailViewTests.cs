@@ -1,6 +1,12 @@
+using Humans.Users.Contracts;
+using Microsoft.AspNetCore.DataProtection;
+using NodaTime;
+using System.Globalization;
+using System.Resources;
 using System.Security.Claims;
 using System.Text.Encodings.Web;
 using AwesomeAssertions;
+using Humans.Base;
 using Humans.Base.Extensions;
 using Humans.Base.Enums;
 using Humans.Base.ViewComponents;
@@ -23,17 +29,15 @@ namespace Humans.Teams.Tests.Controllers;
 public class TeamDetailViewTests
 {
     [HumansTheory]
-    [Xunit.InlineData("en", SystemTeamType.Volunteers, "Volunteers")]
-    [Xunit.InlineData("es", SystemTeamType.Volunteers, "Voluntarios")]
-    [Xunit.InlineData("de", SystemTeamType.Volunteers, "Freiwillige")]
-    [Xunit.InlineData("it", SystemTeamType.Volunteers, "Volontari")]
-    [Xunit.InlineData("fr", SystemTeamType.Volunteers, "Bénévoles")]
-    [Xunit.InlineData("ca", SystemTeamType.Volunteers, "Voluntaris")]
-    [Xunit.InlineData("es", SystemTeamType.BarrioLeads, "Responsables de campamento")]
-    public async Task SystemTeamType_UsesLocalizedLabelInBadgeAndMembershipCriteria(
-        string culture, SystemTeamType type, string expected)
+    [Xunit.InlineData(SystemTeamType.Volunteers)]
+    [Xunit.InlineData(SystemTeamType.BarrioLeads)]
+    public async Task SystemTeamType_UsesLocalizedLabelInBadgeAndMembershipCriteria(SystemTeamType type)
     {
-        using var language = new CultureScope(culture);
+        var key = $"Enum_{nameof(SystemTeamType)}_{type}";
+        var resources = new ResourceManager(typeof(SharedResource));
+        var expected = resources.GetString(key, CultureInfo.GetCultureInfo(CultureCatalog.CanonicalLegalCultureCode))!;
+        expected.Should().NotBe(resources.GetString(key, CultureInfo.InvariantCulture));
+        using var language = new CultureScope(CultureCatalog.CanonicalLegalCultureCode);
         var model = new TeamDetailViewModel
         {
             Name = "Example",
@@ -70,7 +74,34 @@ public class TeamDetailViewTests
         html.Should().Contain(SanitizedMarkdownRenderer.Render(prefix + (fits ? "😀" : "") + "..."));
     }
 
-    private static async Task<string> RenderAsync(string path, object model)
+    [HumansFact]
+    public async Task EarlyEntryGrant_RendersTheCurrentEncodedHuman()
+    {
+        var userId = Guid.NewGuid();
+        const string name = "Renamed <script>alert(1)</script> &";
+        var users = Substitute.For<IUserService>();
+        users.GetUserInfoAsync(userId, Arg.Any<CancellationToken>())
+            .Returns(UserInfo.Create(new User { Id = userId, BurnerName = name }, [], [], profile: null));
+        var model = new TeamEarlyEntryPageViewModel
+        {
+            Slug = "team",
+            TeamName = "Team",
+            Grants = [new TeamEarlyEntryRowViewModel
+            {
+                GrantId = Guid.NewGuid(),
+                UserId = userId,
+                EntryDate = new LocalDate(2026, 6, 1),
+                ProjectName = "Build",
+            }],
+        };
+
+        var html = await RenderAsync("/Views/TeamAdmin/EarlyEntry.cshtml", model, users);
+
+        html.Should().Contain(HtmlEncoder.Default.Encode(name));
+        html.Should().NotContain(name).And.NotContain("Old copied name");
+    }
+
+    private static async Task<string> RenderAsync(string path, object model, IUserService? users = null)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
@@ -78,6 +109,9 @@ public class TeamDetailViewTests
             EnvironmentName = "Testing",
         });
         builder.Services.AddLocalization();
+        builder.Services.AddHttpContextAccessor();
+        builder.Services.AddSingleton(users ?? Substitute.For<IUserService>());
+        builder.Services.AddSingleton<IDataProtectionProvider>(new EphemeralDataProtectionProvider());
         builder.Services.AddControllersWithViews()
             .AddApplicationPart(typeof(TeamsResource).Assembly)
             .AddApplicationPart(typeof(HumanViewComponent).Assembly);

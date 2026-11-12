@@ -1,20 +1,17 @@
 @model Humans.Expenses.Models.ExpenseReviewViewModel
 @using Microsoft.AspNetCore.Html
+@using Humans.Base.ViewComponents
 @{
     ViewData["Title"] = Localizer["Expenses_ReviewQueueTitle"].Value;
     ViewData["BodyClass"] = "page-wide";
 }
 
-<nav aria-label="@Localizer["Expenses_BreadcrumbNavigation"]" class="mb-3">
-    <ol class="breadcrumb">
-        <li class="breadcrumb-item"><a asp-action="Index">@Localizer["Expenses_MyReportsTitle"]</a></li>
-        <li class="breadcrumb-item active" aria-current="page">@Localizer["Expenses_ReviewQueue"]</li>
-    </ol>
-</nav>
+@section Crumbs {
+    <a asp-action="Index">@Localizer["Expenses_MyReportsTitle"]</a>
+    <span>@Localizer["Expenses_ReviewQueue"]</span>
+}
 
-<div class="d-flex justify-content-between align-items-center mb-4">
-    <h1>@Localizer["Expenses_ReviewQueue"]</h1>
-</div>
+<page-header title="@(Localizer["Expenses_ReviewQueue"].Value)" />
 
 @* A written-off push looks healthy everywhere else, so without this it is only found by reconciling Holded by hand.
    Finance admins are the only ones who can act on it. *@
@@ -30,9 +27,17 @@
         <ul class="mb-0 mt-2">
             @foreach (var failed in Model.Reports.Where(r => Model.FailedHoldedPushReportIds.Contains(r.Id)))
             {
+                var submitter = await Component.InvokeAsync(typeof(HumanViewComponent), new
+                {
+                    userId = failed.SubmitterUserId,
+                    link = HumanLink.None,
+                });
+                using var submitterWriter = new System.IO.StringWriter();
+                submitter.WriteTo(submitterWriter, System.Text.Encodings.Web.HtmlEncoder.Default);
+                var submitterHtml = new HtmlString(submitterWriter.ToString().Trim());
                 <li>
                     <a asp-action="Detail" asp-route-id="@failed.Id" class="alert-link">@failed.Id.ToString()[..8]…</a>
-                    — @(Model.SubmitterNames.TryGetValue(failed.SubmitterUserId, out var failedName) ? failedName : SharedLocalizer["Common_Unknown"].Value),
+                    — @submitterHtml,
                     @failed.Payable.ToEuro()
                 </li>
             }
@@ -93,7 +98,7 @@ else
             : Model.IsRevoked(r.Id) ? "table-warning"
             : null);
         var table = builder
-            .Column(Localizer["Expenses_ColSubmittedBy"].Value, r => Model.SubmitterNames.TryGetValue(r.SubmitterUserId, out var name) ? name : SharedLocalizer["Common_Unknown"].Value)
+            .Human(Localizer["Expenses_ColSubmittedBy"].Value, r => r.SubmitterUserId, HumanLink.None)
             .Column(Localizer["Expenses_HoldedAccount"].Value, r => Model.BookingLabels.TryGetValue(r.Id, out var booking) ? booking : SharedLocalizer["Common_Unknown"].Value, c => c.SelectFilter())
             .Column(Localizer["Expenses_ColSubject"].Value, r => r.Note is { Length: > 80 } n
                 ? n[..(char.IsHighSurrogate(n[79]) && char.IsLowSurrogate(n[80]) ? 79 : 80)] + "…" : r.Note)
@@ -109,7 +114,7 @@ else
             .Build();
 
         <h2 class="h5 mt-4 mb-2">
-            <span class="badge @group.Key.GetBadgeClass()">@Localizer.EnumDisplay(group.Key)</span>
+            <status-badge value="@group.Key" localizer="@Localizer" />
             <span class="text-muted ms-1">@rows.Count</span>
         </h2>
         <partial name="_Table" model="table" />

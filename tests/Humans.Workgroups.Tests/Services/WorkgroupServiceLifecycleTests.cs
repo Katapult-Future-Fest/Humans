@@ -8,6 +8,8 @@ using Humans.Workgroups.Domain;
 using Humans.Workgroups.Services;
 using Humans.Workgroups.Tests.Infrastructure;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using NodaTime;
 using Humans.Workgroups.Data;
 
@@ -19,6 +21,128 @@ namespace Humans.Workgroups.Tests.Services;
 /// </summary>
 public sealed class WorkgroupServiceLifecycleTests : WorkgroupsTestHarness
 {
+    public enum NoticeAudience { Coordinators, Board }
+
+    [HumansTheory]
+    [InlineData(NoticeAudience.Coordinators)]
+    [InlineData(NoticeAudience.Board)]
+    public async Task LifecycleEmails_ResolveAndDeduplicateMergedRecipients(NoticeAudience audience)
+    {
+        var firstAlias = SeedUser("Archived first");
+        var secondAlias = SeedUser("Archived second");
+        var survivorId = SeedUser("Live recipient", language: "es");
+        var otherId = SeedUser("Other recipient", language: "de");
+        var survivor = (await Users.GetUserInfoAsync(survivorId, Ct))!;
+        var other = (await Users.GetUserInfoAsync(otherId, Ct))!;
+        var people = new Dictionary<Guid, UserInfo>
+        {
+            [firstAlias] = survivor,
+            [secondAlias] = survivor,
+            [survivorId] = survivor,
+            [otherId] = other
+        };
+        Users.GetUserInfosAsync(Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(call => new ValueTask<IReadOnlyDictionary<Guid, UserInfo>>(
+                call.Arg<IReadOnlyCollection<Guid>>().Where(people.ContainsKey).ToDictionary(id => id, id => people[id])));
+        var group = await SeedWorkgroupAsync(
+            status: audience == NoticeAudience.Coordinators ? WorkgroupStatus.Dormant : WorkgroupStatus.Applied,
+            coordinatorUserId: firstAlias);
+        if (audience == NoticeAudience.Coordinators)
+            await AddMemberAsync(group.Id, secondAlias, WorkgroupMemberRole.Coordinator);
+        else
+            Roles.GetActiveUserIdsInRoleAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+                .Returns([firstAlias, secondAlias, survivorId, otherId]);
+
+        var service = NewService();
+        var result = audience == NoticeAudience.Coordinators
+            ? await service.ReactivateAsync(group.Id, survivorId, Ct)
+            : await service.ReferAsync(group.Id, survivorId, "Review", Ct);
+
+        result.Refusal.Should().BeNull();
+        var messages = Email.ReceivedCalls().Select(call => call.GetArguments()[0])
+            .Cast<Humans.Email.Contracts.EmailMessage>().ToList();
+        messages.Select(message => message.UserId).Should().BeEquivalentTo(
+            audience == NoticeAudience.Coordinators ? new Guid?[] { survivorId } : [survivorId, otherId]);
+        var liveMessage = messages.Should().ContainSingle(message => message.UserId == survivorId).Subject;
+        liveMessage.RecipientEmail.Should().Be(survivor.Email);
+        liveMessage.RecipientName.Should().Be("Live recipient");
+        liveMessage.Culture.Should().Be("es");
+        liveMessage.Subject.Should().EndWith("#es");
+    }
+
+    [HumansTheory]
+    [InlineData("register")]
+    [InlineData("refer")]
+    [InlineData("refuse")]
+    [InlineData("withdraw")]
+    [InlineData("close")]
+    [InlineData("done")]
+    [InlineData("reactivate")]
+    [InlineData("scope")]
+    [InlineData("budget")]
+    public async Task WorkgroupEdit_LogSaveFailure_LeavesStateAndPendingRequestsUnchanged(string action)
+    {
+        var status = action switch
+        {
+            "register" or "refer" or "refuse" => WorkgroupStatus.Applied,
+            "reactivate" => WorkgroupStatus.Dormant,
+            _ => WorkgroupStatus.Active
+        };
+        var group = await SeedWorkgroupAsync(status: status);
+        group.DriveFolderId = "group-folder";
+        group.HoldedAccountNumber = 62900160;
+        group.HoldedAccountId = "account";
+        group.BudgetAmount = 100m;
+        await Db.SaveChangesAsync(Ct);
+        await AddMemberAsync(group.Id, SeedUser("Pending"), isPending: true);
+        var actor = group.Members.Single(m => m.IsPending != true).UserId;
+        var options = new DbContextOptionsBuilder<WorkgroupsDbContext>(
+                (DbContextOptions<WorkgroupsDbContext>)Db.GetService<IDbContextOptions>())
+            .AddInterceptors(new FailWorkgroupLogSave()).Options;
+        var service = NewService(new WorkgroupRepository(new TestDbContextFactory<WorkgroupsDbContext>(options)));
+        Func<Task> mutate = action switch
+        {
+            "register" => () => service.RegisterAsync(group.Id, actor, Ct),
+            "refer" => () => service.ReferAsync(group.Id, actor, "Review", Ct),
+            "refuse" => () => service.RefuseAsync(group.Id, actor, "Refused", Ct),
+            "withdraw" => () => service.WithdrawAsync(group.Id, actor, "Withdrawn", Ct),
+            "close" => () => service.CloseAsync(group.Id, actor, "Quiet", Ct),
+            "done" => () => service.MarkDoneAsync(group.Id, actor, WorkgroupDormantReason.Delivered, Ct),
+            "reactivate" => () => service.ReactivateAsync(group.Id, actor, Ct),
+            "scope" => () => service.EditRegisterAsync(group.Id, actor,
+                new WorkgroupRegisterEdit(group.Name, group.Purpose, "Changed deliverable",
+                    group.DeliverableKind, group.Audience, group.TargetDate, group.DiscordChannelUrl), Ct),
+            _ => () => service.SetBudgetAsync(group.Id, actor, new WorkgroupBudgetSave(200m, null), Ct)
+        };
+
+        await mutate.Should().ThrowAsync<IOException>();
+
+        await using var db = OpenContext();
+        var saved = await db.Workgroups.AsNoTracking().Include(w => w.Members).SingleAsync(Ct);
+        saved.Status.Should().Be(group.Status);
+        saved.DormantReason.Should().Be(group.DormantReason);
+        saved.Reasons.Should().Be(group.Reasons);
+        saved.EndedAt.Should().Be(group.EndedAt);
+        saved.RegisteredAt.Should().Be(group.RegisteredAt);
+        saved.Deliverable.Should().Be(group.Deliverable);
+        saved.BudgetAmount.Should().Be(group.BudgetAmount);
+        saved.Members.Single(m => m.IsPending == true).LeftAt.Should().BeNull();
+        (await db.LogEntries.CountAsync(Ct)).Should().Be(0);
+        AuditLog.ReceivedCalls().Should().BeEmpty();
+        Notifications.ReceivedCalls().Should().BeEmpty();
+    }
+
+    private sealed class FailWorkgroupLogSave : SaveChangesInterceptor
+    {
+        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            if (eventData.Context!.ChangeTracker.Entries<WorkgroupLogEntry>().Any(e => e.State == EntityState.Added))
+                throw new IOException("Workgroup log persistence failed.");
+            return base.SavingChangesAsync(eventData, result, cancellationToken);
+        }
+    }
+
     [HumansTheory]
     [InlineData(false)]
     [InlineData(true)]
@@ -108,18 +232,22 @@ public sealed class WorkgroupServiceLifecycleTests : WorkgroupsTestHarness
             .Returns(c => real.GetWorkgroupAsync(group.Id, c.Arg<CancellationToken>()));
         repository.GetDocumentAsync(document.Id, Arg.Any<CancellationToken>())
             .Returns(c => real.GetDocumentAsync(document.Id, c.Arg<CancellationToken>()));
-        repository.UpdateWorkgroupAsync(Arg.Any<Workgroup>(), Arg.Any<CancellationToken>())
+        repository.UpdateWorkgroupAsync(Arg.Any<Workgroup>(), Arg.Any<CancellationToken>(),
+                Arg.Any<IReadOnlyList<WorkgroupLogEntry>?>(), Arg.Any<IReadOnlyList<WorkgroupMember>?>())
             .Returns(async c =>
             {
                 c.Arg<CancellationToken>().Should().Be(cancellation.Token);
-                await real.UpdateWorkgroupAsync(c.Arg<Workgroup>(), c.Arg<CancellationToken>());
+                await real.UpdateWorkgroupAsync(c.Arg<Workgroup>(), c.Arg<CancellationToken>(),
+                    c.Arg<IReadOnlyList<WorkgroupLogEntry>?>(), c.Arg<IReadOnlyList<WorkgroupMember>?>());
                 await cancellation.CancelAsync();
             });
-        repository.UpdateDocumentAsync(Arg.Any<WorkgroupDocument>(), Arg.Any<CancellationToken>())
+        repository.UpdateDocumentAsync(Arg.Any<WorkgroupDocument>(), Arg.Any<CancellationToken>(),
+                Arg.Any<IReadOnlyList<WorkgroupLogEntry>?>())
             .Returns(async c =>
             {
                 c.Arg<CancellationToken>().Should().Be(cancellation.Token);
-                await real.UpdateDocumentAsync(c.Arg<WorkgroupDocument>(), c.Arg<CancellationToken>());
+                await real.UpdateDocumentAsync(c.Arg<WorkgroupDocument>(), c.Arg<CancellationToken>(),
+                    c.Arg<IReadOnlyList<WorkgroupLogEntry>?>());
                 await cancellation.CancelAsync();
             });
         repository.AddLogEntryAsync(Arg.Any<WorkgroupLogEntry>(), Arg.Any<CancellationToken>())
@@ -506,7 +634,7 @@ public sealed class WorkgroupServiceLifecycleTests : WorkgroupsTestHarness
 
         var act = () => NewService().CreateMeetingAsync(
             workgroup.Id, member,
-            new WorkgroupMeetingSave("Meeting", now, now.Plus(Duration.FromHours(1)), null, null, false, null),
+            new WorkgroupMeetingSave("Meeting", now, now.Plus(Duration.FromHours(1)), null, null, false),
             Ct);
 
         (await act()).Refusal!.Key

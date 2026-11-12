@@ -20,9 +20,7 @@ internal static class UserInfoStubHelpers
             user,
             userEmails ?? user.UserEmails?.ToList() ?? [],
             [],
-            [],
             profile: profile,
-            [],
             [],
             [],
             []);
@@ -32,7 +30,6 @@ internal static class UserInfoStubHelpers
             new User { Id = userId, PreferredLanguage = "en" },
             [],
             [],
-            [],
             profile: profile ?? new Profile
             {
                 Id = Guid.NewGuid(),
@@ -40,9 +37,7 @@ internal static class UserInfoStubHelpers
                 BurnerName = displayName,
                 CreatedAt = NodaTime.SystemClock.Instance.GetCurrentInstant(),
                 UpdatedAt = NodaTime.SystemClock.Instance.GetCurrentInstant(),
-                IsApproved = true
             },
-            [],
             [],
             [],
             []);

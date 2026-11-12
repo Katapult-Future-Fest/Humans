@@ -42,7 +42,10 @@ internal sealed class ContactFieldService(
                 cf.FieldType == ContactFieldType.Other && cf.CustomLabel is not null
                     ? cf.CustomLabel : localizer.EnumDisplay(cf.FieldType),
                 cf.Value,
-                cf.Visibility))
+                cf.Visibility)
+            {
+                DisplayOrder = cf.DisplayOrder
+            })
             .ToList();
     }
 
@@ -86,49 +89,54 @@ internal sealed class ContactFieldService(
 
         foreach (var dto in fields)
         {
+            ContactField field;
             if (dto.Id.HasValue && existingById.TryGetValue(dto.Id.Value, out var existing))
             {
                 if (existing.FieldType == default) continue;
-                existing.FieldType = dto.FieldType;
-                existing.CustomLabel = dto.CustomLabel;
-                existing.Value = dto.Value;
-                existing.Visibility = dto.Visibility;
-                existing.DisplayOrder = dto.DisplayOrder;
-                existing.UpdatedAt = now;
-                toUpdate.Add(existing);
+                field = existing;
+                toUpdate.Add(field);
             }
             else
             {
-                toAdd.Add(new ContactField
+                field = new ContactField
                 {
                     Id = Guid.NewGuid(),
                     ProfileId = profileId,
-                    FieldType = dto.FieldType,
-                    CustomLabel = dto.CustomLabel,
-                    Value = dto.Value,
-                    Visibility = dto.Visibility,
-                    DisplayOrder = dto.DisplayOrder,
-                    CreatedAt = now,
-                    UpdatedAt = now
-                });
+                    CreatedAt = now
+                };
+                toAdd.Add(field);
             }
+
+            field.FieldType = dto.FieldType;
+            field.CustomLabel = dto.CustomLabel;
+            field.Value = dto.Value;
+            field.Visibility = dto.Visibility;
+            field.DisplayOrder = dto.DisplayOrder;
+            field.UpdatedAt = now;
         }
 
         // Resolve the cache key before committing; a failed lookup must not skip refresh.
         var ownerUserId = await userRepository.GetOwnerUserIdAsync(profileId, cancellationToken);
-        await userRepository.BatchSaveAsync(toAdd, toUpdate, toDelete, cancellationToken);
-
-        if (ownerUserId is not null)
+        try
         {
-            try
+            await userRepository.BatchSaveAsync(toAdd, toUpdate, toDelete, cancellationToken);
+        }
+        finally
+        {
+            if (ownerUserId is not null)
             {
-                await userInfoRefresher.RefreshAsync(ownerUserId.Value, cancellationToken);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                logger.LogWarning(
-                    "ContactFieldService: UserInfo invalidation failed for {UserId}: {ExType}",
-                    ownerUserId.Value, ex.GetType().Name);
+                try
+                {
+                    // The write may have committed even if its acknowledgement failed. Finish the refresh
+                    // independently of the request so old contact values and visibility cannot remain cached.
+                    await userInfoRefresher.RefreshAsync(ownerUserId.Value, CancellationToken.None);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex,
+                        "UserInfo refresh failed after contact field write for {UserId}",
+                        ownerUserId.Value);
+                }
             }
         }
     }

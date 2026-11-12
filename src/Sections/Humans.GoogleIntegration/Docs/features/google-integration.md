@@ -87,7 +87,7 @@ Nobodies Collective uses Google Workspace for collaboration. The system integrat
 - Inherited Shared Drive permissions are excluded from drift detection
 
 ### US-7.5: Link Existing Shared Drive Folder
-**As a** Board member or authorized Coordinator
+**As a** TeamsAdmin or authorized Coordinator
 **I want to** link an existing Shared Drive folder to a team
 **So that** team members automatically get access to the shared folder
 
@@ -101,7 +101,7 @@ Nobodies Collective uses Google Workspace for collaboration. The system integrat
 - All API calls use `SupportsAllDrives = true`
 
 ### US-7.5b: Link Existing Drive File
-**As a** Board member or authorized Coordinator
+**As a** TeamsAdmin or authorized Coordinator
 **I want to** link an individual Drive file (Sheet, Doc, Slides, etc.) to a team
 **So that** team members automatically get access to specific shared files
 
@@ -116,7 +116,7 @@ Nobodies Collective uses Google Workspace for collaboration. The system integrat
 - Permission sync works the same as for folders (team members get the resource's `DrivePermissionLevel`)
 
 ### US-7.6: Link Existing Google Group
-**As a** Board member or authorized Coordinator
+**As a** TeamsAdmin or authorized Coordinator
 **I want to** link an existing Google Group to a team
 **So that** team membership automatically syncs with group membership
 
@@ -125,10 +125,11 @@ Nobodies Collective uses Google Workspace for collaboration. The system integrat
 - System validates the service account has access to the group
 - If access denied, shows clear instructions with service account email
 - Group metadata (name, ID) fetched and saved as GoogleResource
-- Duplicate links prevented (same group + team)
+- Duplicate links prevented (same group + team), including an alias that resolves to an already-linked numeric id or canonical address
+- Legacy email-valued ids match literally, ignoring case; inactive recovery also matches the exact numeric id. Recovery remains scoped to the same team and Group resource type.
 
 ### US-7.7: Unlink Resource
-**As a** Board member or authorized Coordinator
+**As a** TeamsAdmin or authorized Coordinator
 **I want to** unlink a Google resource from a team
 **So that** the association is removed without deleting the resource
 
@@ -144,7 +145,7 @@ Nobodies Collective uses Google Workspace for collaboration. The system integrat
 
 **Acceptance Criteria:**
 - Controlled by `TeamResourceManagement:AllowCoordinatorsToManageResources` config setting
-- Default: false (only Board members and TeamsAdmins can manage)
+- Default: false (only TeamsAdmins and Admins can manage)
 - When enabled, Coordinators can link/unlink/sync resources for their teams
 
 ## Google Group Membership Sync Architecture
@@ -376,7 +377,7 @@ public interface ISyncSettingsService
 ## Google Group Lifecycle
 
 ### GoogleGroupPrefix on Team
-Teams can have a `GoogleGroupPrefix` (e.g., `"events"` produces `events@nobodies.team`). This is set via the team edit form by TeamsAdmin, Board, or Admin users.
+Teams can have a `GoogleGroupPrefix` (e.g., `"events"` produces `events@nobodies.team`). This is set via the team edit form by TeamsAdmin or Admin users.
 
 ### EnsureTeamGroupAsync
 When `GoogleGroupPrefix` is set on a team, `EnsureTeamGroupAsync` is called to:
@@ -468,11 +469,12 @@ Supports multiple Google Drive/Docs URL formats:
 - Direct file ID
 
 ### Authorization
-- Board members and TeamsAdmins: can manage resources for any team
+- TeamsAdmins and Admins: can manage resources for any team
+- Board: reads every team's resources page; manages nothing
 - Coordinators: controlled by `TeamResourceManagement:AllowCoordinatorsToManageResources` (default: false)
 
 ### Route: `/Google/Teams/{slug}/Resources`
-Actions (on `TeamResourcesController`, `src/Sections/Humans.GoogleIntegration/Controllers/`). Every action 404s an unknown slug and 403s a caller who is neither TeamsAdmin/Board/Admin nor a resource manager of the team's department (sub-teams are gated at their department); every `{resourceId}` action 404s a resource that belongs to another team:
+Actions (on `TeamResourcesController`, `src/Sections/Humans.GoogleIntegration/Controllers/`). Every action 404s an unknown slug and 403s a caller who is neither TeamsAdmin/Admin nor a resource manager of the team's department (the index also admits Board, read-only) (sub-teams are gated at their department); every `{resourceId}` action 404s a resource that belongs to another team:
 | Route | Method | Action |
 |-------|--------|--------|
 | `` (index) | GET | View linked resources + link forms |
@@ -540,7 +542,7 @@ Process: Calls Drive and Group `ReconcileAllAsync` once each with `SyncAction.Ex
 
 **Per-phase fault isolation:** Each top-level phase (Drive source reconcile covering folders and files, Group membership reconcile, Drive folder path updates, Inherited access enforcement, Group settings check) runs independently. A failure in one phase does not abort the others. After all phases complete, the job records `google_resource_reconciliation / partial_failure` in metrics and dispatches a single `SyncError` Admin alert listing which phases failed. If all phases succeed, the metric is `success` and no error alert fires.
 
-**Drive folder path updates:** After permission sync, the job calls `UpdateDriveFolderPathsAsync` to fetch the current folder name and parent chain for each active Drive resource via the Drive API (`files.get` for name, parents and `driveId`; `drives.get` for a Shared Drive root's name, never the `files.get` placeholder). If a folder has been renamed or moved, `GoogleResource.Name` is updated to reflect the full logical path (e.g. "Shared Drive / Department / Subfolder"). This keeps the `/Google/Sync` page accurate without requiring manual intervention. Only a complete root-reaching path replaces the stored name; failed metadata reads or the depth limit preserve it.
+**Drive folder path updates:** After permission sync, the job calls `UpdateDriveFolderPathsAsync` to fetch the current folder name and parent chain for each active Drive resource via the Drive API (`files.get` for name, parents and `driveId`; `drives.get` for a Shared Drive root's name, never the `files.get` placeholder). If a folder has been renamed or moved, `GoogleResource.Name` is updated to reflect the full logical path (e.g. "Shared Drive / Department / Subfolder"). This keeps the `/Google/Sync` page accurate without requiring manual intervention. Only a complete root-reaching path replaces the stored name; failed metadata reads or the depth limit preserve it. Initial resource lookup uses the same resolver and reuses its leaf metadata; an incomplete walk returns the leaf name rather than a partial suffix. Shared Drive roots whose file metadata omits `driveId` are resolved through `drives.get`.
 
 > Jobs are active but mode-gated: each service must have its sync mode set to AddOnly or AddAndRemove at the `/Settings#google-sync` tab before the job will modify Google resources.
 
@@ -585,10 +587,12 @@ On Google API error (resource sync):
 ### Error Scenarios
 | Error | Handling |
 |-------|----------|
-| Rate limit exceeded (429) | Transient — retry with backoff |
+| Rate limit exceeded (429, or a 403 whose message says "rate limit exceeded") | Transient — Drive permission listing, create and role change retry in-pass with backoff |
+| Dropped connection (reset, I/O error) in a Group client | One group's failed call, never the pass's; Execute schedules a scoped retry |
+| Drive 400 "internal error" on a grant | Transient in-pass; the same refusal on the member's next run marks the address rejected |
 | User not found (404) | Permanent — mark user email rejected |
 | Invalid email (400) | Permanent — mark user email rejected |
-| Permission denied (403) | Permanent — no Google account for address, mark rejected |
+| Permission denied (403, other than rate limit) | Permanent — no Google account for address, mark rejected |
 | Folder not found | Resource marked inactive — an admin re-links the folder |
 | Inherited permission delete | Any permission with an inherited component is excluded from deletion. Source-owned Drive reconciliation can instead reduce a direct elevation to the inherited floor, as described above. If Drive still 403s on a delete race (inheritance changed between list and delete), the failure is classified terminal, logged once, and not retried until the next reconciliation pass (nobodies-collective/Humans#945) |
 

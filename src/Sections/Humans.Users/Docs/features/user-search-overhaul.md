@@ -1,6 +1,6 @@
 <!-- freshness:triggers
   src/Sections/Humans.Users/Services/PersonSearchMatcher.cs
-  src/Sections/Humans.Users.Contracts/PersonSearchFields.cs
+  src/Humans.Base/Users/PersonSearchFields.cs
   src/Sections/Humans.Users/Data/CachingUserService.cs
   src/Sections/Humans.Search/Controllers/SearchController.cs
   src/Sections/Humans.Users/Controllers/ProfileApiController.cs
@@ -59,6 +59,7 @@ All **profile information** searchable; **board/admin and private info excluded*
   ContactFields, publicly-exposed emails (public).
 - `LegalName` *(new)* — FirstName/LastName; admin/coordinator only.
 - `Admin` — all verified emails + non-public ContactFields; admin/board only.
+- `ExactName` — accent-/case-folded full-name equality rather than substring/token matching; public. Counts burner-name collisions (see [burner-name-collision-warning](burner-name-collision-warning.md)).
 - `PublicAll = Name | Bio`, `AdminAll = Name | Bio | LegalName | Admin`. The unused coordinator-picker alias was removed; future callers compose the existing flags.
 
 `PersonSearchMatcher` (`src/Sections/Humans.Users/Services/PersonSearchMatcher.cs`) — a pure,
@@ -98,12 +99,12 @@ Accent-folding for the Postgres `ILIKE` **entity** searches (teams/camps/shifts/
 ```sql
 WITH p AS (
   SELECT pr."BurnerName" AS burner, pr."FirstName" AS fn, pr."LastName" AS ln,
-         u."DisplayName" AS disp, pr."RejectedAt" AS rej
+         u."DisplayName" AS disp, u."State" AS rej
   FROM profiles pr JOIN users u ON u."Id" = pr."UserId"
 )
-SELECT 'total (not rejected)' AS metric, count(*) FROM p WHERE rej IS NULL
+SELECT 'total (not rejected)' AS metric, count(*) FROM p WHERE rej <> 'Rejected'
 UNION ALL SELECT 'DEFECT#1 rendered-but-unsearchable (blank BurnerName + has DisplayName)',
-       count(*) FROM p WHERE coalesce(trim(burner),'')='' AND coalesce(trim(disp),'')<>'' AND rej IS NULL
+       count(*) FROM p WHERE coalesce(trim(burner),'')='' AND coalesce(trim(disp),'')<>'' AND rej <> 'Rejected'
 UNION ALL SELECT 'DEFECT#3 accented chars in name fields',
-       count(*) FROM p WHERE (burner ~ '[^\x20-\x7E]' OR fn ~ '[^\x20-\x7E]' OR ln ~ '[^\x20-\x7E]') AND rej IS NULL;
+       count(*) FROM p WHERE (burner ~ '[^\x20-\x7E]' OR fn ~ '[^\x20-\x7E]' OR ln ~ '[^\x20-\x7E]') AND rej <> 'Rejected';
 ```

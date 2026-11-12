@@ -1,5 +1,4 @@
 using Humans.Email.Contracts;
-using Humans.Users.Controllers;
 using Humans.Users.Models;
 using Humans.Base.Helpers;
 using Humans.Auth.Contracts;
@@ -21,7 +20,11 @@ public sealed class ProfileCardViewComponent(
     IRoleAssignmentService roleAssignmentService,
     ICommunicationPreferenceService commPrefService) : ViewComponent
 {
-    public async Task<IViewComponentResult> InvokeAsync(Guid userId, ProfileCardViewMode viewMode)
+    // Default is the whole card (/Profile/Me, /Profile/{id}); /Users/Me splits it into
+    // Identity (left column), Teams (a tile) and History (Burner CV).
+    private static readonly HashSet<string> Layouts = new(StringComparer.Ordinal) { "Default", "Identity", "Board", "Teams", "History" };
+
+    public async Task<IViewComponentResult> InvokeAsync(Guid userId, ProfileCardViewMode viewMode, string layout = "Default")
     {
         var ct = HttpContext.RequestAborted;
         var info = await userService.GetUserInfoAsync(userId, ct);
@@ -36,11 +39,15 @@ public sealed class ProfileCardViewComponent(
         var canViewLegalName = viewMode != ProfileCardViewMode.Public;
         var viewerUserId = userId; // default for self/admin
 
-        if (viewMode == ProfileCardViewMode.Public
-            && Guid.TryParse(UserClaimsPrincipal.FindFirstValue(ClaimTypes.NameIdentifier), out var viewerId))
+        if (viewMode == ProfileCardViewMode.Public)
         {
-            viewerUserId = viewerId;
-            canViewLegalName = await roleAssignmentService.IsUserBoardMemberAsync(viewerId, ct);
+            if (!Guid.TryParse(UserClaimsPrincipal.FindFirstValue(ClaimTypes.NameIdentifier), out var viewerId))
+                return Content(string.Empty);
+            var viewer = await userService.GetUserInfoAsync(viewerId, ct);
+            if (viewer is null) return Content(string.Empty);
+
+            viewerUserId = viewer.Id;
+            canViewLegalName = await roleAssignmentService.IsUserBoardMemberAsync(viewerUserId, ct);
         }
 
         var contactFields = profile is not null
@@ -73,7 +80,6 @@ public sealed class ProfileCardViewComponent(
             .OrderBy(tm => tm.TeamInfo.Name, StringComparer.Ordinal)
             .Select(tm => new TeamMembershipViewModel
             {
-                TeamId = tm.TeamInfo.Id,
                 TeamName = GetDisplayName(tm.TeamInfo, teamsById, viewMode != ProfileCardViewMode.Public),
                 TeamSlug = tm.TeamInfo.Slug,
                 IsCoordinator = tm.Membership!.Role == TeamMemberRole.Coordinator,
@@ -81,19 +87,9 @@ public sealed class ProfileCardViewComponent(
             })
             .ToList();
 
-        var hasCustomPicture = profile?.HasCustomPicture == true;
-        var pictureUrl = hasCustomPicture
-            ? Url.Action(nameof(ProfileViewController.Picture), "ProfileView", new { id = profile!.Id, v = profile.UpdatedAt.ToUnixTimeTicks() })
-            : null;
-
         var model = new ProfileCardViewModel
         {
             UserId = userId,
-            DisplayName = info.BurnerName,
-            ProfilePictureUrl = info.ProfilePictureUrl,
-            HasCustomProfilePicture = hasCustomPicture,
-            CustomProfilePictureUrl = pictureUrl,
-            BurnerName = profile?.BurnerName ?? string.Empty,
             Pronouns = profile?.Pronouns,
             City = profile?.City,
             CountryCode = profile?.CountryCode,
@@ -109,13 +105,13 @@ public sealed class ProfileCardViewComponent(
             EmergencyContactRelationship = canViewLegalName ? profile?.EmergencyContactRelationship : null,
             ViewMode = viewMode,
             CanViewLegalName = canViewLegalName,
-            UserEmails = visibleEmails.Select(e => new UserEmailDisplayViewModel
+            UserEmails = visibleEmails.OrderBy(e => e.Email, StringComparer.OrdinalIgnoreCase).Select(e => new UserEmailDisplayViewModel
             {
                 Email = e.Email,
                 IsPrimary = e.IsPrimary,
                 Visibility = e.Visibility
             }).ToList(),
-            ContactFields = contactFields.Select(cf => new ContactFieldViewModel
+            ContactFields = contactFields.OrderBy(cf => cf.DisplayOrder).Select(cf => new ContactFieldViewModel
             {
                 Id = cf.Id,
                 FieldType = cf.FieldType,
@@ -123,26 +119,31 @@ public sealed class ProfileCardViewComponent(
                 Value = cf.Value,
                 Visibility = cf.Visibility
             }).ToList(),
-            VolunteerHistory = (profile?.VolunteerHistory ?? []).Select(cv => new VolunteerHistoryEntryViewModel
-            {
-                Date = cv.Date,
-                EventName = cv.EventName,
-                Description = cv.Description
-            }).ToList(),
+            VolunteerHistory = (profile?.VolunteerHistory ?? [])
+                .OrderByDescending(cv => cv.Date)
+                .Select(cv => new VolunteerHistoryEntryViewModel
+                {
+                    Date = cv.Date,
+                    EventName = cv.EventName,
+                    Description = cv.Description
+                }).ToList(),
             Teams = displayableTeams,
-            Languages = (profile?.Languages ?? []).Select(pl => new ProfileLanguageDisplayViewModel
-            {
-                LanguageCode = pl.LanguageCode,
-                LanguageName = LanguageCatalog.GetDisplayName(pl.LanguageCode),
-                Proficiency = pl.Proficiency
-            }).ToList(),
+            Languages = (profile?.Languages ?? [])
+                .OrderByDescending(pl => pl.Proficiency)
+                .ThenBy(pl => pl.LanguageCode, StringComparer.OrdinalIgnoreCase)
+                .Select(pl => new ProfileLanguageDisplayViewModel
+                {
+                    LanguageCode = pl.LanguageCode,
+                    LanguageName = LanguageCatalog.GetDisplayName(pl.LanguageCode),
+                    Proficiency = pl.Proficiency
+                }).ToList(),
             PreferredLanguage = info.PreferredLanguage,
             CanSendMessage = !isOwnProfile
                 && !visibleEmails.Any(e => e.Visibility >= ContactFieldVisibility.AllActiveProfiles)
                 && await commPrefService.AcceptsFacilitatedMessagesAsync(userId, ct)
         };
 
-        return View(model);
+        return View(Layouts.Contains(layout) ? layout : "Default", model);
     }
 
     private static string GetDisplayName(

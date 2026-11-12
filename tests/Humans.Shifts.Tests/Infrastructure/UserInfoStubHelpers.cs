@@ -21,9 +21,7 @@ internal static class UserInfoStubHelpers
             user,
             userEmails ?? user.UserEmails?.ToList() ?? [],
             [],
-            [],
             profile: profile,
-            [],
             [],
             [],
             []);
@@ -37,16 +35,13 @@ internal static class UserInfoStubHelpers
             BurnerName = displayName,
             CreatedAt = NodaTime.SystemClock.Instance.GetCurrentInstant(),
             UpdatedAt = NodaTime.SystemClock.Instance.GetCurrentInstant(),
-            IsApproved = true
         };
         return UserInfoFactory.Create(
             // UserInfo.BurnerName reads User.BurnerName, so it is seeded there.
             new User { Id = userId, PreferredLanguage = "en", BurnerName = resolvedProfile.BurnerName },
             [],
             [],
-            [],
             profile: resolvedProfile,
-            [],
             [],
             [],
             []);

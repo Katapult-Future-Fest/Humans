@@ -1,0 +1,60 @@
+@model IReadOnlyList<HoldedMonthlyCalls>
+@{
+    ViewData["Title"] = "Holded API calls";
+}
+
+<page-header title="Holded API calls" subtitle="Every call Humans made to Holded, by endpoint and Madrid month. Holded's own usage figure (on the summary) stays the authoritative count." />
+
+<div class="card">
+    @if (Model.Count == 0)
+    {
+        <div class="card-body"><p class="mb-0 text-muted">No calls metered yet.</p></div>
+    }
+    else
+    {
+        var endpoints = Model
+            .SelectMany(m => m.ByEndpoint)
+            .GroupBy(e => e.Key, StringComparer.Ordinal)
+            .Select(g => (Endpoint: g.Key, Total: g.Sum(e => e.Value)))
+            .OrderByDescending(e => e.Total)
+            .ThenBy(e => e.Endpoint, StringComparer.Ordinal)
+            .ToList();
+        <div class="table-responsive">
+            <table class="table table-sm table-striped align-middle mb-0">
+                <thead>
+                    <tr>
+                        <th>Endpoint</th>
+                        @foreach (var m in Model)
+                        {
+                            <th class="text-end text-nowrap">@(new DateTime(m.Year, m.Month, 1).ToMonthYear())</th>
+                        }
+                        <th class="text-end">Total</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var e in endpoints)
+                    {
+                        <tr>
+                            <td><code>@e.Endpoint</code></td>
+                            @foreach (var m in Model)
+                            {
+                                <td class="text-end">@(m.ByEndpoint.TryGetValue(e.Endpoint, out var n) ? n : "")</td>
+                            }
+                            <th class="text-end">@e.Total</th>
+                        </tr>
+                    }
+                </tbody>
+                <tfoot>
+                    <tr class="table-light">
+                        <th>All endpoints</th>
+                        @foreach (var m in Model)
+                        {
+                            <th class="text-end">@m.Total</th>
+                        }
+                        <th class="text-end">@Model.Sum(m => m.Total)</th>
+                    </tr>
+                </tfoot>
+            </table>
+        </div>
+    }
+</div>

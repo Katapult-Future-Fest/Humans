@@ -45,7 +45,7 @@ public sealed class CachingCalendarServiceTests
             EndUtc = before.EndUtc,
             CreatedAt = before.CreatedAt,
             UpdatedAt = before.UpdatedAt,
-            CreatedByUserId = before.CreatedByUserId,
+            CreatedByUserId = Guid.NewGuid(),
             RecurrenceRule = "FREQ=DAILY;COUNT=3",
             RecurrenceTimezone = "UTC",
         };
@@ -248,7 +248,7 @@ public sealed class CachingCalendarServiceTests
     }
 
     [HumansFact]
-    public async Task GetOccurrencesInWindowAsync_OrdersContributedItemsBeforeLaterAllDayEvents()
+    public async Task GetOccurrencesInWindowAsync_IncludesContributedItemsAndLaterAllDayEvents()
     {
         var allDay = BuildInfo(title: "All-day", start: null, end: null) with
         {
@@ -267,14 +267,14 @@ public sealed class CachingCalendarServiceTests
             Instant.FromUtc(2026, 6, 1, 0, 0), Instant.FromUtc(2026, 6, 30, 0, 0), DateTimeZoneProviders.Tzdb["Europe/Madrid"],
             ct: TestContext.Current.CancellationToken);
 
-        results.Select(r => r.Title).Should().Equal(item.Summary, "All-day");
+        results.Select(r => r.Title).Should().BeEquivalentTo([item.Summary, "All-day"]);
     }
 
     [HumansTheory]
-    [InlineData("America/Los_Angeles", true)]
-    [InlineData("Europe/Madrid", false)]
-    [InlineData("Pacific/Auckland", false)]
-    public async Task GetOccurrencesInWindowAsync_OrdersMixedSourcesInViewerZone(string timezone, bool contributionFirst)
+    [InlineData("America/Los_Angeles")]
+    [InlineData("Europe/Madrid")]
+    [InlineData("Pacific/Auckland")]
+    public async Task GetOccurrencesInWindowAsync_ComposesMixedSourcesInViewerZone(string timezone)
     {
         var allDay = BuildInfo(title: "All-day", start: null, end: null) with
         {
@@ -293,8 +293,7 @@ public sealed class CachingCalendarServiceTests
             Instant.FromUtc(2026, 6, 1, 0, 0), Instant.FromUtc(2026, 6, 30, 0, 0),
             DateTimeZoneProviders.Tzdb[timezone], ct: TestContext.Current.CancellationToken);
 
-        results.Select(r => r.Title).Should().Equal(contributionFirst
-            ? [item.Summary, "All-day"] : ["All-day", item.Summary]);
+        results.Select(r => r.Title).Should().BeEquivalentTo([item.Summary, "All-day"]);
     }
 
     [HumansFact]
@@ -365,6 +364,24 @@ public sealed class CachingCalendarServiceTests
     }
 
     [HumansFact]
+    public async Task GetOccurrencesInWindowAsync_ExpandsARepeatingContributedItemWithinTheWindow()
+    {
+        _inner.GetAllEventInfosAsync(Arg.Any<CancellationToken>()).Returns([]);
+        var contributor = Substitute.For<ICalendarFeedContributor>();
+        var first = Instant.FromUtc(2026, 5, 4, 17, 0);
+        contributor.GetPublicItemsForWindowAsync(Arg.Any<Instant>(), Arg.Any<Instant>(), Arg.Any<CancellationToken>())
+            .Returns([new CalendarFeedItem("wg@humans", "Workgroups", "Sync", null, first, first.Plus(Duration.FromHours(1)),
+                null, null, "FREQ=WEEKLY", "Europe/Madrid")]);
+        var sut = CreateSut(contributor);
+
+        var results = await sut.GetOccurrencesInWindowAsync(Instant.FromUtc(2026, 6, 1, 0, 0), Instant.FromUtc(2026, 6, 15, 0, 0),
+            DateTimeZoneProviders.Tzdb["Europe/Madrid"], ct: TestContext.Current.CancellationToken);
+
+        results.Select(o => o.OccurrenceStartUtc).Should().Equal(
+            Instant.FromUtc(2026, 6, 1, 17, 0), Instant.FromUtc(2026, 6, 8, 17, 0));
+    }
+
+    [HumansFact]
     public async Task GetOccurrencesInWindowAsync_SkipsThrowingContributorAndKeepsOwnEvents()
     {
         var ownEvent = BuildInfo(title: "Own event", start: Instant.FromUtc(2026, 6, 5, 9, 0), end: Instant.FromUtc(2026, 6, 5, 10, 0));
@@ -379,9 +396,39 @@ public sealed class CachingCalendarServiceTests
         results.Should().ContainSingle();
         results[0].EventId.Should().Be(ownEvent.Id);
         _compositionLogger.Received(1).Log(
-            LogLevel.Warning,
+            LogLevel.Error,
             Arg.Any<EventId>(),
             Arg.Is<object>(o => o.ToString()!.Contains("FakeContributor")),
+            Arg.Any<Exception?>(),
+            Arg.Any<Func<object, Exception?, string>>());
+    }
+
+    [HumansFact]
+    public async Task GetOccurrencesInWindowAsync_DiscardsContributorBatchWhenRecurrenceExpansionFails()
+    {
+        var start = Instant.FromUtc(2026, 6, 5, 9, 0);
+        var ownEvent = BuildInfo(title: "Own event", start: start, end: start.Plus(Duration.FromHours(1)));
+        _inner.GetAllEventInfosAsync(Arg.Any<CancellationToken>()).Returns([ownEvent]);
+        _teamService.GetTeamsAsync(Arg.Any<CancellationToken>()).Returns(new Dictionary<Guid, TeamInfo>());
+        var broken = MakeItem("Broken", start) with
+        {
+            RecurrenceRule = "FREQ=WEEKLY;INTERVAL=oops",
+            RecurrenceTimezone = "Europe/Madrid",
+        };
+        var sut = CreateSut(
+            new FakeContributor(MakeItem("Before", start)),
+            new FakeContributor(MakeItem("Partial", start), broken),
+            new FakeContributor(MakeItem("After", start)));
+
+        var results = await sut.GetOccurrencesInWindowAsync(
+            Instant.FromUtc(2026, 6, 1, 0, 0), Instant.FromUtc(2026, 6, 30, 0, 0), DateTimeZoneProviders.Tzdb["Europe/Madrid"],
+            ct: TestContext.Current.CancellationToken);
+
+        results.Select(item => item.Title).Should().BeEquivalentTo("Own event", "Before meeting", "After meeting");
+        _compositionLogger.Received(1).Log(
+            LogLevel.Error,
+            Arg.Any<EventId>(),
+            Arg.Is<object>(state => state.ToString()!.Contains("FakeContributor")),
             Arg.Any<Exception?>(),
             Arg.Any<Func<object, Exception?, string>>());
     }
@@ -624,7 +671,6 @@ public sealed class CachingCalendarServiceTests
             RecurrenceRule: null,
             RecurrenceTimezone: null,
             RecurrenceUntilUtc: null,
-            CreatedByUserId: Guid.NewGuid(),
             CreatedAt: Instant.FromUtc(2026, 5, 1, 0, 0),
             UpdatedAt: Instant.FromUtc(2026, 5, 1, 0, 0),
             Exceptions: []);

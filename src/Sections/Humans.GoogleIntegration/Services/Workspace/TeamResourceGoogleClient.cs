@@ -10,7 +10,8 @@ namespace Humans.GoogleIntegration.Services.Workspace;
 
 internal sealed class TeamResourceGoogleClient(
     IOptions<GoogleWorkspaceSettings> settings,
-    ILogger<TeamResourceGoogleClient> logger) : ITeamResourceGoogleClient
+    ILogger<TeamResourceGoogleClient> logger,
+    IGoogleDrivePermissionsClient drivePermissions) : ITeamResourceGoogleClient
 {
     private readonly GoogleWorkspaceSettings _settings = settings.Value;
 
@@ -25,20 +26,24 @@ internal sealed class TeamResourceGoogleClient(
     {
         using var timer = logger.TimeOperation();
         _ = expectFolder; // Ignored: the real connector uses the MIME type returned by Drive.
+        var drive = await GetDriveServiceAsync(ct);
         try
         {
-            var drive = await GetDriveServiceAsync(ct);
             var request = drive.Files.Get(itemId);
             request.Fields = "id, name, webViewLink, mimeType, parents, driveId";
             request.SupportsAllDrives = true;
             var file = await request.ExecuteAsync(ct);
+            var fileId = file.Id ?? itemId;
 
             var isFolder = string.Equals(file.MimeType, "application/vnd.google-apps.folder", StringComparison.Ordinal);
-            var fullPath = await BuildFolderPathAsync(drive, file, ct);
+            var fullPath = await DriveFolderPath.ResolveAsync(
+                drivePermissions, fileId, logger, ct,
+                new DriveFileMetadata(fileId, file.Name, file.Parents as IReadOnlyList<string>, file.DriveId,
+                    file.InheritedPermissionsDisabled)) ?? file.Name;
 
             return new DriveLookupResult(
                 new DriveItem(
-                    Id: file.Id,
+                    Id: fileId,
                     Name: file.Name,
                     WebViewLink: file.WebViewLink,
                     IsFolder: isFolder,
@@ -53,28 +58,42 @@ internal sealed class TeamResourceGoogleClient(
                 Item: null,
                 Error: new GoogleClientError(ex.Error?.Code ?? 0, ex.Error?.Message));
         }
+        catch (Exception ex) when (GoogleClientError.IsTransportError(ex))
+        {
+            logger.LogWarning(ex, "Transport error looking up Drive item {ItemId}", itemId);
+            return new DriveLookupResult(Item: null, Error: new GoogleClientError(0, ex.Message));
+        }
     }
 
     public async Task<GroupLookupResult> LookupGroupAsync(string groupEmail, CancellationToken ct = default)
     {
         using var _ = logger.TimeOperation();
+        var cloudIdentity = await GetCloudIdentityServiceAsync(ct);
         try
         {
-            var cloudIdentity = await GetCloudIdentityServiceAsync(ct);
             var lookupRequest = cloudIdentity.Groups.Lookup();
             lookupRequest.GroupKeyId = groupEmail;
             var lookupResponse = await lookupRequest.ExecuteAsync(ct);
 
             var fullGroup = await cloudIdentity.Groups.Get(lookupResponse.Name).ExecuteAsync(ct);
             var numericId = lookupResponse.Name["groups/".Length..];
-            var emailLocal = groupEmail.Split('@')[0];
-            var displayUrl = $"https://groups.google.com/a/{_settings.Domain}/g/{emailLocal}";
+            var resolvedEmail = fullGroup.GroupKey?.Id?.Trim();
+            var separator = resolvedEmail?.LastIndexOf('@') ?? -1;
+            if (resolvedEmail is null || separator <= 0 || separator == resolvedEmail.Length - 1)
+            {
+                logger.LogWarning("Google Group {GroupId} returned no usable group email address", numericId);
+                return new GroupLookupResult(null,
+                    new GoogleClientError(502, "Google returned no usable group email address."));
+            }
+            var emailLocal = resolvedEmail[..separator];
+            var domain = resolvedEmail[(separator + 1)..];
+            var displayUrl = $"https://groups.google.com/a/{domain}/g/{emailLocal}";
 
             return new GroupLookupResult(
                 new ResolvedGroup(
                     NumericId: numericId,
-                    NormalizedEmail: groupEmail,
-                    DisplayName: fullGroup.DisplayName ?? groupEmail,
+                    NormalizedEmail: resolvedEmail,
+                    DisplayName: fullGroup.DisplayName ?? resolvedEmail,
                     DisplayUrl: displayUrl),
                 Error: null);
         }
@@ -86,6 +105,11 @@ internal sealed class TeamResourceGoogleClient(
                 Group: null,
                 Error: new GoogleClientError(ex.Error?.Code ?? 0, ex.Error?.Message));
         }
+        catch (Exception ex) when (GoogleClientError.IsTransportError(ex))
+        {
+            logger.LogWarning(ex, "Transport error looking up Group {GroupEmail}", groupEmail);
+            return new GroupLookupResult(Group: null, Error: new GoogleClientError(0, ex.Message));
+        }
     }
 
     public async Task<string> GetServiceAccountEmailAsync(CancellationToken ct = default)
@@ -96,16 +120,7 @@ internal sealed class TeamResourceGoogleClient(
             return _serviceAccountEmail;
         }
 
-        string? json = null;
-
-        if (!string.IsNullOrEmpty(_settings.ServiceAccountKeyJson))
-        {
-            json = _settings.ServiceAccountKeyJson;
-        }
-        else if (!string.IsNullOrEmpty(_settings.ServiceAccountKeyPath))
-        {
-            json = await File.ReadAllTextAsync(_settings.ServiceAccountKeyPath, ct);
-        }
+        var json = await GoogleCredentialLoader.GetServiceAccountJsonAsync(_settings, ct);
 
         if (json is not null)
         {
@@ -119,71 +134,6 @@ internal sealed class TeamResourceGoogleClient(
 
         _serviceAccountEmail = "unknown@serviceaccount.iam.gserviceaccount.com";
         return _serviceAccountEmail;
-    }
-
-    /// <summary>Falls back to the item's own name when ancestor access is denied.</summary>
-    private async Task<string> BuildFolderPathAsync(
-        DriveService drive, Google.Apis.Drive.v3.Data.File file, CancellationToken ct)
-    {
-        // When the file IS the shared drive root, Files.Get returns "Drive" as the name.
-        // Use Drives.Get to get the actual drive name.
-        if (!string.IsNullOrEmpty(file.DriveId)
-            && string.Equals(file.Id, file.DriveId, StringComparison.Ordinal))
-        {
-            try
-            {
-                var driveInfo = await drive.Drives.Get(file.DriveId).ExecuteAsync(ct);
-                return driveInfo.Name;
-            }
-            catch (Google.GoogleApiException ex)
-            {
-                logger.LogDebug(ex, "Service account cannot access Shared Drive metadata for {DriveId}", file.DriveId);
-                return file.Name;
-            }
-        }
-
-        var segments = new List<string> { file.Name };
-        var currentParents = file.Parents;
-        var driveId = file.DriveId;
-
-        // Walk up the parent chain (max 10 levels to avoid infinite loops)
-        for (var i = 0; i < 10 && currentParents is { Count: > 0 }; i++)
-        {
-            var parentId = currentParents[0];
-
-            if (string.Equals(parentId, driveId, StringComparison.Ordinal))
-            {
-                try
-                {
-                    var driveInfo = await drive.Drives.Get(driveId).ExecuteAsync(ct);
-                    segments.Add(driveInfo.Name);
-                }
-                catch (Google.GoogleApiException ex)
-                {
-                    logger.LogDebug(ex, "Service account cannot access Shared Drive metadata for {DriveId}", driveId);
-                }
-                break;
-            }
-
-            try
-            {
-                var parentRequest = drive.Files.Get(parentId);
-                parentRequest.Fields = "id, name, parents, driveId";
-                parentRequest.SupportsAllDrives = true;
-                var parent = await parentRequest.ExecuteAsync(ct);
-
-                segments.Add(parent.Name);
-                currentParents = parent.Parents;
-            }
-            catch (Google.GoogleApiException ex)
-            {
-                logger.LogDebug(ex, "Cannot access parent folder {ParentId} — stopping path walk", parentId);
-                break;
-            }
-        }
-
-        segments.Reverse();
-        return string.Join(" / ", segments);
     }
 
     private async Task<DriveService> GetDriveServiceAsync(CancellationToken ct)

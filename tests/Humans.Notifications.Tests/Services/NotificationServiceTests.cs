@@ -29,8 +29,6 @@ public class NotificationServiceTests : IDisposable
 
     public NotificationServiceTests()
     {
-        // notifications/notification_recipients live in NotificationsDbContext;
-        // communication_preferences rows are seeded into a PreferenceRegistry stand-in.
         var notificationsOptions = new DbContextOptionsBuilder<NotificationsDbContext>()
             .UseInMemoryDatabase(Guid.NewGuid().ToString())
             .Options;
@@ -39,15 +37,13 @@ public class NotificationServiceTests : IDisposable
         _clock = new FakeClock(Instant.FromUtc(2026, 4, 1, 12, 0));
         _repo = new NotificationRepository(new TestDbContextFactory<NotificationsDbContext>(notificationsOptions));
 
-        // Delegate to in-memory DB so seeded preferences are respected.
         _preferenceService.StubInboxDisabledFrom(_dbContext);
 
         var emitter = new NotificationEmitter(
             _repo, _preferenceService, _clock,
             NullLogger<NotificationEmitter>.Instance);
         _service = new NotificationService(
-            emitter, _repo, _roleAssignmentService, _preferenceService,
-            _clock, NullLogger<NotificationService>.Instance);
+            emitter, _repo, _roleAssignmentService, NullLogger<NotificationService>.Instance);
     }
 
     public void Dispose()
@@ -59,11 +55,7 @@ public class NotificationServiceTests : IDisposable
     [HumansFact]
     public async Task SendAsync_DelegatesToTheEmitter()
     {
-        // NotificationService.SendAsync is a pass-through to INotificationEmitter.
-        // What SendAsync *does* — per-recipient rows, preference suppression,
-        // field persistence, badge freshness — is the emitter's behaviour and
-        // is covered once, in NotificationEmitterTests. This asserts only that the
-        // delegation is live, so the pass-through cannot silently become a no-op.
+        // A pass-through; NotificationEmitterTests covers the behaviour. This proves only that the delegation is live.
         var user = Guid.NewGuid();
 
         await _service.SendAsync(
@@ -95,7 +87,7 @@ public class NotificationServiceTests : IDisposable
             NotificationPriority.Normal, "Source notice", [source], cancellationToken: ct);
         await _service.SendAsync(TestSources.TeamUpdate, NotificationClass.Informational,
             NotificationPriority.Normal, "Target notice", [target], cancellationToken: ct);
-        var inbox = new NotificationInboxService(_repo, Substitute.For<IUserService>(), TestSources.Registry, _clock);
+        var inbox = new NotificationInboxService(_repo, TestSources.Registry, _clock);
         (await inbox.GetUnreadBadgeCountsAsync(source, ct)).Should().Be((0, 1));
         (await inbox.GetUnreadBadgeCountsAsync(target, ct)).Should().Be((0, 1));
 
@@ -114,8 +106,9 @@ public class NotificationServiceTests : IDisposable
         var repo = Substitute.For<INotificationRepository>();
         repo.ReassignRecipientsToUserAsync(source, target, Arg.Any<CancellationToken>())
             .Returns(Task.FromException(failure));
-        var service = new NotificationService(Substitute.For<INotificationEmitter>(), repo,
-            _roleAssignmentService, _preferenceService, _clock, NullLogger<NotificationService>.Instance);
+        var emitter = new NotificationEmitter(repo, _preferenceService, _clock, NullLogger<NotificationEmitter>.Instance);
+        var service = new NotificationService(emitter, repo,
+            _roleAssignmentService, NullLogger<NotificationService>.Instance);
 
         var act = () => service.ReassignAsync(source, target, Guid.NewGuid(), _clock.GetCurrentInstant(),
             TestContext.Current.CancellationToken);
@@ -123,14 +116,16 @@ public class NotificationServiceTests : IDisposable
         (await act.Should().ThrowAsync<IOException>()).Which.Should().BeSameAs(failure);
     }
 
-    [HumansFact]
-    public async Task SendToRoleAsync_CreatesSharedNotificationForRoleHolders()
+    [HumansTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SendToRoleAsync_CreatesSharedNotificationForRoleHolders(bool duplicateRecipients)
     {
         var user1 = Guid.NewGuid();
         var user2 = Guid.NewGuid();
 
         _roleAssignmentService.GetActiveUserIdsInRoleAsync("Board", Arg.Any<CancellationToken>())
-            .Returns([user1, user2]);
+            .Returns(duplicateRecipients ? [user1, user2, user1, user2] : [user1, user2]);
 
         await _service.SendToRoleAsync(
             TestSources.Approval,

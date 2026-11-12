@@ -82,6 +82,7 @@ internal sealed class HoldedPurchasesClient(HoldedTransport transport, ILogger<H
         {
             var node = await JsonNode.ParseAsync(stream, cancellationToken: ct)
                 ?? throw new HoldedTransientException("Holded returned empty body");
+            WarnIfNotEuro(logger, node, "purchase");
 
             return new HoldedPurchaseDocumentDto
             {
@@ -182,9 +183,18 @@ internal sealed class HoldedPurchasesClient(HoldedTransport transport, ILogger<H
             HttpMethod.Post, $"/api/v2/purchases/{documentId}/payments")
         { Content = JsonContent.Create(payload, options: OmitNulls) };
 
-        using var resp = await transport.SendAsync(req, ct);
+        // A 5xx can arrive after Holded saved the payment (production, 2026-11-05): only the document says which.
+        HoldedTransientException? refused = null;
+        try
+        {
+            using var resp = await transport.SendAsync(req, ct);
+        }
+        catch (HoldedTransientException ex)
+        {
+            refused = ex;
+        }
 
-        // From here the payment IS posted: throwing would read as "not paid" and the caller would pay again. The
+        // From here the payment may be posted: throwing would read as "not paid" and the caller would pay again. The
         // sentinel names the document a human has to check.
         IReadOnlyList<HoldedPaymentDetailDto> after;
         try
@@ -194,8 +204,8 @@ internal sealed class HoldedPurchasesClient(HoldedTransport transport, ILogger<H
         catch (Exception ex) when (ex is HoldedTransientException or HoldedPermanentException)
         {
             logger.LogWarning(ex,
-                "Holded accepted a payment on purchase document {DocumentId} but the document could not be re-read for its id; recording it as unconfirmed.",
-                documentId);
+                "Holded {Outcome} a payment on purchase document {DocumentId} but the document could not be re-read for its id; recording it as unconfirmed.",
+                refused is null ? "accepted" : "answered " + refused.Message + " to", documentId);
             return UnconfirmedPaymentRefPrefix + documentId;
         }
 
@@ -208,6 +218,9 @@ internal sealed class HoldedPurchasesClient(HoldedTransport transport, ILogger<H
                             || string.Equals(p.BankId, treasuryId, StringComparison.Ordinal)))
             .ToList();
         if (matches.Count == 1) return matches[0].Id;
+        // Refused and nothing new on the document: it was not posted.
+        if (refused is not null && after.All(p => known.Contains(p.Id)))
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(refused);
 
         logger.LogWarning(
             "Holded accepted a payment of {Amount} dated {Date} on purchase document {DocumentId} but payments_detail shows {Count} new matching entries (before: [{Before}], after: [{After}]); recording it as unconfirmed.",
@@ -226,7 +239,11 @@ internal sealed class HoldedPurchasesClient(HoldedTransport transport, ILogger<H
         var items = await transport.GetPagedAsync("/api/v2/purchases?limit=200", pageSafetyCap, ct);
         try
         {
-            return items.Select(ParsePurchaseDoc).ToList();
+            return items.Select(n =>
+            {
+                WarnIfNotEuro(logger, n, "purchase");
+                return ParsePurchaseDoc(n);
+            }).ToList();
         }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException
             or FormatException or OverflowException)
@@ -260,13 +277,16 @@ internal sealed class HoldedPurchasesClient(HoldedTransport transport, ILogger<H
         Tax = ReadDecimalV2(Prop(n, "tax")),
         // Total feeds the budget actuals; an absent field must fail the page, not upsert 0.00.
         Total = ReadRequiredDecimalV2(Prop(n, "total"), "total"),
-        PaymentsPending = ReadDecimalV2(Prop(n, "payments_pending")),
+        // Approved documents must not disappear from the live open-document list as fabricated paid balances.
+        // Drafts can omit this field and are excluded from booking independently by their draft flag.
+        PaymentsPending = Prop(n, "draft")?.GetValue<bool>() == false
+            ? ReadRequiredDecimalV2(Prop(n, "payments_pending"), "payments_pending")
+            : ReadDecimalV2(Prop(n, "payments_pending")),
         IsDraft = Prop(n, "draft")?.GetValue<bool>(),
         Currency = Prop(n, "currency")?.GetValue<string>() ?? "eur",
         Tags = ReadTags(Prop(n, "tags")),
         Lines = Arr(Prop(n, "lines")).Select(p => new HoldedPurchaseLineDto
         {
-            Amount = ReadDecimalV2(Prop(p, "price")),
             AccountId = Prop(p, "account")?.GetValue<string>(),
             Tags = ReadTags(Prop(p, "tags")),
         }).ToList(),

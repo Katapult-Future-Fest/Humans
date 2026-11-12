@@ -169,7 +169,7 @@ Repositories: `ITicketRepository`, `ITicketTransferRepository`.
 | TicketAttendees | R/W |
 | TicketTransferRequests | R/W |
 
-Cross-section calls via `IUserService`, `IUserEmailService`,
+Cross-section calls via `IUserService` (including canonical contact email),
 `IEmailService`, the section's own `TicketsEmails` builder,
 `IAuditLogService`, plus
 `ITicketVendorService` (`ProcessTransferAsync` / `RetryReissueAsync` run the
@@ -215,7 +215,8 @@ Repository: `ITicketRepository`.
 
 Cross-section calls via `IUserEmailService`, `IAccountProvisioningService`,
 `IUserService`, `ISettingsService`,
-`IAuditLogService`. Imports attendee contact data into the system; the decorator
+`IAuditLogService`; records each matched attendee's participation through the section's own
+`IEventParticipationManagement`. Imports attendee contact data into the system; the decorator
 clears both ticket slices after `ApplyAsync`. No `IMemoryCache` directly.
 
 ### EventParticipationService (Scoped)
@@ -224,15 +225,13 @@ Repository: `IEventParticipationRepository` (Singleton, `IDbContextFactory<Ticke
 
 | Table | R/W |
 |-------|-----|
-| EventParticipations (`tickets_event_participations`) | R/W (W: member declaration, ticket sync, Gate admit via `ITicketWrite`, admin backfill, merge fold, `tickets.event-participations` copy; a `null` `Status` is a cleared record) |
+| EventParticipations (`tickets_event_participations`) | R/W (W: member declaration, ticket sync, Gate admit via `ITicketWrite`, admin backfill, merge fold; a `null` `Status` is a historical cleared row) |
 
 Implements the internal `IEventParticipationManagement` (and so `ITicketWrite`),
 `IUserDataContributor` (slice `EventParticipations`, retained on erasure) and
 `IUserMerge`. `TicketQueryService` forwards `ITicketService.GetParticipationsAsync` /
 `GetAllParticipationsAsync` to it. Cross-section calls via `IUserService`
-(`GetUserInfoAsync` to forward-resolve a merged id; `GetRawUserInfoAsync` /
-`GetAllRawUserInfosAsync` for the frozen legacy rows — the one suppressed
-`HUM_USER_PARTICIPATIONS` reader, `LegacyRows`) and `IAuditLogService`
+(`GetUserInfoAsync` to forward-resolve a merged id) and `IAuditLogService`
 (`ParticipationBackfilled`). No cache.
 
 ### UserParticipationBackfillService (Scoped)
@@ -259,18 +258,19 @@ No repository, no `IApplicationService`-derived interface (plain class, not
 part of the verifier's service inventory). Provisions and manages the shared
 gate-terminal account (`SystemUserIds.GateTerminal` — a real `User` row, not
 a person) the first time a ticket admin sets its password from
-`/Tickets/Admin/Gate`. Creates the Identity
-user via `UserManager<User>`, saves its profile through Users' canonical
-`IProfileEditorService.SaveProfileAsync`, clears its consent check via
-Consent's `IConsentWrite.RecordConsentCheckAsync`, invalidates the user-access
-cache, and logs via `IAuditLogService`. Users refreshes its own `UserInfo`
+`/Tickets/Admin/Gate`. Creates the account
+via `IAccountProvisioningService.CreateAccountAsync`, sets the password through
+`IUserSignInService`, saves its profile through Users' canonical
+`IProfileEditorService.SaveProfileAsync`, marks it fake via Users'
+`IUserWrite.MarkFakeAsync` (keeping it out of the Consent Coordinator review
+queue), and logs via `IAuditLogService`. Users refreshes its own `UserInfo`
 entry on the create and the profile save. No direct
 DB or cache access of its own — every mutation goes through another
 section's public service surface.
 
 ### TicketVendorGateway (Scoped)
 
-No repository. Thin §15-compliant facade over `ITicketVendorService` (the
+No repository. Thin design-rules-compliant facade over `ITicketVendorService` (the
 vendor port, `src/Sections/Humans.Tickets/Contracts/`) — same
 shape as `GoogleTranslationService`. Implements `ITicketDiscountCodes` +
 `ITicketVendorMirror` (`Humans.Tickets.Contracts`) so cross-section callers
@@ -279,3 +279,47 @@ leaf rather than the raw vendor port. `GateVendorCheckInJob` (`Humans.Gate`)
 is the other consumer, via `ITicketVendorMirror`. No DB access, no cache.
 
 ---
+
+### UserTicketPersonalData (internal, owned by TicketQueryService)
+
+Repositories: `ITicketRepository`, `ITicketTransferRepository`. Owns per-user
+holdings and the existing GDPR order/attendee export projections. Uses the existing
+Users and Settings contracts and clock for holdings only; export retains its
+matched-user scope and reads the ticket repository directly. The query facade
+retains contributor/erasure contracts and cache ownership remains in its decorator.
+No separate DI registration.
+
+### TicketTransferReader (internal, owned by TicketTransferService)
+
+Repositories: `ITicketTransferRepository`, `ITicketRepository`. Owns transfer
+queue/detail/confirmation reads and shared row projection; uses existing Tickets
+holdings and Users contracts for personal attendee choices and recipient snapshots.
+Mutation results reuse its row projection. No writes, cache or separate DI registration.
+
+### TicketSalesReports (internal, owned by TicketQueryService)
+
+Repository: `ITicketRepository`. Dashboard totals, sales-over-time, payment-method, discount-code,
+refund and recent-order reports for the ticket admin surface. No DI registration; the cache
+shell and decorator sit above it. No `IMemoryCache`.
+
+| Table | R/W |
+|-------|-----|
+| TicketOrders | R |
+| TicketAttendees | R (sold counts, paid attendee type and price rows) |
+| TicketSyncStates | R/W (`ResetStaleRunningStateAsync` resets a sync stuck in Running for 30 minutes) |
+
+Cross-section calls via `IBudgetService` (active year and budget summary), `ICampaignService`
+(discount-code tracking), and `IClock`.
+
+### TicketTransferNotices (internal, owned by TicketTransferService)
+
+Repository: `ITicketRepository` (read-only: `GetAttendeeByIdAsync`). Best-effort email to the sender,
+recipient and ticket holder after a transfer decision is persisted; a failed lookup or send is
+logged and never changes the outcome. No DI registration, no cache.
+
+| Table | R/W |
+|-------|-----|
+| TicketAttendees | R |
+
+Cross-section calls via `IUserService` (recipient culture and canonical contact email) and
+`IEmailService`, with the section's `TicketsEmails` builder.

@@ -43,7 +43,6 @@
   <data name="Shifts_SignedUp" xml:space="preserve">
     <value>Apuntats</value>
   </data>
-  <data name="Shifts_BreadcrumbNavigation" xml:space="preserve"><value>Ruta de navegació</value></data>
   <data name="Shifts_Pending" xml:space="preserve">
     <value>(pendent)</value>
   </data>
@@ -582,7 +581,7 @@
     <value>{0} — cap torn aquest dia</value>
   </data>
   <data name="Shifts_ShiftDash_Heatmap_Legend" xml:space="preserve">
-    <value>Llegenda</value>
+    <value>Passa el ratolí per sobre d'una cel·la per veure'n els detalls. Desplaça't horitzontalment per veure tots els dies.</value>
   </data>
   <data name="Shifts_ShiftDash_Departments_Col_Department" xml:space="preserve">
     <value>Departament</value>
@@ -981,11 +980,11 @@
     <comment>TODO: translate</comment>
   </data>
   <data name="Shifts_VolTrack_Msg_CampSetupSaved" xml:space="preserve">
-    <value>Configuració del Barrio desada</value>
+    <value>Data de muntatge del campament desada.</value>
     <comment>TODO: translate</comment>
   </data>
   <data name="Shifts_VolTrack_Msg_CampSetupCleared" xml:space="preserve">
-    <value>Configuració del Barrio esborrada</value>
+    <value>Data de muntatge del campament esborrada.</value>
     <comment>TODO: translate</comment>
   </data>
   <data name="Shifts_VolTrack_Msg_AvailabilitySet" xml:space="preserve">
@@ -1017,7 +1016,7 @@
     <comment>TODO: translate</comment>
   </data>
   <data name="Shifts_VolTrack_Err_SetupBeforeFirstSignup" xml:space="preserve">
-    <value>La configuració no pot ser abans del primer registre</value>
+    <value>La data de muntatge ha de ser igual o posterior a la primera inscripció de muntatge del voluntari.</value>
     <comment>TODO: translate</comment>
   </data>
   <data name="Shifts_ShiftDash_VolTrackEntry_Title" xml:space="preserve">
@@ -1025,7 +1024,7 @@
     <comment>TODO: translate</comment>
   </data>
   <data name="Shifts_ShiftDash_VolTrackEntry_Subtitle" xml:space="preserve">
-    <value>Estat de configuració dels Barrios</value>
+    <value>Identifica buits, marca dates de muntatge del campament i mostra voluntaris declarats però sense reserva.</value>
     <comment>TODO: translate</comment>
   </data>
   <data name="Shifts_ShiftDash_VolTrackEntry_Open" xml:space="preserve">
@@ -1156,7 +1155,7 @@
   </data>
   <data name="Shifts_DietaryMissingBanner_Title" xml:space="preserve"><value>Ens expliques les teves preferències alimentàries?</value></data>
   <data name="Shifts_DietaryMissingBanner_Body" xml:space="preserve"><value>Estàs en un torn llarg. Si ens expliques les teves preferències alimentàries, la cantina pot planificar els teus àpats. És opcional.</value></data>
-  <data name="Shifts_DietaryMissingBanner_Cta" xml:space="preserve"><value>Tell us now</value></data>
+  <data name="Shifts_DietaryMissingBanner_Cta" xml:space="preserve"><value>Digues-nos-ho ara</value></data>
   <data name="Shifts_DietaryMissingBanner_Decline" xml:space="preserve"><value>Prefereixo no respondre</value></data>
   <data name="Shifts_ViewAllMyShifts" xml:space="preserve"><value>Veure tots els meus torns</value></data>
   <data name="Shifts_SortOrder" xml:space="preserve"><value>Ordre</value></data>
@@ -1275,6 +1274,21 @@
   </data>
   <data name="Shifts_StatusReasonTooLong" xml:space="preserve"><value>El motiu no pot superar els 1000 caràcters.</value></data>
   <data name="Shifts_Bail_NotActive" xml:space="preserve"><value>Aquesta inscripció ja no està activa i no es pot cancel·lar.</value></data>
-  <data name="Shifts_Medical_RevealTitle" xml:space="preserve"><value>Mostra les dades mèdiques (cada consulta queda registrada al registre d'auditoria)</value></data>
-  <data name="Shifts_Medical_RevealFailed" xml:space="preserve"><value>No s'han pogut carregar les dades mèdiques.</value></data>
+  <data name="Shifts_Notification_CoverageGapTitle" xml:space="preserve"><value>Falta de cobertura: {0} dia {1}</value></data>
+  <data name="Shifts_Notification_CoverageGapBody" xml:space="preserve"><value>Només {0}/{1} humans confirmats.</value></data>
+  <data name="Shifts_Notification_FindCover" xml:space="preserve"><value>Cerca cobertura →</value></data>
+  <data name="Shifts_Notification_SignupChangeTitle" xml:space="preserve"><value>Canvi d’inscripció a un torn: {0}</value></data>
+  <data name="Shifts_Notification_View" xml:space="preserve"><value>Mostra →</value></data>
+  <data name="Shifts_Notification_ChangeConfirmed" xml:space="preserve"><value>Nova inscripció confirmada per a '{0}' el dia {1}.</value></data>
+  <data name="Shifts_Notification_ChangeApproved" xml:space="preserve"><value>Inscripció aprovada per a '{0}' el dia {1}.</value></data>
+  <data name="Shifts_Notification_ChangeRefused" xml:space="preserve"><value>Inscripció rebutjada per a '{0}' el dia {1}.</value></data>
+  <data name="Shifts_Notification_ChangeBailed" xml:space="preserve"><value>Un human ha cancel·lat la inscripció a '{0}' el dia {1}.</value></data>
+  <data name="Shifts_Notification_ChangeAssigned" xml:space="preserve"><value>Assignació a '{0}' el dia {1}.</value></data>
+  <data name="Shifts_Notification_ChangeRemoved" xml:space="preserve"><value>Inscripció eliminada de '{0}' el dia {1}.</value></data>
+  <data name="Shifts_Notification_ChangeAssignedRange" xml:space="preserve"><value>Assignació a '{0}' ({1} torns).</value></data>
+  <data name="Shifts_Notification_ChangeConfirmedRange" xml:space="preserve"><value>Inscripció a diversos torns de '{0}' ({1} torns, confirmats).</value></data>
+  <data name="Shifts_Notification_ChangeApprovedRange" xml:space="preserve"><value>Inscripció a diversos torns de '{0}' aprovada ({1} torns).</value></data>
+  <data name="Shifts_Notification_ChangeRefusedRange" xml:space="preserve"><value>Inscripció a diversos torns de '{0}' rebutjada ({1} torns).</value></data>
+  <data name="Shifts_Notification_ChangeBailedRange" xml:space="preserve"><value>Cancel·lació de diversos torns de '{0}' ({1} torns).</value></data>
+  <data name="Shifts_TagPreferencesInvalid" xml:space="preserve"><value>Algunes etiquetes seleccionades ja no estan disponibles. Revisa la selecció i torna-ho a provar.</value></data>
 </root>

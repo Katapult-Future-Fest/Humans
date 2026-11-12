@@ -1,3 +1,4 @@
+using System.Globalization;
 using CsvHelper;
 using Humans.Base.Csv;
 using Humans.Settings.Contracts;
@@ -33,7 +34,14 @@ internal sealed class UserParticipationBackfillService(
 
         if (!apply)
         {
-            var previewCsv = "UserId,Status\n" + string.Join("\n", entries.Select(e => $"{e.UserId},{e.Status}"));
+            using var preview = new StringWriter(CultureInfo.InvariantCulture);
+            using (var csv = CsvWriter.Create(preview, HumansCsv.WriteConfig(), leaveOpen: true))
+            {
+                csv.WriteRow("UserId", "Status");
+                foreach (var entry in entries)
+                    csv.WriteRow(entry.UserId, entry.Status);
+            }
+            var previewCsv = preview.ToString();
             return new ParticipationBackfillResult(true,
                 $"Review {entries.Count} valid participation row(s) for {year} before importing.", entries.Count, previewCsv);
         }
@@ -46,20 +54,15 @@ internal sealed class UserParticipationBackfillService(
     /// count).</summary>
     private static List<(Guid UserId, ParticipationStatus Status)> ParseEntries(string csvData)
     {
-        var config = HumansCsv.ReadConfig();
-        config.HasHeaderRecord = false;
-
         var entries = new List<(Guid UserId, ParticipationStatus Status)>();
-        using var reader = new StringReader(csvData);
-        using var csv = new CsvReader(reader, config);
+        using var csv = CsvReader.FromText(csvData, HumansCsv.ReadConfig() with { HasHeader = false });
 
         while (csv.Read())
         {
-            if (csv.Parser.Count < 2) continue;
-            var first = csv.GetField(0);
-            if (string.Equals(first, "UserId", StringComparison.OrdinalIgnoreCase)) continue;
+            if (csv.FieldCount < 2) continue;
+            var first = csv.GetString(0);
             if (!Guid.TryParse(first, out var userId)) continue;
-            if (!Enum.TryParse<ParticipationStatus>(csv.GetField(1), ignoreCase: true, out var status) ||
+            if (!Enum.TryParse<ParticipationStatus>(csv.GetString(1), ignoreCase: true, out var status) ||
                 !Enum.IsDefined(status)) continue;
 
             entries.Add((userId, status));

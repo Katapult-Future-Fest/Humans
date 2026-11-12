@@ -48,6 +48,7 @@ internal sealed class ProcessAccountDeletionsJob(
                 dueUserIds.Count);
 
             var processed = 0;
+            var failures = new List<Exception>();
 
             foreach (var userId in dueUserIds)
             {
@@ -71,7 +72,7 @@ internal sealed class ProcessAccountDeletionsJob(
                         "Account anonymized",
                         nameof(ProcessAccountDeletionsJob));
 
-                    if (!string.IsNullOrEmpty(summary.OriginalEmail))
+                    if (!string.IsNullOrWhiteSpace(summary.OriginalEmail))
                     {
                         // Sent without an outbox row, so a transport failure is terminal; the
                         // erasure already succeeded and must not be reported as failed or retried.
@@ -92,6 +93,11 @@ internal sealed class ProcessAccountDeletionsJob(
                                 "could not be delivered: {ExceptionType}", userId, ex.GetType().Name);
                         }
                     }
+                    else
+                    {
+                        logger.LogWarning("Account {UserId} was anonymized but its deletion confirmation was skipped: no notification email",
+                            userId);
+                    }
 
                     processed++;
 
@@ -101,11 +107,15 @@ internal sealed class ProcessAccountDeletionsJob(
                 }
                 catch (Exception ex)
                 {
+                    failures.Add(ex);
                     logger.LogError(ex,
                         "Failed to process deletion for user {UserId}",
                         userId);
                 }
             }
+
+            if (failures.Count > 0)
+                throw new AggregateException("Failed to process one or more account deletions.", failures);
 
             metrics.RecordJobRun("process_account_deletions", "success");
             logger.LogInformation(

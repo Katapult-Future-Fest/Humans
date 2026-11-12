@@ -5,7 +5,7 @@
     string ActiveCls(string t) => Model.ActiveTab == t ? "active" : "";
 }
 
-<h1>Ticket transfer requests</h1>
+<page-header title="Ticket transfer requests" />
 
 
 @if (Model.Drift.Count > 0)
@@ -47,27 +47,23 @@
 
 @if (Model.Rows.Count == 0)
 {
-    <p class="text-muted">No transfers in this view.</p>
+    <empty-state>No transfers in this view.</empty-state>
 }
 else
 {
-    Func<TicketTransferRowDto, IHtmlContent> requesterCell =
-        @<text><vc:human user-id="@item.SenderUserId" layout="AvatarName" link="Admin" /></text>;
     Func<TicketTransferRowDto, IHtmlContent> ticketCell = @<text>
         @item.OriginalAttendeeName
         <br /><small class="text-muted">@item.TicketTypeName</small>
     </text>;
-    Func<TicketTransferRowDto, IHtmlContent> recipientCell =
-        @<text><vc:human user-id="@item.ReceiverUserId" layout="AvatarName" link="Admin" /></text>;
     Func<TicketTransferRowDto, IHtmlContent> statusCell =
         @<text><span class="badge bg-secondary">@item.Status</span></text>;
     Func<TicketTransferRowDto, IHtmlContent> reviewCell =
         @<text><a class="btn btn-sm btn-primary" asp-action="Detail" asp-route-id="@item.Id">Review</a></text>;
     var table = TableModel.For(Model.Rows.ToList())
         .Column("Requested", r => r.RequestedAt, c => c.DateTime())
-        .Template("Requester", requesterCell)
+        .Human("Requester", r => r.SenderUserId, HumanLink.Admin, HumanLayout.AvatarName)
         .Template("Ticket", ticketCell)
-        .Template("Recipient", recipientCell)
+        .Human("Recipient", r => r.ReceiverUserId, HumanLink.Admin, HumanLayout.AvatarName)
         .Column("Reason", r => r.SenderReason)
         .Template("Status", statusCell)
         .Template("", reviewCell, c => c.NoSort())

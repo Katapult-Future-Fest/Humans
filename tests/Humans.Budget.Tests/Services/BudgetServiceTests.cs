@@ -70,19 +70,177 @@ public sealed class BudgetServiceTests
             NullLogger<BudgetServiceImpl>.Instance);
     }
 
+    public enum BudgetRead
+    {
+        ActiveYear,
+        YearById,
+        LineItemById
+    }
+
+    public enum BudgetAdminMutation
+    {
+        SyncDepartments,
+        CreateYear,
+        UpdateYearStatus,
+        UpdateYear,
+        DeleteYear,
+        CreateGroup,
+        UpdateGroup,
+        DeleteGroup,
+        CreateCategory,
+        UpdateCategory,
+        DeleteCategory,
+        CreateLineItem,
+        UpdateLineItem,
+        DeleteLineItem,
+        EnsureTicketingGroup,
+        UpdateTicketingProjection,
+        SyncTicketingBudget
+    }
+
+    public enum LineItemMutation
+    {
+        Create,
+        Update,
+        Delete
+    }
+
+    public enum PreflightBoundary
+    {
+        ActorLookup,
+        LineItemRead,
+        CategoryRead
+    }
+
     [HumansTheory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task YearReads_CancelledRead_AbortsRepositoryQuery(bool active)
+    [InlineData(BudgetRead.ActiveYear)]
+    [InlineData(BudgetRead.YearById)]
+    [InlineData(BudgetRead.LineItemById)]
+    public async Task BudgetReads_CancelledRead_AbortsRepositoryQuery(BudgetRead read)
     {
         using var request = new CancellationTokenSource();
         await request.CancelAsync();
 
-        var read = () => active
-            ? _service.GetActiveYearAsync(request.Token)
-            : _service.GetYearByIdAsync(_yearId, request.Token);
+        Func<Task> run = () => read switch
+        {
+            BudgetRead.ActiveYear => _service.GetActiveYearAsync(request.Token),
+            BudgetRead.YearById => _service.GetYearByIdAsync(_yearId, request.Token),
+            _ => _service.GetLineItemByIdAsync(_yearId, request.Token)
+        };
 
-        await read.Should().ThrowAsync<OperationCanceledException>();
+        await run.Should().ThrowAsync<OperationCanceledException>();
+    }
+
+    [HumansTheory]
+    [InlineData(BudgetAdminMutation.SyncDepartments)]
+    [InlineData(BudgetAdminMutation.CreateYear)]
+    [InlineData(BudgetAdminMutation.UpdateYearStatus)]
+    [InlineData(BudgetAdminMutation.UpdateYear)]
+    [InlineData(BudgetAdminMutation.DeleteYear)]
+    [InlineData(BudgetAdminMutation.CreateGroup)]
+    [InlineData(BudgetAdminMutation.UpdateGroup)]
+    [InlineData(BudgetAdminMutation.DeleteGroup)]
+    [InlineData(BudgetAdminMutation.CreateCategory)]
+    [InlineData(BudgetAdminMutation.UpdateCategory)]
+    [InlineData(BudgetAdminMutation.DeleteCategory)]
+    [InlineData(BudgetAdminMutation.CreateLineItem)]
+    [InlineData(BudgetAdminMutation.UpdateLineItem)]
+    [InlineData(BudgetAdminMutation.DeleteLineItem)]
+    [InlineData(BudgetAdminMutation.EnsureTicketingGroup)]
+    [InlineData(BudgetAdminMutation.UpdateTicketingProjection)]
+    [InlineData(BudgetAdminMutation.SyncTicketingBudget)]
+    public async Task AdminMutations_CancelAccountLookupBeforeFinancialWrites(BudgetAdminMutation action)
+    {
+        using var request = new CancellationTokenSource();
+        var users = Substitute.For<IUserService>();
+        users.GetUserInfoAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns(call =>
+        {
+            call.Arg<CancellationToken>().ThrowIfCancellationRequested();
+            return new ValueTask<UserInfo?>(UserInfo.Create(new User { Id = call.Arg<Guid>() }, [], [], null));
+        });
+        var (controller, budget, _) = CreateAdminController(true, identityUsers: users);
+        budget.UpdateYearStatusAsync(Arg.Any<Guid>(), Arg.Any<BudgetYearStatus>(), Arg.Any<Guid>()).Returns(new BudgetYearMutationResult());
+        budget.UpdateYearAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<Guid>())
+            .Returns(new BudgetYearMutationResult());
+        budget.DeleteYearAsync(Arg.Any<Guid>(), Arg.Any<Guid>()).Returns(new BudgetYearMutationResult());
+        controller.HttpContext.RequestAborted = request.Token;
+        budget.ClearReceivedCalls();
+        await request.CancelAsync();
+        Func<Task<IActionResult>> run = () => action switch
+        {
+            BudgetAdminMutation.SyncDepartments => controller.SyncDepartments(_yearId),
+            BudgetAdminMutation.CreateYear => controller.CreateYear("2026", "Budget"),
+            BudgetAdminMutation.UpdateYearStatus => controller.UpdateYearStatus(_yearId, BudgetYearStatus.Active),
+            BudgetAdminMutation.UpdateYear => controller.UpdateYear(_yearId, "2026", "Budget", null),
+            BudgetAdminMutation.DeleteYear => controller.DeleteYear(_yearId),
+            BudgetAdminMutation.CreateGroup => controller.CreateGroup(_yearId, "Group", false),
+            BudgetAdminMutation.UpdateGroup => controller.UpdateGroup(_yearId, "Group", 0, false),
+            BudgetAdminMutation.DeleteGroup => controller.DeleteGroup(_yearId),
+            BudgetAdminMutation.CreateCategory => controller.CreateCategory(_yearId, "Category", 1m, default, null, _yearId),
+            BudgetAdminMutation.UpdateCategory => controller.UpdateCategory(_yearId, "Category", 1m, default),
+            BudgetAdminMutation.DeleteCategory => controller.DeleteCategory(_yearId, _yearId),
+            BudgetAdminMutation.CreateLineItem => controller.CreateLineItem(_yearId, "Line", 1m, null, null, null, 21),
+            BudgetAdminMutation.UpdateLineItem => controller.UpdateLineItem(_yearId, "Line", 1m, null, null, null, 21, _yearId),
+            BudgetAdminMutation.DeleteLineItem => controller.DeleteLineItem(_yearId, _yearId),
+            BudgetAdminMutation.EnsureTicketingGroup => controller.EnsureTicketingGroup(_yearId),
+            BudgetAdminMutation.UpdateTicketingProjection => controller.UpdateTicketingProjection(_yearId, new TicketingProjectionUpdateForm { BudgetYearId = _yearId }),
+            _ => controller.SyncTicketingBudget(_yearId)
+        };
+        await run.Should().ThrowAsync<OperationCanceledException>();
+        budget.ReceivedCalls().Should().BeEmpty();
+    }
+
+    [HumansTheory]
+    [InlineData(LineItemMutation.Create, PreflightBoundary.ActorLookup)]
+    [InlineData(LineItemMutation.Create, PreflightBoundary.CategoryRead)]
+    [InlineData(LineItemMutation.Update, PreflightBoundary.ActorLookup)]
+    [InlineData(LineItemMutation.Update, PreflightBoundary.LineItemRead)]
+    [InlineData(LineItemMutation.Update, PreflightBoundary.CategoryRead)]
+    [InlineData(LineItemMutation.Delete, PreflightBoundary.ActorLookup)]
+    [InlineData(LineItemMutation.Delete, PreflightBoundary.LineItemRead)]
+    [InlineData(LineItemMutation.Delete, PreflightBoundary.CategoryRead)]
+    public async Task MemberMutations_CancelPreflightBeforeLineItemWrites(LineItemMutation action, PreflightBoundary boundary)
+    {
+        using var request = new CancellationTokenSource();
+        var users = Substitute.For<IUserService>();
+        async ValueTask<UserInfo?> ReadUserAsync(Guid id, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (boundary == PreflightBoundary.LineItemRead
+                || (action == LineItemMutation.Create && boundary == PreflightBoundary.CategoryRead))
+                await request.CancelAsync();
+            return UserInfo.Create(new User { Id = id }, [], [], null);
+        }
+        users.GetUserInfoAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns(call => ReadUserAsync(call.Arg<Guid>(), call.Arg<CancellationToken>()));
+        var (admin, budget, _) = CreateAdminController(true, identityUsers: users);
+        budget.GetLineItemByIdAsync(_yearId, Arg.Any<CancellationToken>()).Returns<Task<BudgetLineItemSnapshot?>>(async call =>
+        {
+            call.Arg<CancellationToken>().ThrowIfCancellationRequested();
+            if (boundary == PreflightBoundary.CategoryRead) await request.CancelAsync();
+            return new BudgetLineItemSnapshot(_yearId, _yearId, "Line", 1m, null, null, null, 21, false, false, 0);
+        });
+        budget.GetCategoryByIdAsync(_yearId, Arg.Any<CancellationToken>()).Returns(call =>
+        {
+            call.Arg<CancellationToken>().ThrowIfCancellationRequested();
+            return new BudgetCategorySnapshot(_yearId, _yearId, "Category", 1m, default, null, 0, null, []);
+        });
+        var auth = Substitute.For<IAuthorizationService>();
+        auth.AuthorizeAsync(Arg.Any<ClaimsPrincipal>(), Arg.Any<object>(), Arg.Any<IEnumerable<IAuthorizationRequirement>>())
+            .Returns(AuthorizationResult.Success());
+        var localizer = Substitute.For<IStringLocalizer<BudgetResource>>();
+        localizer[Arg.Any<string>()].Returns(call => new LocalizedString(call.Arg<string>(), call.Arg<string>()));
+        var controller = new BudgetController(budget, auth, users, localizer, NullLogger<BudgetController>.Instance)
+        { ControllerContext = admin.ControllerContext, TempData = admin.TempData, Url = admin.Url };
+        controller.HttpContext.RequestAborted = request.Token;
+        if (boundary == PreflightBoundary.ActorLookup) await request.CancelAsync();
+        Func<Task<IActionResult>> run = () => action switch
+        {
+            LineItemMutation.Create => controller.CreateLineItem(_yearId, "Line", 1m, null, null, null, 21),
+            LineItemMutation.Update => controller.UpdateLineItem(_yearId, "Line", 1m, null, null, null, 21),
+            _ => controller.DeleteLineItem(_yearId)
+        };
+        await run.Should().ThrowAsync<OperationCanceledException>();
+        budget.ReceivedCalls().Should().OnlyContain(call => call.GetMethodInfo().Name.StartsWith("Get", StringComparison.Ordinal));
     }
 
     [HumansTheory]
@@ -139,7 +297,7 @@ public sealed class BudgetServiceTests
         var users = Substitute.For<IUserService>();
         users.GetUserInfoAsync(viewerId, Arg.Any<CancellationToken>()).Returns(_ => cancelActorRead
             ? new ValueTask<UserInfo?>(Task.FromException<UserInfo?>(new OperationCanceledException(request.Token)))
-            : new ValueTask<UserInfo?>(UserInfo.Create(new User { Id = viewerId }, [], [], [], null, [])));
+            : new ValueTask<UserInfo?>(UserInfo.Create(new User { Id = viewerId }, [], [], null)));
         var auth = Substitute.For<IAuthorizationService>();
         auth.AuthorizeAsync(Arg.Any<ClaimsPrincipal>(), Arg.Any<object?>(), Arg.Any<string>())
             .Returns(AuthorizationResult.Success());
@@ -332,8 +490,7 @@ public sealed class BudgetServiceTests
         else
         {
             await budget.Received(1).UpdateTicketingProjectionAsync(_yearId, null, null,
-                0, 0m, 0m, 0, 0m, 0m, 0m, viewerId);
-            await budget.Received(1).RefreshTicketingProjectionsAsync(_yearId, viewerId, Arg.Any<CancellationToken>());
+                0, 0m, 0m, 0, 0m, 0m, 0m, viewerId, refreshProjections: true, Arg.Any<CancellationToken>());
         }
     }
 
@@ -393,8 +550,7 @@ public sealed class BudgetServiceTests
             result.Should().BeOfType<RedirectToActionResult>();
             await budget.Received(1).UpdateTicketingProjectionAsync(_yearId, null, null,
                 zero ? 0 : 123, zero ? 0m : 5m, zero ? 0m : 120m, zero ? 0 : 21,
-                zero ? 0m : 1.5m, zero ? 0m : 0.3m, zero ? 0m : 0.5m, viewerId);
-            await budget.Received(1).RefreshTicketingProjectionsAsync(_yearId, viewerId, Arg.Any<CancellationToken>());
+                zero ? 0m : 1.5m, zero ? 0m : 0.3m, zero ? 0m : 0.5m, viewerId, refreshProjections: true, Arg.Any<CancellationToken>());
         }
         if (!viewerExists || omitted.Length > 0) budget.ReceivedCalls().Should().BeEmpty();
     }
@@ -404,6 +560,7 @@ public sealed class BudgetServiceTests
     [InlineData("foreignYear")]
     [InlineData("missingGroup")]
     [InlineData("valid")]
+    [InlineData("invalidVat")]
     public async Task Projection_update_validates_group_year_before_parameters_or_forecasts(string scenario)
     {
         var seeded = await SeedTicketingYearAsync();
@@ -422,7 +579,7 @@ public sealed class BudgetServiceTests
             InitialSalesCount = 10,
             DailySalesRate = 5m,
             AverageTicketPrice = 120m,
-            VatRate = 21,
+            VatRate = string.Equals(scenario, "invalidVat", StringComparison.Ordinal) ? 22 : 21,
             StripeFeePercent = 1.5m,
             StripeFeeFixed = 0.3m,
             TicketTailorFeePercent = 0.5m
@@ -434,7 +591,13 @@ public sealed class BudgetServiceTests
         if (!valid)
         {
             (await db.BudgetAuditLogs.CountAsync(TestContext.Current.CancellationToken)).Should().Be(0);
-            result.Should().BeOfType<NotFoundResult>();
+            if (string.Equals(scenario, "invalidVat", StringComparison.Ordinal))
+            {
+                result.Should().BeOfType<RedirectToActionResult>();
+                controller.TempData["ErrorMessage"].Should().Be("VAT rate must be between 0 and 21.");
+            }
+            else
+                result.Should().BeOfType<NotFoundResult>();
             controller.TempData.ContainsKey("SuccessMessage").Should().BeFalse();
         }
         else
@@ -442,7 +605,47 @@ public sealed class BudgetServiceTests
             result.Should().BeOfType<RedirectToActionResult>();
             saved.DailySalesRate.Should().Be(5m);
             saved.AverageTicketPrice.Should().Be(120m);
+            (await db.BudgetLineItems.CountAsync(TestContext.Current.CancellationToken)).Should().BeGreaterThan(0);
+            (await db.BudgetAuditLogs.ToListAsync(TestContext.Current.CancellationToken))
+                .Should().ContainSingle().Which.Description.Should().Contain("Updated ticketing projection parameters; refreshed");
             controller.TempData.ContainsKey("SuccessMessage").Should().BeTrue();
+        }
+    }
+
+    [HumansFact]
+    public async Task Projection_update_does_not_commit_parameters_or_audit_when_projected_rows_fail_to_save()
+    {
+        var factory = new TestDbContextFactory<BudgetDbContext>(new DbContextOptionsBuilder<BudgetDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .AddInterceptors(new RejectProjectedRowSave())
+            .Options);
+        var seeded = await SeedTicketingYearAsync(factory);
+        var repository = new BudgetRepository(factory, NullLogger<BudgetRepository>.Instance);
+        var budget = new BudgetServiceImpl(repository, _teamService, _userService, Clock, NullLogger<BudgetServiceImpl>.Instance);
+        var ticketing = new TicketingBudgetService(Substitute.For<ITicketService>(), budget, Clock,
+            NullLogger<TicketingBudgetService>.Instance);
+        var command = new TicketingProjectionUpdateCommand(seeded.GroupId, _yearId,
+            new LocalDate(2026, 4, 1), new LocalDate(2026, 4, 7), 10, 5m, 120m, 21, 1.5m, 0.3m, 0.5m);
+
+        Func<Task> save = async () => { await ticketing.UpdateProjectionAndRefreshAsync(command, Guid.NewGuid(), TestContext.Current.CancellationToken); };
+
+        await save.Should().ThrowAsync<InvalidOperationException>().WithMessage("Projected row save failed");
+        await using var verify = await factory.CreateDbContextAsync(TestContext.Current.CancellationToken);
+        var projection = await verify.TicketingProjections.SingleAsync(TestContext.Current.CancellationToken);
+        projection.StartDate.Should().BeNull();
+        projection.InitialSalesCount.Should().Be(0);
+        (await verify.BudgetLineItems.CountAsync(TestContext.Current.CancellationToken)).Should().Be(0);
+        (await verify.BudgetAuditLogs.CountAsync(TestContext.Current.CancellationToken)).Should().Be(0);
+    }
+
+    private sealed class RejectProjectedRowSave : SaveChangesInterceptor
+    {
+        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            if (eventData.Context?.ChangeTracker.Entries<BudgetLineItem>().Any(entry => entry.State == EntityState.Added) == true)
+                throw new InvalidOperationException("Projected row save failed");
+            return ValueTask.FromResult(result);
         }
     }
 
@@ -509,17 +712,17 @@ public sealed class BudgetServiceTests
         }
     }
 
-    private (BudgetAdminController Controller, IBudgetManagement Budget, Guid ViewerId) CreateAdminController(bool viewerExists, IBudgetManagement? budgetOverride = null)
+    private (BudgetAdminController Controller, IBudgetManagement Budget, Guid ViewerId) CreateAdminController(bool viewerExists, IBudgetManagement? budgetOverride = null, IUserService? identityUsers = null)
     {
         var viewerId = Guid.NewGuid();
         var budget = Substitute.For<IBudgetManagement>();
         budget.GetYearByIdAsync(_yearId, Arg.Any<CancellationToken>()).Returns(
             new BudgetYearDetail(_yearId, "2026", "Budget", BudgetYearStatus.Active, false,
                 [new BudgetGroupDetail(_yearId, _yearId, "Ticketing", 0, false, false, true, null, [])]));
-        var users = Substitute.For<IUserService>();
-        if (viewerExists)
+        var users = identityUsers ?? Substitute.For<IUserService>();
+        if (viewerExists && identityUsers is null)
             users.GetUserInfoAsync(viewerId, Arg.Any<CancellationToken>()).Returns(
-                UserInfo.Create(new User { Id = viewerId }, [], [], [], null, []));
+                UserInfo.Create(new User { Id = viewerId }, [], [], null));
         var tickets = Substitute.For<ITicketService>();
         var http = new DefaultHttpContext
         {
@@ -528,7 +731,7 @@ public sealed class BudgetServiceTests
         };
         var controller = new BudgetAdminController(budgetOverride ?? budget, _teamService,
             new TicketingBudgetService(tickets, budgetOverride ?? budget, Clock, NullLogger<TicketingBudgetService>.Instance),
-            Clock, users, Substitute.For<IHoldedFinanceService>(),
+            Clock, users, Substitute.For<IFinanceService>(),
             NullLogger<BudgetAdminController>.Instance)
         {
             ControllerContext = new ControllerContext { HttpContext = http },
@@ -625,7 +828,7 @@ public sealed class BudgetServiceTests
         var (admin, budget, viewerId) = CreateAdminController(true);
         var users = Substitute.For<IUserService>();
         users.GetUserInfoAsync(viewerId, Arg.Any<CancellationToken>()).Returns(
-            UserInfo.Create(new User { Id = viewerId }, [], [], [], null, []));
+            UserInfo.Create(new User { Id = viewerId }, [], [], null));
         var category = new BudgetCategorySnapshot(_yearId, _yearId, "Category", 0m, default, null, 0, null, []);
         budget.GetCategoryByIdAsync(_yearId).Returns(category);
         budget.GetLineItemByIdAsync(_yearId).Returns(new BudgetLineItemSnapshot(
@@ -671,12 +874,13 @@ public sealed class BudgetServiceTests
     [InlineData("Delete", "Budget_Flash_LineDeleteFailed", false)]
     [InlineData("Create", "Budget_Flash_LineCreateFailed", true)]
     [InlineData("Update", "Budget_Flash_LineUpdateFailed", true)]
+    [InlineData("Delete", "Budget_Flash_LineDeleteFailed", true)]
     public async Task CoordinatorLineFailure_DisplaysGenericLocalizedMessage(string action, string errorKey, bool refused)
     {
         var (admin, budget, viewerId) = CreateAdminController(true);
         var users = Substitute.For<IUserService>();
         users.GetUserInfoAsync(viewerId, Arg.Any<CancellationToken>()).Returns(
-            UserInfo.Create(new User { Id = viewerId }, [], [], [], null, []));
+            UserInfo.Create(new User { Id = viewerId }, [], [], null));
         var category = new BudgetCategorySnapshot(_yearId, _yearId, "Category", 0m, default, null, 0, null, []);
         budget.GetCategoryByIdAsync(_yearId).Returns(category);
         budget.GetLineItemByIdAsync(_yearId).Returns(new BudgetLineItemSnapshot(
@@ -689,12 +893,13 @@ public sealed class BudgetServiceTests
             .Returns(Task.FromException<BudgetSaveResult<BudgetLineItemSnapshot>>(failure));
         budget.UpdateLineItemAsync(_yearId, "Item", 0m, null, null, null, 0, viewerId)
             .Returns(Task.FromException<BudgetSaveResult<BudgetLineItemSnapshot>>(failure));
-        budget.DeleteLineItemAsync(_yearId, viewerId).Returns(Task.FromException(failure));
+        budget.DeleteLineItemAsync(_yearId, viewerId).Returns(Task.FromException<BudgetSaveResult<BudgetLineItemSnapshot>>(failure));
         if (refused)
         {
             var refusal = new BudgetSaveResult<BudgetLineItemSnapshot>(Refusal: "Amount cannot be stored exactly.");
             budget.CreateLineItemAsync(_yearId, "Item", 0m, null, null, null, 0, viewerId).Returns(refusal);
             budget.UpdateLineItemAsync(_yearId, "Item", 0m, null, null, null, 0, viewerId).Returns(refusal);
+            budget.DeleteLineItemAsync(_yearId, viewerId).Returns(new BudgetSaveResult<BudgetLineItemSnapshot>(Refusal: "Line item no longer exists."));
         }
         var resources = new System.Resources.ResourceManager(typeof(BudgetResource));
         var culture = CultureInfo.GetCultureInfo("en");
@@ -730,6 +935,39 @@ public sealed class BudgetServiceTests
         log[0].Should().Be(refused ? Microsoft.Extensions.Logging.LogLevel.Warning : Microsoft.Extensions.Logging.LogLevel.Error);
         if (refused) log[3].Should().BeNull();
         else log[3].Should().BeSameAs(failure);
+    }
+
+    [HumansTheory]
+    [InlineData("update-group")]
+    [InlineData("delete-group")]
+    [InlineData("update-category")]
+    [InlineData("delete-category")]
+    [InlineData("update-line")]
+    [InlineData("delete-line")]
+    public async Task MissingMutationTarget_ShowsRefusalWithoutSuccessOrWrites(string operation)
+    {
+        var missingId = Guid.NewGuid();
+        var (controller, _, _) = CreateAdminController(true, _service);
+        var result = operation switch
+        {
+            "update-group" => await controller.UpdateGroup(missingId, "Group", 0, false),
+            "delete-group" => await controller.DeleteGroup(missingId),
+            "update-category" => await controller.UpdateCategory(missingId, "Category", 0m, ExpenditureType.OpEx),
+            "delete-category" => await controller.DeleteCategory(missingId, _yearId),
+            "update-line" => await controller.UpdateLineItem(missingId, "Line", 0m, null, null, null, 0, _yearId),
+            _ => await controller.DeleteLineItem(missingId, _yearId)
+        };
+
+        result.Should().BeOfType<RedirectToActionResult>();
+        var entity = operation.EndsWith("group", StringComparison.Ordinal) ? "group"
+            : operation.EndsWith("category", StringComparison.Ordinal) ? "category" : "line item";
+        controller.TempData["ErrorMessage"].Should().Be($"Budget {entity} {missingId} not found");
+        controller.TempData.ContainsKey("SuccessMessage").Should().BeFalse();
+        await using var db = await BudgetDbFactory.CreateDbContextAsync(TestContext.Current.CancellationToken);
+        (await db.BudgetGroups.CountAsync(TestContext.Current.CancellationToken)).Should().Be(0);
+        (await db.BudgetCategories.CountAsync(TestContext.Current.CancellationToken)).Should().Be(0);
+        (await db.BudgetLineItems.CountAsync(TestContext.Current.CancellationToken)).Should().Be(0);
+        (await db.BudgetAuditLogs.CountAsync(TestContext.Current.CancellationToken)).Should().Be(0);
     }
 
     [HumansTheory]
@@ -886,8 +1124,11 @@ public sealed class BudgetServiceTests
             vatRate,
             Guid.NewGuid());
 
-        await act.Should().ThrowAsync<ArgumentOutOfRangeException>()
-            .WithMessage("*between 0 and 21*");
+        var result = await act();
+        result.Refusal.Should().Be("VAT rate must be between 0 and 21.");
+        await using var db = await BudgetDbFactory.CreateDbContextAsync(TestContext.Current.CancellationToken);
+        (await db.BudgetAuditLogs.CountAsync(TestContext.Current.CancellationToken)).Should().Be(0);
+        (await db.BudgetLineItems.CountAsync(TestContext.Current.CancellationToken)).Should().Be(0);
     }
 
     [HumansTheory]
@@ -974,8 +1215,92 @@ public sealed class BudgetServiceTests
             vatRate,
             Guid.NewGuid());
 
-        await act.Should().ThrowAsync<ArgumentOutOfRangeException>()
-            .WithMessage("*between 0 and 21*");
+        var result = await act();
+        result.Refusal.Should().Be("VAT rate must be between 0 and 21.");
+        await using var db = await BudgetDbFactory.CreateDbContextAsync(TestContext.Current.CancellationToken);
+        (await db.BudgetAuditLogs.CountAsync(TestContext.Current.CancellationToken)).Should().Be(0);
+        var persisted = await db.BudgetLineItems.SingleAsync(TestContext.Current.CancellationToken);
+        persisted.VatRate.Should().Be(0);
+        persisted.Amount.Should().Be(100m);
+    }
+
+    public enum ProjectionDecimalField
+    {
+        DailySalesRate,
+        AverageTicketPrice,
+        StripeFeePercent,
+        StripeFeeFixed,
+        TicketTailorFeePercent
+    }
+
+    [HumansTheory]
+    [InlineData(ProjectionDecimalField.DailySalesRate, "0.001")]
+    [InlineData(ProjectionDecimalField.DailySalesRate, "10000000000000000")]
+    [InlineData(ProjectionDecimalField.AverageTicketPrice, "-1.005")]
+    [InlineData(ProjectionDecimalField.AverageTicketPrice, "-10000000000000000")]
+    [InlineData(ProjectionDecimalField.StripeFeeFixed, "0.001")]
+    [InlineData(ProjectionDecimalField.StripeFeeFixed, "10000000000000000")]
+    [InlineData(ProjectionDecimalField.StripeFeePercent, "0.00001")]
+    [InlineData(ProjectionDecimalField.StripeFeePercent, "100000000000000")]
+    [InlineData(ProjectionDecimalField.TicketTailorFeePercent, "-0.00001")]
+    [InlineData(ProjectionDecimalField.TicketTailorFeePercent, "-100000000000000")]
+    public async Task ProjectionDecimal_RefusesRoundingAndOverflowBeforeParametersForecastsOrAudit(
+        ProjectionDecimalField field, string rawValue)
+    {
+        var seeded = await SeedTicketingYearAsync();
+        var value = decimal.Parse(rawValue, CultureInfo.InvariantCulture);
+
+        var result = await _service.UpdateTicketingProjectionAsync(
+            seeded.GroupId, new LocalDate(2026, 4, 1), new LocalDate(2026, 4, 7), 10,
+            dailySalesRate: field == ProjectionDecimalField.DailySalesRate ? value : 5m,
+            averageTicketPrice: field == ProjectionDecimalField.AverageTicketPrice ? value : 120m,
+            vatRate: 10,
+            stripeFeePercent: field == ProjectionDecimalField.StripeFeePercent ? value : 1.5m,
+            stripeFeeFixed: field == ProjectionDecimalField.StripeFeeFixed ? value : 0.3m,
+            ticketTailorFeePercent: field == ProjectionDecimalField.TicketTailorFeePercent ? value : 0.5m,
+            actorUserId: Guid.NewGuid(), refreshProjections: true, ct: TestContext.Current.CancellationToken);
+
+        result.Refusal.Should().NotBeNull();
+        await using var db = await BudgetDbFactory.CreateDbContextAsync(TestContext.Current.CancellationToken);
+        var saved = await db.TicketingProjections.SingleAsync(TestContext.Current.CancellationToken);
+        saved.Should().BeEquivalentTo(new
+        {
+            StartDate = (LocalDate?)null,
+            EventDate = (LocalDate?)null,
+            InitialSalesCount = 0,
+            DailySalesRate = 0m,
+            AverageTicketPrice = 0m,
+            StripeFeePercent = 0m,
+            StripeFeeFixed = 0m,
+            TicketTailorFeePercent = 0m,
+        });
+        (await db.BudgetLineItems.CountAsync(TestContext.Current.CancellationToken)).Should().Be(0);
+        (await db.BudgetAuditLogs.CountAsync(TestContext.Current.CancellationToken)).Should().Be(0);
+    }
+
+    [HumansTheory]
+    [InlineData("0", "0")]
+    [InlineData("-1.2300", "-1.234500")]
+    [InlineData("9999999999999999.99", "99999999999999.9999")]
+    [InlineData("-9999999999999999.99", "-99999999999999.9999")]
+    public async Task ProjectionDecimal_PreservesRepresentableSignedValues(string rawAmount, string rawPercentage)
+    {
+        var seeded = await SeedTicketingYearAsync();
+        var amount = decimal.Parse(rawAmount, CultureInfo.InvariantCulture);
+        var percentage = decimal.Parse(rawPercentage, CultureInfo.InvariantCulture);
+
+        var result = await _service.UpdateTicketingProjectionAsync(seeded.GroupId, null, null, 0,
+            amount, amount, 10, percentage, amount, percentage, Guid.NewGuid(),
+            ct: TestContext.Current.CancellationToken);
+
+        result.Refusal.Should().BeNull();
+        await using var db = await BudgetDbFactory.CreateDbContextAsync(TestContext.Current.CancellationToken);
+        var saved = await db.TicketingProjections.SingleAsync(TestContext.Current.CancellationToken);
+        saved.DailySalesRate.Should().Be(amount);
+        saved.AverageTicketPrice.Should().Be(amount);
+        saved.StripeFeeFixed.Should().Be(amount);
+        saved.StripeFeePercent.Should().Be(percentage);
+        saved.TicketTailorFeePercent.Should().Be(percentage);
     }
 
     [HumansTheory]
@@ -986,8 +1311,11 @@ public sealed class BudgetServiceTests
         var act = () => _service.UpdateTicketingProjectionAsync(
             Guid.NewGuid(), null, null, 0, 0m, 0m, vatRate, 0m, 0m, 0m, Guid.NewGuid());
 
-        await act.Should().ThrowAsync<ArgumentOutOfRangeException>()
-            .WithMessage("*between 0 and 21*");
+        var result = await act();
+        result.Refusal.Should().Be("VAT rate must be between 0 and 21.");
+        await using var db = await BudgetDbFactory.CreateDbContextAsync(TestContext.Current.CancellationToken);
+        (await db.BudgetAuditLogs.CountAsync(TestContext.Current.CancellationToken)).Should().Be(0);
+        (await db.TicketingProjections.CountAsync(TestContext.Current.CancellationToken)).Should().Be(0);
     }
 
     [HumansFact]
@@ -1618,7 +1946,7 @@ public sealed class BudgetServiceTests
     }
 
     [HumansFact]
-    public async Task RefreshTicketingProjectionsAsync_writes_audit_entry_with_the_acting_user()
+    public async Task SyncTicketingActualsAsync_projection_materialization_audits_the_acting_user()
     {
         var (groupId, _, _, _) = await SeedTicketingYearAsync();
         await ConfigureProjectionAsync(groupId,
@@ -1628,22 +1956,22 @@ public sealed class BudgetServiceTests
             dailySalesRate: 5m);
 
         var actor = Guid.NewGuid();
-        await _service.RefreshTicketingProjectionsAsync(_yearId, actor, TestContext.Current.CancellationToken);
+        await _service.SyncTicketingActualsAsync(_yearId, [], actor, TestContext.Current.CancellationToken);
 
         await using var ctx = await BudgetDbFactory.CreateDbContextAsync(TestContext.Current.CancellationToken);
         var auditEntry = await ctx.BudgetAuditLogs
-            .SingleAsync(a => a.BudgetYearId == _yearId && a.Description.StartsWith("Ticketing projections refreshed:"), TestContext.Current.CancellationToken);
+            .SingleAsync(a => a.BudgetYearId == _yearId && a.Description.StartsWith("Ticketing sync:"), TestContext.Current.CancellationToken);
         auditEntry.ActorUserId.Should().Be(actor);
     }
 
     [HumansFact]
-    public async Task Projection_refresh_preserves_ids_and_audit_when_schedule_is_unchanged()
+    public async Task Projection_refresh_during_sync_preserves_ids_and_audit_when_schedule_is_unchanged()
     {
         var (groupId, _, _, _) = await SeedTicketingYearAsync();
         await ConfigureProjectionAsync(groupId, new LocalDate(2026, 3, 15),
             new LocalDate(2026, 4, 15), 100m, 5m);
         var ct = TestContext.Current.CancellationToken;
-        await _service.RefreshTicketingProjectionsAsync(_yearId, null, ct);
+        await _service.SyncTicketingActualsAsync(_yearId, [], null, ct);
         List<BudgetLineItem> before;
         int auditsBefore;
         await using (var ctx = await BudgetDbFactory.CreateDbContextAsync(ct))
@@ -1653,7 +1981,7 @@ public sealed class BudgetServiceTests
         }
         Clock.Advance(Duration.FromHours(1));
 
-        var changed = await _service.RefreshTicketingProjectionsAsync(_yearId, Guid.NewGuid(), ct);
+        var changed = await _service.SyncTicketingActualsAsync(_yearId, [], Guid.NewGuid(), ct);
 
         changed.Should().Be(0);
         await using var stored = await BudgetDbFactory.CreateDbContextAsync(ct);
@@ -1662,7 +1990,7 @@ public sealed class BudgetServiceTests
     }
 
     [HumansFact]
-    public async Task Projection_refresh_updates_existing_rows_and_removes_only_obsolete_generated_rows()
+    public async Task Projection_refresh_during_sync_updates_existing_rows_and_removes_only_obsolete_generated_rows()
     {
         var (groupId, _, revenueId, feesId) = await SeedTicketingYearAsync();
         await ConfigureProjectionAsync(groupId, new LocalDate(2026, 3, 15),
@@ -1681,7 +2009,7 @@ public sealed class BudgetServiceTests
                     Description = "Stripe fees: completed week", Amount = -2m, IsAutoGenerated = true }], ct);
             await ctx.SaveChangesAsync(ct);
         }
-        await _service.RefreshTicketingProjectionsAsync(_yearId, null, ct);
+        await _service.SyncTicketingActualsAsync(_yearId, [], null, ct);
         Dictionary<LocalDate, Guid> previousRevenue;
         await using (var ctx = await BudgetDbFactory.CreateDbContextAsync(ct))
         {
@@ -1694,7 +2022,7 @@ public sealed class BudgetServiceTests
             await ctx.SaveChangesAsync(ct);
         }
 
-        await _service.RefreshTicketingProjectionsAsync(_yearId, Guid.NewGuid(), ct);
+        await _service.SyncTicketingActualsAsync(_yearId, [], Guid.NewGuid(), ct);
 
         await using var stored = await BudgetDbFactory.CreateDbContextAsync(ct);
         var lines = await stored.BudgetLineItems.ToListAsync(ct);
@@ -1709,7 +2037,7 @@ public sealed class BudgetServiceTests
         lines.Should().NotContain(li => li.Id == previousRevenue[new LocalDate(2026, 4, 13)]);
 
         Clock.Reset(Instant.FromUtc(2026, 4, 9, 12, 0));
-        await _service.RefreshTicketingProjectionsAsync(_yearId, null, ct);
+        await _service.SyncTicketingActualsAsync(_yearId, [], null, ct);
         await using var ended = await BudgetDbFactory.CreateDbContextAsync(ct);
         (await ended.BudgetLineItems.Select(li => li.Id).ToListAsync(ct)).Should().BeEquivalentTo([manualId, actualId]);
     }
@@ -1737,13 +2065,8 @@ public sealed class BudgetServiceTests
     }
 
     [HumansTheory]
-    [InlineData("en")]
-    [InlineData("es")]
-    [InlineData("de")]
-    [InlineData("it")]
-    [InlineData("fr")]
-    [InlineData("ca")]
-    public async Task RefreshTicketingProjectionsAsync_materializes_projected_weeks_when_projection_is_valid(string culture)
+    [MemberData(nameof(SupportedCultures.All), MemberType = typeof(SupportedCultures))]
+    public async Task SyncTicketingActualsAsync_materializes_projected_weeks_when_projection_is_valid(string culture)
     {
         using var scope = new Humans.Base.Extensions.CultureScope(culture);
         CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("en");
@@ -1754,7 +2077,7 @@ public sealed class BudgetServiceTests
             averageTicketPrice: 100m,
             dailySalesRate: 5m);
 
-        var created = await _service.RefreshTicketingProjectionsAsync(_yearId, actorUserId: null, TestContext.Current.CancellationToken);
+        var created = await _service.SyncTicketingActualsAsync(_yearId, [], actorUserId: null, TestContext.Current.CancellationToken);
 
         created.Should().BeGreaterThan(0);
 
@@ -1771,12 +2094,14 @@ public sealed class BudgetServiceTests
     }
 
     [HumansTheory]
-    [InlineData(22, 5, 47, 15, 5, 15)]
+    [InlineData(22, 5, 17, 15, 5, 15)]
     [InlineData(1, 5, 35, 15, 5, 15)]
+    [InlineData(16, 5, 47, 15, 5, 15)]
+    [InlineData(18, 5, 37, 15, 5, 15)]
     [InlineData(22, 0, 12, 15, 5, 1)]
-    [InlineData(22, 5, 47, 13, 5, 5)]
+    [InlineData(22, 5, 17, 13, 5, 5)]
     [InlineData(22, 0, 12, 13, 5, 1)]
-    [InlineData(22, 5, 47, 12, 4, 35)]
+    [InlineData(22, 5, 17, 12, 4, 35)]
     public async Task Ticketing_projection_preview_matches_materialized_weeks(
         int startDay, int dailyRate, int firstWeekTickets, int eventDay, int weeks, int lastWeekTickets)
     {
@@ -1803,7 +2128,7 @@ public sealed class BudgetServiceTests
         preview[^1].WeekEnd.Should().Be(new LocalDate(2026, 4, eventDay));
         preview[^1].ProjectedTickets.Should().Be(lastWeekTickets);
 
-        await _service.RefreshTicketingProjectionsAsync(_yearId, null, TestContext.Current.CancellationToken);
+        await _service.SyncTicketingActualsAsync(_yearId, [], null, TestContext.Current.CancellationToken);
 
         await using var stored = await BudgetDbFactory.CreateDbContextAsync(TestContext.Current.CancellationToken);
         var lines = await stored.BudgetLineItems.Where(li => li.IsAutoGenerated)
@@ -1818,6 +2143,54 @@ public sealed class BudgetServiceTests
             lines.Single(li => li.BudgetCategoryId == feesCatId && li.ExpectedDate == week.WeekStart
                 && li.Description.Contains("TT fees:", StringComparison.Ordinal)).Amount.Should().Be(-week.ProjectedTtFees);
         }
+    }
+
+    [HumansFact]
+    public async Task Ticketing_projection_with_an_inverted_sales_period_has_no_forecast_rows()
+    {
+        Clock.Reset(Instant.FromUtc(2026, 3, 17, 12, 0));
+        var (groupId, _, _, _) = await SeedTicketingYearAsync();
+        await ConfigureProjectionAsync(groupId, new LocalDate(2026, 3, 22),
+            new LocalDate(2026, 3, 20), 19.99m, 5m);
+
+        (await _service.GetTicketingProjectionEntriesAsync(groupId, TestContext.Current.CancellationToken))
+            .Should().BeEmpty();
+        await _service.SyncTicketingActualsAsync(_yearId, [], null, TestContext.Current.CancellationToken);
+
+        await using var stored = await BudgetDbFactory.CreateDbContextAsync(TestContext.Current.CancellationToken);
+        (await stored.BudgetLineItems.Where(line => line.IsAutoGenerated)
+            .ToListAsync(TestContext.Current.CancellationToken)).Should().BeEmpty();
+    }
+
+    [HumansTheory]
+    [InlineData(27)]
+    [InlineData(31)]
+    public async Task Ticketing_projection_at_the_supported_date_limit_previews_and_materializes(int eventDay)
+    {
+        var start = new LocalDate(9999, 12, 27);
+        var end = new LocalDate(9999, 12, eventDay);
+        var expectedTickets = (eventDay - 27 + 1) * 5;
+        var (groupId, _, revenueCatId, _) = await SeedTicketingYearAsync();
+        await ConfigureProjectionAsync(groupId, start, end, 20m, 5m);
+
+        var preview = await _service.GetTicketingProjectionEntriesAsync(
+            groupId, TestContext.Current.CancellationToken);
+
+        var week = preview.Should().ContainSingle().Which;
+        week.WeekStart.Should().Be(start);
+        week.WeekEnd.Should().Be(end);
+        week.ProjectedTickets.Should().Be(expectedTickets);
+        week.ProjectedRevenue.Should().Be(expectedTickets * 20m);
+
+        await _service.SyncTicketingActualsAsync(_yearId, [], null, TestContext.Current.CancellationToken);
+
+        await using var stored = await BudgetDbFactory.CreateDbContextAsync(TestContext.Current.CancellationToken);
+        var revenue = await stored.BudgetLineItems.SingleAsync(
+            item => item.BudgetCategoryId == revenueCatId && item.IsAutoGenerated,
+            TestContext.Current.CancellationToken);
+        revenue.ExpectedDate.Should().Be(start);
+        revenue.Amount.Should().Be(week.ProjectedRevenue);
+        revenue.Notes.Should().Be($"~{expectedTickets} tickets");
     }
 
     [HumansFact]
@@ -2001,17 +2374,10 @@ public sealed class BudgetServiceTests
         summary.ExpenseSlices.Select(sl => sl.Name).Should().BeEquivalentTo(["Ops", "VAT Liability"]);
     }
 
-    [HumansTheory]
-    [InlineData("en", "VAT Credit", "VAT Liability", "Cash Reserves (90%)", "Spanish Taxes (10%)", "Main Buffer")]
-    [InlineData("es", "IVA a compensar", "IVA a pagar", "Reservas de efectivo (90%)", "Impuestos españoles (10%)", "Margen de Main")]
-    [InlineData("de", "Mehrwertsteuer-Guthaben", "Mehrwertsteuer-Verbindlichkeit", "Liquiditätsreserven (90%)", "Spanische Steuern (10%)", "Main-Puffer")]
-    [InlineData("it", "Credito IVA", "IVA a debito", "Riserve di liquidità (90%)", "Imposte spagnole (10%)", "Margine di Main")]
-    [InlineData("fr", "Crédit de TVA", "TVA due", "Réserves de trésorerie (90%)", "Impôts espagnols (10%)", "Marge de Main")]
-    [InlineData("ca", "IVA a compensar", "IVA a pagar", "Reserves d'efectiu (90%)", "Impostos espanyols (10%)", "Marge de Main")]
-    public void ComputeBudgetSummaryWithBuffers_localizes_generated_labels(
-        string culture, string credit, string liability, string reserves, string taxes, string buffer)
+    [HumansFact]
+    public void ComputeBudgetSummaryWithBuffers_localizes_generated_labels()
     {
-        using var scope = new CultureScope(culture);
+        using var scope = new CultureScope("en");
         var groupId = Guid.NewGuid();
         IReadOnlyList<BudgetGroupDetail> groups =
         [
@@ -2026,8 +2392,9 @@ public sealed class BudgetServiceTests
 
         var summary = _service.ComputeBudgetSummaryWithBuffers(groups);
 
-        summary.IncomeSlices.Select(slice => slice.Name).Should().BeEquivalentTo(["Sales", credit]);
-        summary.ExpenseSlices.Select(slice => slice.Name).Should().BeEquivalentTo(["Ops", liability, reserves, taxes, buffer]);
+        summary.IncomeSlices.Select(slice => slice.Name).Should().BeEquivalentTo(["Sales", "VAT Credit"]);
+        summary.ExpenseSlices.Select(slice => slice.Name).Should().BeEquivalentTo(
+            ["Ops", "VAT Liability", "Cash Reserves (90%)", "Spanish Taxes (10%)", "Main Buffer"]);
         summary.TotalIncome.Should().Be(112.1m);
         summary.TotalExpenses.Should().Be(-22.1m);
         summary.NetBalance.Should().Be(90m);
@@ -2076,7 +2443,7 @@ public sealed class BudgetServiceTests
             }
             await ctx.SaveChangesAsync(TestContext.Current.CancellationToken);
         }
-        var info = UserInfo.Create(new User { Id = userId }, [], [], [], null, []) with { MergedUserIds = [sourceId] };
+        var info = UserInfo.Create(new User { Id = userId }, [], [], null) with { MergedUserIds = [sourceId] };
         _userService.GetUserInfoAsync(userId, Arg.Any<CancellationToken>()).Returns(info);
 
         var slices = await _service.ContributeForUserAsync(userId, TestContext.Current.CancellationToken);
@@ -2092,7 +2459,7 @@ public sealed class BudgetServiceTests
         "create-category", "update-category", "delete-category",
         "create-line-item", "update-line-item", "delete-line-item",
         "sync-departments", "ensure-ticketing-group", "update-ticketing-projection",
-        "update-year", "sync-ticketing-actuals", "refresh-ticketing-projections"
+        "update-year", "sync-ticketing-actuals"
     };
 
     [HumansTheory]
@@ -2142,7 +2509,6 @@ public sealed class BudgetServiceTests
             "ensure-ticketing-group" => () => _repository.EnsureTicketingGroupAsync(_yearId, actor, now, ct),
             "update-ticketing-projection" => () => _repository.UpdateTicketingProjectionAsync(new TicketingProjectionUpdate(ticketingGroupId, null, null, 0, 0m, 0m, 10, 0m, 0m, 0m), actor, now, ct),
             "sync-ticketing-actuals" => () => _repository.SyncTicketingActualsAsync(_yearId, [], Clock.GetCurrentInstant().InUtc().Date, actor, now, ct),
-            "refresh-ticketing-projections" => () => _repository.RefreshTicketingProjectionsAsync(_yearId, Clock.GetCurrentInstant().InUtc().Date, actor, now, ct),
             _ => throw new ArgumentOutOfRangeException(nameof(mutation), mutation, null)
         };
 
@@ -2184,14 +2550,14 @@ public sealed class BudgetServiceTests
     }
 
     private async Task<(Guid GroupId, Guid ProjectionId, Guid RevenueCatId, Guid FeesCatId)>
-        SeedTicketingYearAsync()
+        SeedTicketingYearAsync(TestDbContextFactory<BudgetDbContext>? factory = null)
     {
         var groupId = Guid.NewGuid();
         var projectionId = Guid.NewGuid();
         var revenueCatId = Guid.NewGuid();
         var feesCatId = Guid.NewGuid();
 
-        await using var ctx = await BudgetDbFactory.CreateDbContextAsync(TestContext.Current.CancellationToken);
+        await using var ctx = await (factory ?? BudgetDbFactory).CreateDbContextAsync(TestContext.Current.CancellationToken);
         ctx.BudgetYears.Add(new BudgetYear
         {
             Id = _yearId,

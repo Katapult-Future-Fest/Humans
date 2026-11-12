@@ -26,15 +26,17 @@ internal sealed class CampMembershipNotices(
             var name = camp?.Seasons.FirstOrDefault(s => s.Id == seasonId)?.Name ?? camp?.Slug;
             var slug = camp?.Slug;
             var recipientsByCulture = new Dictionary<CultureInfo, List<Guid>>();
+            var recipientIds = new HashSet<Guid>();
             foreach (var userId in pendingUserIds)
             {
-                var culture = await GetRecipientCultureAsync(userId);
+                var (recipientId, culture) = await ResolveRecipientAsync(userId);
+                if (!recipientIds.Add(recipientId)) continue;
                 if (!recipientsByCulture.TryGetValue(culture, out var recipients))
                 {
                     recipients = [];
                     recipientsByCulture.Add(culture, recipients);
                 }
-                recipients.Add(userId);
+                recipients.Add(recipientId);
             }
             foreach (var (culture, recipients) in recipientsByCulture)
             {
@@ -65,23 +67,24 @@ internal sealed class CampMembershipNotices(
         }
     }
 
-    public async Task NotifyApprovalAsync(Guid campId, Guid seasonId, Guid userId, Guid memberId)
+    public async Task NotifyDecisionAsync(Guid campId, Guid seasonId, Guid userId, Guid memberId, bool approved)
     {
         // Membership is committed; request cancellation must not skip its notification.
         try
         {
             var camp = await repo.GetByIdAsync(campId, CancellationToken.None);
-            var slug = camp?.Slug;
-            var culture = await GetRecipientCultureAsync(userId);
+            var slug = approved ? camp?.Slug : null;
+            var (recipientId, culture) = await ResolveRecipientAsync(userId);
             var campName = camp?.Seasons.FirstOrDefault(s => s.Id == seasonId)?.Name ?? camp?.Slug
                 ?? NoticeResources.GetString("Camps_Notification_GenericCamp", culture)!;
-            var title = string.Format(culture, NoticeResources.GetString("Camps_Notification_MembershipApproved", culture)!, campName);
+            var titleKey = approved ? "Camps_Notification_MembershipApproved" : "Camps_Notification_MembershipRejected";
+            var title = string.Format(culture, NoticeResources.GetString(titleKey, culture)!, campName);
             await notificationEmitter.SendAsync(
-                CampsNotificationSources.CampMembershipApproved,
+                approved ? CampsNotificationSources.CampMembershipApproved : CampsNotificationSources.CampMembershipRejected,
                 NotificationClass.Informational,
                 NotificationPriority.Normal,
                 title,
-                [userId],
+                [recipientId],
                 body: null,
                 actionUrl: slug is null ? null : $"/Barrios/{slug}",
                 actionLabel: slug is null ? null : NoticeResources.GetString("Camps_Notification_ViewCamp", culture),
@@ -89,46 +92,23 @@ internal sealed class CampMembershipNotices(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Failed to notify requester {UserId} about approved camp membership {MemberId}", userId, memberId);
+            logger.LogError(ex, "Failed to notify requester {UserId} about {Decision} camp membership {MemberId}",
+                userId, approved ? "approved" : "rejected", memberId);
         }
     }
 
-    public async Task NotifyRejectionAsync(Guid campId, Guid seasonId, Guid userId, Guid memberId)
-    {
-        // Membership is committed; request cancellation must not skip its notification.
-        try
-        {
-            var camp = await repo.GetByIdAsync(campId, CancellationToken.None);
-            var culture = await GetRecipientCultureAsync(userId);
-            var campName = camp?.Seasons.FirstOrDefault(s => s.Id == seasonId)?.Name ?? camp?.Slug
-                ?? NoticeResources.GetString("Camps_Notification_GenericCamp", culture)!;
-            var title = string.Format(culture, NoticeResources.GetString("Camps_Notification_MembershipRejected", culture)!, campName);
-            await notificationEmitter.SendAsync(
-                CampsNotificationSources.CampMembershipRejected,
-                NotificationClass.Informational,
-                NotificationPriority.Normal,
-                title,
-                [userId],
-                body: null,
-                cancellationToken: CancellationToken.None);
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Failed to notify requester {UserId} about rejected camp membership {MemberId}", userId, memberId);
-        }
-    }
-
-    private async Task<CultureInfo> GetRecipientCultureAsync(Guid userId)
+    private async Task<(Guid UserId, CultureInfo Culture)> ResolveRecipientAsync(Guid userId)
     {
         try
         {
-            var language = (await userService.GetUserInfoAsync(userId, CancellationToken.None))?.PreferredLanguage;
-            return CultureInfo.GetCultureInfo(language.IsSupportedCultureCode() ? language! : "en");
+            var person = await userService.GetUserInfoAsync(userId, CancellationToken.None);
+            var language = person?.PreferredLanguage;
+            return (person?.Id ?? userId, CultureInfo.GetCultureInfo(language.IsSupportedCultureCode() ? language! : "en"));
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Failed to resolve notification language for user {UserId}; using English", userId);
-            return CultureInfo.GetCultureInfo("en");
+            return (userId, CultureInfo.GetCultureInfo("en"));
         }
     }
 }

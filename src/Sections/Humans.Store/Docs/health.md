@@ -61,13 +61,11 @@ is left to repair the page says so and nothing else in the section depends on it
 - **One aggregate, one repository.** Order (with its lines and payments), Product, and Invoice
   are one section's data behind one `IStoreRepository` over one `StoreDbContext`. Nothing else
   reads `store_*`.
-- **One service, two internal helpers.** Every shape is a method on `Service`; pricing feeds the
-  order page, issuance, deletion, the summary and the accounting export alike, so splitting would
-  duplicate the pricing rule. Issuance's Holded pipeline lives in `StoreInvoiceIssuer` and the
-  live-price and counterparty-name reads both of them need in `StoreOrderReader`; neither is
-  registered in DI — `Service` constructs them. The one read another section needs is exposed by
-  `Service` implementing `IStoreAccountingRead`, registered as a forward to the same scoped
-  instance.
+- **Write facade and read owner.** `Service` coordinates Store writes and payment workflows;
+  issuance's Holded pipeline lives in `StoreInvoiceIssuer`. `StoreOrderReader` owns index,
+  catalog, order projection, year summary and accounting reads. It implements the existing
+  `IStoreAccountingRead` directly, so Backdoor accounting reads resolve no payment or invoice
+  workflows. The facade's summary delegates to the same reader; both paths share pricing.
 - **Pricing lives in exactly one pure function.** `BalanceCalculator.Compute(order, currentPrices)`
   answers "what does this order cost" everywhere. Any second place that adds a line up is a
   defect. The year-wide views (summary, accounting export) share one year-loading step so their
@@ -79,7 +77,7 @@ is left to repair the page says so and nothing else in the section depends on it
 - **Controllers split by audience.** `StoreController` is the counterparty's surface (and hosts
   the per-order admin money actions, gated per order), `StoreAdminController` the admin's,
   `StoreStripeWebhookController` the payment processor's.
-- **Vendor systems through their own sections' contracts** — `IStripeService`, `IHoldedClient`.
+- **Vendor systems through their own sections' contracts** — `IStripeService`, `IHoldedService` / `IHoldedWrite`.
 - **Public surface is the accounting read and nothing else** — `IStoreAccountingRead`, its two
   row DTOs and the two enums they carry, plus `Section` and `StoreResource`. The admin summary's
   DTO graph stays `internal`.

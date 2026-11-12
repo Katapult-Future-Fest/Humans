@@ -34,9 +34,9 @@ As a **signed-in human** I want to **review my previous agent conversations** so
 As an **Admin** I want to **see all agent conversations and refusals** so that **I can spot-check quality and feed corrections back into docs**.
 
 **Acceptance:**
-- `/Agent/Conversations` adapts to the role: regular users see only their own (a fixed most-recent window, no paging); Admins see all conversations with a Human column, filters for refusals-only, handoffs-only, and per-user, and Older/Newer paging (zero-based `page` query param, preserving the active filters).
-- `/Agent/Conversations/{id}` shows additional Admin-only details (token counts, tool invocations, "Show what would be sent to Anthropic" link).
-- `/Settings#agent` exposes `Enabled`, `Model`, caps, `PreloadConfig` (Tier1/Tier2), posting to `/Agent/Admin/Settings`.
+- `/Agent/Conversations` adapts to the role: regular users see only their own (a fixed most-recent window, no paging); Admins and Board members see all conversations with a Human column, filters for refusals-only, handoffs-only, and per-user, and Older/Newer paging (zero-based `page` query param, preserving the active filters).
+- `/Agent/Conversations/{id}` shows additional Admin and Board-only details (token counts, tool invocations, "Show what would be sent to Anthropic" link).
+- `/Settings#agent` (Admin only; Board cannot save) exposes `Enabled`, `Model`, caps, `PreloadConfig` (Tier1/Tier2), posting to `/Agent/Admin/Settings`.
 
 ### US-40.4 — Admin disables under abuse
 As an **Admin** I want to **disable the agent globally with one setting change** so that **I can react to abuse or provider outages immediately**.
@@ -48,7 +48,7 @@ As an **Admin** I want to **disable the agent globally with one setting change**
 As an **Admin** I want to **see usage, spend, refusals, and Anthropic balance on one page** so that **I can run the agent safely without drilling into individual conversations**.
 
 **Acceptance:**
-- `/Agent/Admin/Status` (Admin-only) renders read-only panels: system state, usage (24h / 7d / 30d — conversations, messages, unique users, prompt/output/cached tokens, cache-hit ratio, avg + P95 turn duration), spend (24h / 7d / 30d / MTD, broken into input / output / cache-read USD), Anthropic balance, refusals (last 7d count + per-reason breakdown linking to `/Agent/Conversations?refusalsOnly=true`), top-fetched-docs (last 7d), top-users (last 7d, with daily/hourly remaining capacity), retention-job last-run + delete count.
+- `/Agent/Admin/Status` (Board or Admin, read-only) renders read-only panels: system state, usage (24h / 7d / 30d — conversations, messages, unique users, prompt/output/cached tokens, cache-hit ratio, avg + P95 turn duration), spend (24h / 7d / 30d / MTD, broken into input / output / cache-read USD), Anthropic balance, refusals (last 7d count + per-reason breakdown linking to `/Agent/Conversations?refusalsOnly=true`), top-fetched-docs (last 7d), top-users (last 7d, with daily/hourly remaining capacity), retention-job last-run + delete count.
 - Spend USD is estimated from `AgentMessage` token counts × hard-coded per-model rates (Anthropic published; one model at a time). Cache-write folds into Input at the standard input rate — called out in the panel footer.
 - Anthropic balance reads via an opt-in admin API key (`Anthropic__AdminApiKey`). When unset, the panel shows "balance unavailable — see Anthropic Console" with a link; never an error. Anthropic does not currently publish a balance endpoint, so the panel surfaces "balance unavailable" until they do — the wiring is in place to populate it when the endpoint ships.
 - No form posts on the page. Settings stays the actions surface.
@@ -57,7 +57,6 @@ As an **Admin** I want to **see usage, spend, refusals, and Anthropic balance on
 
 Reference: `src/Sections/Humans.Agent/Domain/Agent*.cs`. Key entities: `AgentConversation`, `AgentMessage`, `AgentSettings`. Per-user rate-limit counters are in-memory (Singleton `IAgentRateLimitStore`), no DB table.
 
-Legacy: `FeedbackReport.Source` (`AgentUnresolved`) and `FeedbackReport.AgentConversationId` exist for historical rows from the previous server-side handoff. The Agent no longer writes them.
 
 ## Workflows
 
@@ -65,7 +64,7 @@ Legacy: `FeedbackReport.Source` (`AgentUnresolved`) and `FeedbackReport.AgentCon
 `User submits` → `enabled gate` → `rate-limit check` → `abuse check` → `prompt assembly` → `Anthropic streaming call (with cached prefix)` → `[tool loop, max 3; cap hit triggers one final tool-withheld call so the model synthesizes an answer; a max_tokens cutoff mid tool-call JSON continues the loop rather than dropping the call]` → `empty-reply fallback if the loop still produced no prose` → `persist messages (turn-wide token totals across all loop iterations)` → `stream finalizer`. If the turn throws or the client disconnects at any point after the user message is persisted, a fallback assistant message (`RefusalReason = "error"`) is written and the accumulated usage is billed, so no user message is ever left without a reply (nobodies-collective/Humans#963, #990).
 
 ### Handoff workflow (propose-only)
-Tool call `route_to_issue` with `{title, category, description}` → dispatcher returns a proposal-marker without DB writes → `AgentService.ParseIssueProposalArgs` decodes the args → `AgentService` yields an `AgentIssueProposal` SSE frame → client opens the Issues modal pre-filled → user submits via `POST /Issues`. The agent never writes Issue or FeedbackReport rows itself.
+Tool call `route_to_issue` with `{title, category, description}` → dispatcher returns a proposal-marker without DB writes → `AgentService.ParseIssueProposalArgs` decodes the args → `AgentService` yields an `AgentIssueProposal` SSE frame → client opens the Issues modal pre-filled → user submits via `POST /Issues`. The agent never writes Issue rows itself.
 
 ### Retention workflow
 `AgentConversationRetentionJob` (daily 03:15 UTC) deletes `AgentConversation` rows older than `AgentSettings.RetentionDays` (default 90). Messages cascade-delete.

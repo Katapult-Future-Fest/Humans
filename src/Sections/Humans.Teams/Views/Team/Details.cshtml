@@ -8,16 +8,14 @@
 }
 
 
-<nav aria-label="@Localizer["Teams_BreadcrumbNavigation"]">
-    <ol class="breadcrumb">
-        <li class="breadcrumb-item"><a asp-action="Index">@SharedLocalizer["Teams_Title"]</a></li>
-        @if (Model.ParentTeam != null)
-        {
-            <li class="breadcrumb-item"><a asp-action="Details" asp-route-slug="@Model.ParentTeam.Slug">@Model.ParentTeam.Name</a></li>
-        }
-        <li class="breadcrumb-item active" aria-current="page">@Model.Name</li>
-    </ol>
-</nav>
+@section Crumbs {
+    <a asp-action="Index">@SharedLocalizer["Teams_Title"]</a>
+    @if (Model.ParentTeam != null)
+    {
+        <a asp-action="Details" asp-route-slug="@Model.ParentTeam.Slug">@Model.ParentTeam.Name</a>
+    }
+    <span>@Model.Name</span>
+}
 
 
 <div class="row">
@@ -86,9 +84,9 @@
                         <hr />
                         <small class="text-muted">
                             @Localizer["Teams_TeamDetail_LastUpdated"] @Model.PageContentUpdatedAt.Value.ToDate()
-                            @if (!string.IsNullOrEmpty(Model.PageContentUpdatedByDisplayName))
+                            @if (Model.PageContentUpdatedByUserId is { } editorId)
                             {
-                                @: &mdash; @Model.PageContentUpdatedByDisplayName
+                                <text> &mdash; </text><vc:human user-id="@editorId" link="None" />
                             }
                         </small>
                     }
@@ -99,7 +97,7 @@
         {
             <div class="card mb-4">
                 <div class="card-body text-center py-4">
-                    <p class="text-muted mb-3">@Localizer["Teams_TeamDetail_NoPageContent"]</p>
+                    <empty-state class="mb-3">@Localizer["Teams_TeamDetail_NoPageContent"]</empty-state>
                     <a asp-controller="TeamAdmin" asp-action="EditPage" asp-route-slug="@Model.Slug" class="btn btn-outline-primary">
                         <i class="fa-solid fa-pen-to-square me-1"></i>@Localizer["Teams_TeamDetail_AddPageContent"]
                     </a>
@@ -136,7 +134,7 @@
                 @if (Model.IsAuthenticated)
                 {
                     <span>@string.Format(Localizer["Teams_TeamDetail_Members"].Value, Model.Members.Count)</span>
-                    @if (Model.CanCurrentUserManage)
+                    @if (Model.CanCurrentUserManage || Model.CanCurrentUserEditTeam)
                     {
                         <a asp-controller="TeamAdmin" asp-action="Members" asp-route-slug="@Model.Slug" class="btn btn-sm btn-outline-primary">
                             @Localizer["Teams_TeamDetail_ManageMembers"]
@@ -203,7 +201,7 @@
                 }
                 else
                 {
-                    <p class="text-center text-muted mb-0">@Localizer["Teams_TeamDetail_NoMembers"]</p>
+                    <empty-state class="mb-0">@Localizer["Teams_TeamDetail_NoMembers"]</empty-state>
                 }
             </div>
         </div>
@@ -355,12 +353,13 @@
             @await Html.PartialAsync("_ShiftsSummaryCard", Model.ShiftsSummary)
         }
 
-        @if (Model.CanCurrentUserManage || Model.CanManageEarlyEntry)
+        @if (Model.CanCurrentUserManage || Model.CanCurrentUserEditTeam || Model.CanManageEarlyEntry)
         {
             <div class="card mb-4">
                 <div class="card-header">@Localizer["Teams_TeamDetail_TeamManagement"]</div>
                 <div class="list-group list-group-flush">
-                    @if (Model.CanCurrentUserManage)
+                    @* Board holds CanCurrentUserEditTeam without CanCurrentUserManage: it reads these pages. *@
+                    @if (Model.CanCurrentUserManage || Model.CanCurrentUserEditTeam)
                     {
                         @if (Model.CanCurrentUserEditTeam)
                         {
@@ -368,9 +367,12 @@
                                 @Localizer["Teams_TeamDetail_EditTeam"]
                             </a>
                         }
-                        <a asp-controller="TeamAdmin" asp-action="EditPage" asp-route-slug="@Model.Slug" class="list-group-item list-group-item-action">
-                            @Localizer["Teams_TeamDetail_EditPage"]
-                        </a>
+                        @if (Model.CanCurrentUserManage)
+                        {
+                            <a asp-controller="TeamAdmin" asp-action="EditPage" asp-route-slug="@Model.Slug" class="list-group-item list-group-item-action">
+                                @Localizer["Teams_TeamDetail_EditPage"]
+                            </a>
+                        }
                         <a asp-controller="TeamAdmin" asp-action="Members" asp-route-slug="@Model.Slug" class="list-group-item list-group-item-action d-flex justify-content-between align-items-center">
                             @Localizer["Teams_TeamDetail_ManageMembers"]
                             @if (Model.PendingRequestCount > 0)
@@ -378,9 +380,12 @@
                                 <span class="badge bg-warning">@Model.PendingRequestCount</span>
                             }
                         </a>
-                        <a asp-controller="TeamAdmin" asp-action="Roles" asp-route-slug="@Model.Slug" class="list-group-item list-group-item-action">
-                            @Localizer["Teams_TeamDetail_ManageRoles"]
-                        </a>
+                        @if (Model.CanCurrentUserManage)
+                        {
+                            <a asp-controller="TeamAdmin" asp-action="Roles" asp-route-slug="@Model.Slug" class="list-group-item list-group-item-action">
+                                @Localizer["Teams_TeamDetail_ManageRoles"]
+                            </a>
+                        }
                         <a asp-controller="TeamAdmin" asp-action="Roster" asp-route-slug="@Model.Slug" class="list-group-item list-group-item-action"
                            authorize-policy="@PolicyNames.BoardOrAdmin">
                             Roster

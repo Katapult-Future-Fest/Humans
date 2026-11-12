@@ -1,0 +1,138 @@
+@model PleoCategoriesPage
+@{
+    ViewData["Title"] = "Pleo categories";
+    // A refused Add comes back with what was typed, so nothing has to be re-entered.
+    var addName = ViewData["AddName"] as string;
+    var addCode = ViewData["AddCode"] as string;
+    var madrid = DateTimeZoneProviders.Tzdb["Europe/Madrid"];
+    string N(int n) => n.ToString("N0", CultureInfo.InvariantCulture);
+}
+
+<page-header title="Pleo categories" />
+<partial name="_PleoNav" />
+
+<p class="text-muted">
+    Each sync links category ids to their Holded account from Pleo's own mapping. A link made here by hand is left as
+    it is. An entry whose category is not linked counts as unmapped and is never booked.
+</p>
+
+<h2 class="h5">Unlinked category ids</h2>
+@if (Model.Unlinked.Count == 0)
+{
+    <p class="text-muted">Every category id seen on an entry is linked.</p>
+}
+else
+{
+        Func<PleoUnlinkedCategory, IHtmlContent> unlinkedEntriesCell = @<text>@N(item.Count)</text>;
+        Func<PleoUnlinkedCategory, IHtmlContent> unlinkedSpendCell = @<text>@item.Spend.ToEuro()</text>;
+        Func<PleoUnlinkedCategory, IHtmlContent> topMerchantsCell = @<text>@string.Join(", ", item.TopMerchants)</text>;
+        Func<PleoUnlinkedCategory, IHtmlContent> cardholdersCell = @<text>@string.Join(", ", item.Cardholders)</text>;
+        Func<PleoUnlinkedCategory, IHtmlContent> unlinkedActionsCell = @<text>
+            <form authorize-policy="@FinancePolicies.Manage" asp-action="Link" method="post" class="d-flex gap-1">
+                @Html.AntiForgeryToken()
+                <input type="hidden" name="pleoCategoryId" value="@item.CategoryId" />
+                <select name="categoryId" class="form-select form-select-sm" required>
+                    <option value="">Link to…</option>
+                    @foreach (var n in Model.UnlinkedNames)
+                    {
+                        <option value="@n.Value">@n.Label</option>
+                    }
+                </select>
+                <button type="submit" class="btn btn-sm btn-primary">Link</button>
+            </form>
+
+        </text>;
+        var unlinkedTable = TableModel.For(Model.Unlinked)
+            .Column("Category id", r => r.CategoryId, o => o.Code().Css("small"))
+            .Template("Entries", unlinkedEntriesCell, o => o.End(), sortBy: u => u.Count)
+            .Template("Spend", unlinkedSpendCell, o => o.End().Css("text-nowrap"), sortBy: u => u.Spend)
+            .Template("Top merchants", topMerchantsCell, o => o.Css("small"))
+            .Template("Cardholders", cardholdersCell, o => o.Css("small"))
+            .Template("", unlinkedActionsCell, o => o.NoSort())
+            .Css("align-middle")
+            .Build();
+    <partial name="_Table" model="unlinkedTable" />
+}
+
+<h2 class="h5">Categories</h2>
+@{
+    Func<PleoCategoryRow, IHtmlContent> holdedAccountCell = @<text>
+        <span class="@(item.CodeProblem ? "text-danger" : "")">
+                                @item.HoldedCode · @(item.HoldedName ?? "not in Pleo's chart")
+                                @if (item.CodeProblem && item.HoldedName is not null)
+                                {
+                                    <span class="small">(archived)</span>
+                                }
+                            </span>
+    </text>;
+    Func<PleoCategoryRow, IHtmlContent> linkedIdCell = @<text>
+        @if (item.PleoCategoryId is null)
+        {
+            <span class="text-muted">not linked</span>
+        }
+        else
+        {
+            <code class="small">@item.PleoCategoryId</code>
+            @if (item.SetAt is { } at)
+            {
+                <div class="small text-muted">@at.ToDate(madrid)</div>
+            }
+        }
+
+    </text>;
+    Func<PleoCategoryRow, IHtmlContent> entriesCell = @<text>@N(item.Count)</text>;
+    Func<PleoCategoryRow, IHtmlContent> spendCell = @<text>@item.Spend.ToEuro()</text>;
+    Func<PleoCategoryRow, IHtmlContent> categoryActionsCell = @<text>
+        @if (item.PleoCategoryId is not null)
+        {
+            <form authorize-policy="@FinancePolicies.Manage" asp-action="Unlink" method="post">
+                @Html.AntiForgeryToken()
+                <input type="hidden" name="categoryId" value="@item.Id" />
+                <button type="submit" class="btn btn-sm btn-outline-secondary">Unlink</button>
+            </form>
+        }
+
+    </text>;
+    var categoriesTable = TableModel.For(Model.Categories)
+        .Column("Name", r => r.Name)
+        .Template("Holded account", holdedAccountCell, sortBy: c => c.HoldedCode)
+        .Template("Linked id", linkedIdCell, sortBy: c => c.PleoCategoryId)
+        .Template("Entries", entriesCell, o => o.End(), sortBy: c => c.Count)
+        .Template("Spend", spendCell, o => o.End().Css("text-nowrap"), sortBy: c => c.Spend)
+        .Template("", categoryActionsCell, o => o.NoSort())
+        .Css("align-middle")
+        .Build();
+}
+<partial name="_Table" model="categoriesTable" />
+
+<div authorize-policy="@FinancePolicies.Manage" class="card mb-4">
+    <div class="card-header">Add a category</div>
+    <div class="card-body">
+        <p class="small text-muted">For a category Pleo gains later. Use the name exactly as Pleo's settings show it.</p>
+        <form asp-action="Add" method="post" class="row g-2 align-items-end">
+            @Html.AntiForgeryToken()
+            <div class="col-md-5">
+                <label class="form-label small mb-0" for="name">Name</label>
+                <input id="name" name="name" value="@addName" class="form-control form-control-sm" maxlength="128" required />
+            </div>
+            <div class="col-md-5">
+                <label class="form-label small mb-0" for="holdedCode">Holded account</label>
+                <select id="holdedCode" name="holdedCode" class="form-select form-select-sm" required>
+                    <option value="">Pick…</option>
+                    @foreach (var a in Model.ActiveAccounts)
+                    {
+                        if (string.Equals(a.Value, addCode, StringComparison.Ordinal))
+                        {
+                            <option value="@a.Value" selected>@a.Label</option>
+                        }
+                        else
+                        {
+                            <option value="@a.Value">@a.Label</option>
+                        }
+                    }
+                </select>
+            </div>
+            <div class="col-md-2"><button type="submit" class="btn btn-sm btn-primary">Add</button></div>
+        </form>
+    </div>
+</div>

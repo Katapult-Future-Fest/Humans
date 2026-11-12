@@ -42,7 +42,7 @@ internal sealed class TicketingBudgetService(
             using (new CultureScope("en"))
             {
                 weeklyActuals = orders
-                    .Where(o => o.PaymentStatus == TicketPaymentStatus.Paid && o.IsForEvent(activeYear.VendorEventId))
+                    .Where(o => o.IsForEvent(activeYear.VendorEventId, paidOnly: true))
                     .GroupBy(o => GetIsoMonday(o.PurchasedAt.InUtc().Date))
                     .Where(g => g.Key < currentWeekMonday)
                     .OrderBy(g => g.Key)
@@ -78,21 +78,7 @@ internal sealed class TicketingBudgetService(
         }
     }
 
-    public async Task<int> RefreshProjectionsAsync(
-        Guid budgetYearId, Guid? actorUserId, CancellationToken ct = default)
-    {
-        try
-        {
-            return await budgetService.RefreshTicketingProjectionsAsync(budgetYearId, actorUserId, ct);
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Failed to refresh ticketing projections for budget year {YearId}", budgetYearId);
-            throw;
-        }
-    }
-
-    public async Task<int?> UpdateProjectionAndRefreshAsync(
+    public async Task<TicketingProjectionSaveResult?> UpdateProjectionAndRefreshAsync(
         TicketingProjectionUpdateCommand command,
         Guid actorUserId,
         CancellationToken ct = default)
@@ -105,7 +91,7 @@ internal sealed class TicketingBudgetService(
             return null;
         }
 
-        await budgetService.UpdateTicketingProjectionAsync(
+        return await budgetService.UpdateTicketingProjectionAsync(
             command.BudgetGroupId,
             command.StartDate,
             command.EventDate,
@@ -116,9 +102,9 @@ internal sealed class TicketingBudgetService(
             command.StripeFeePercent,
             command.StripeFeeFixed,
             command.TicketTailorFeePercent,
-            actorUserId);
-
-        return await RefreshProjectionsAsync(command.BudgetYearId, actorUserId, ct);
+            actorUserId,
+            refreshProjections: true,
+            ct);
     }
 
     private static LocalDate GetIsoMonday(LocalDate date)

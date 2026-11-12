@@ -1,3 +1,4 @@
+using System.Transactions;
 using Humans.Campaigns.Contracts;
 using Humans.Settings.Contracts;
 using Humans.Tickets.Contracts;
@@ -166,19 +167,26 @@ internal sealed class TicketSyncService(
         {
             logger.LogError(ex, "Ticket sync failed for event {EventId}", eventId);
 
-            syncState.SyncStatus = TicketSyncStatus.Error;
-            syncState.StatusChangedAt = clock.GetCurrentInstant();
-            syncState.LastError = ex.Message;
-            // The column is varchar(2000); logging and the rethrow retain the full diagnostic.
-            const int maxErrorLength = 2000;
-            if (syncState.LastError.Length > maxErrorLength)
+            try
             {
-                var length = maxErrorLength;
-                if (char.IsHighSurrogate(syncState.LastError[length - 1]) && char.IsLowSurrogate(syncState.LastError[length]))
-                    length--;
-                syncState.LastError = syncState.LastError[..length];
+                syncState.SyncStatus = TicketSyncStatus.Error;
+                syncState.StatusChangedAt = clock.GetCurrentInstant();
+                syncState.LastError = ex.Message;
+                // The column is varchar(2000); logging and the rethrow retain the full diagnostic.
+                const int maxErrorLength = 2000;
+                if (syncState.LastError.Length > maxErrorLength)
+                {
+                    var length = maxErrorLength;
+                    if (char.IsHighSurrogate(syncState.LastError[length - 1]) && char.IsLowSurrogate(syncState.LastError[length]))
+                        length--;
+                    syncState.LastError = syncState.LastError[..length];
+                }
+                await ticketRepository.PersistSyncStateAsync(syncState, CancellationToken.None);
             }
-            await ticketRepository.PersistSyncStateAsync(syncState, CancellationToken.None);
+            catch (Exception saveEx)
+            {
+                logger.LogError(saveEx, "Failed to persist ticket sync error state for event {EventId}", eventId);
+            }
 
             throw;
         }
@@ -202,8 +210,13 @@ internal sealed class TicketSyncService(
     public async Task ReassignAsync(Guid sourceUserId, Guid targetUserId, Guid actorUserId, Instant updatedAt,
         CancellationToken ct)
     {
+        // Both repositories own Tickets tables; a transfer failure must not leave ownership half reassigned.
+        using var scope = new TransactionScope(TransactionScopeOption.Required,
+            new TransactionOptions { IsolationLevel = IsolationLevel.ReadCommitted },
+            TransactionScopeAsyncFlowOption.Enabled);
         await ticketRepository.ReassignToUserAsync(sourceUserId, targetUserId, updatedAt, ct);
         await transferRepository.ReassignUserAsync(sourceUserId, targetUserId, ct);
+        scope.Complete();
     }
 
     private async Task<Dictionary<string, Guid>> BuildEmailLookupAsync(CancellationToken ct)

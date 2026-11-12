@@ -35,7 +35,6 @@ internal sealed class CantinaProfileController(
 
             var vm = DietaryViewModel.FromProfile(await dietary.GetDietaryProfileAsync(user.Id, ct));
             vm.ReturnAction = returnAction;
-            vm.UserId = user.Id;
             return View(vm);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
@@ -54,8 +53,6 @@ internal sealed class CantinaProfileController(
         if (model.DeclineToAnswer)
             return await DeclineAsync(model.ReturnAction);
 
-        model.UserId = GetCurrentUserId() ?? Guid.Empty;
-
         if (!ModelState.IsValid)
             return View(model);
 
@@ -71,12 +68,12 @@ internal sealed class CantinaProfileController(
             return View(model);
         }
 
+        var user = await GetCurrentUserInfoAsync(HttpContext.RequestAborted);
+        if (user is null)
+            return NotFound();
+
         try
         {
-            var user = await GetCurrentUserInfoAsync();
-            if (user is null)
-                return NotFound();
-
             var errorKey = await dietary.SaveAsync(user.Id, model.ToAnswers(user.Id));
             if (errorKey is not null)
             {
@@ -98,12 +95,12 @@ internal sealed class CantinaProfileController(
     // Skips answer validation: nothing posted besides the choice is kept.
     private async Task<IActionResult> DeclineAsync(string? returnAction)
     {
+        var user = await GetCurrentUserInfoAsync(HttpContext.RequestAborted);
+        if (user is null)
+            return NotFound();
+
         try
         {
-            var user = await GetCurrentUserInfoAsync();
-            if (user is null)
-                return NotFound();
-
             await dietary.DeclineAsync(user.Id);
             SetSuccess(localizer["Cantina_Dietary_Declined"].Value);
         }

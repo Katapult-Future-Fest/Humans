@@ -18,12 +18,12 @@ Store Admin and Finance Admin look after the catalogue, keep an eye on orders, a
 
 - **Camp orders** (`/Store`) — browse this year's catalogue and manage your camp's orders
 - **Order detail** (`/Store/Order/{id}`) — an order's items, balance, and payment status; pay by card from here
-- **Catalogue** (`/Store/Admin/Catalog`) — create and manage products (Store Admin)
+- **Catalogue** (`/Store/Admin/Catalog`) — create and manage products (Store Admin; Board read-only)
 - **Add / edit a product** (`/Store/Admin/Catalog/Edit`) — product form: name, description, price, VAT, optional deposit, ordering deadline, Holded revenue account (Store Admin)
-- **Summary report** (`/Store/Admin/Summary`) — totals by camp and by product for a year (Store Admin, Finance Admin, Admin)
-- **Stripe payments** (`/Store/Admin/Payments`) — reconcile card payments against the ledger and record any that weren't picked up automatically (Store Admin, Finance Admin, Admin)
-- **Order years** (`/Store/Admin/OrderYears`) — give legacy orders with no recorded year their year, resolved from their camp season (Store Admin, Finance Admin, Admin)
-- **Payment methods** (`/Store/Admin/PaymentMethods`) — fill in the method name on older payment rows that lack it (Store Admin, Finance Admin, Admin)
+- **Summary report** (`/Store/Admin/Summary`) — totals by camp and by product for a year (Store Admin, Finance Admin, Admin; Board read-only)
+- **Stripe payments** (`/Store/Admin/Payments`) — reconcile card payments against the ledger and record any that weren't picked up automatically (Store Admin, Finance Admin, Admin; Board read-only)
+- **Order years** (`/Store/Admin/OrderYears`) — give legacy orders with no recorded year their year, resolved from their camp season (Store Admin, Finance Admin, Admin; Board read-only)
+- **Payment methods** (`/Store/Admin/PaymentMethods`) — fill in the method name on older payment rows that lack it (Store Admin, Finance Admin, Admin; Board read-only)
 
 ## Ordering for your camp (camp leads)
 
@@ -45,13 +45,13 @@ While your order is open, you can fill in the billing details (name, VAT ID, add
 
 ### Pay
 
-From your order's detail page, use **Pay** to pay by card — the payment is recorded automatically once it goes through. If a payment is already awaiting clearance (e.g. a bank debit mandate that hasn't settled yet), the Pay button is hidden until that payment either confirms or fails; this prevents a double charge. Bank transfers aren't recorded against the order yet — neither the hand-entry screen nor automatic matching from the org's accounts is switched on.
+From your order's detail page, use **Pay** to pay by card — the payment is recorded automatically once it goes through. If a payment is already awaiting clearance (e.g. a bank debit mandate that hasn't settled yet), the Pay button is hidden until that payment either confirms or fails; this prevents a double charge. Pressing Pay again for the same amount takes you back to the same Stripe page; paying a different amount closes the earlier page and opens a new one. Bank transfers aren't recorded against the order yet — neither the hand-entry screen nor automatic matching from the org's accounts is switched on.
 
 ![TODO: screenshot — order detail page showing items, balance, and the Pay button]
 
 ## As a Board member / Admin (Store Admin)
 
-The tasks below need the **Store Admin**, **Finance Admin**, or **Admin** role. Within the Store, a Store Admin can do everything a Finance Admin can. All of these pages are reached from the Store section of the admin sidebar.
+The tasks below need the **Store Admin**, **Finance Admin**, or **Admin** role. Board members can open the catalogue, summary, payments, order-years and payment-methods pages read-only, but can't change anything. Within the Store, a Store Admin can do everything a Finance Admin can. All of these pages are reached from the Store section of the admin sidebar.
 
 ### Manage the catalogue
 
@@ -79,6 +79,8 @@ lines, because a deposit is money held, not money earned.
 
 If an item is missing its Holded revenue account, or the deposit account hasn't been configured
 yet, nothing is sent to Holded and you're told exactly what to fix.
+
+If an earlier attempt already left a document in Holded and its items or totals no longer match the order, issuing is refused and the order stays open.
 
 > **Heads up:** the Finance order-review screen (entering manual payments by hand) isn't switched
 > on yet.

@@ -305,7 +305,7 @@ public class AuditLogServiceTests : IDisposable
 
         capturing.Entries.Should().Contain(
             e => e.Level == LogLevel.Error,
-            because: "a repo save failure must be logged at Error level per design-rules §7a");
+            because: "a repo save failure must be logged at Error level per design-rules.md, *Decorators versus in-service crosscuts*");
     }
 
     [HumansFact]
@@ -372,7 +372,8 @@ public class AuditLogServiceTests : IDisposable
         await _dbContext.SaveChangesAsync(TestContext.Current.CancellationToken);
 
         var result = await _service.GetFilteredEntriesAsync(
-            actions: [], userId: userId, ct: TestContext.Current.CancellationToken);
+            entityType: null, entityId: null, userId: userId, actions: [], limit: 20,
+            ct: TestContext.Current.CancellationToken);
 
         result.Select(e => e.Action).Should().Equal(TestActions.RoleAssigned.Name, TestActions.VolunteerApproved.Name);
     }
@@ -432,7 +433,7 @@ public class AuditLogServiceTests : IDisposable
     /// <summary>A record listing the given ids as accounts merged into <paramref name="userId"/>.</summary>
     private static UserInfo WithMergedIds(Guid userId, params Guid[] mergedUserIds)
     {
-        var info = UserInfo.Create(new User { Id = userId, PreferredLanguage = "en" }, [], [], [], null, []);
+        var info = UserInfo.Create(new User { Id = userId, PreferredLanguage = "en" }, [], [], null);
         return info with { MergedUserIds = mergedUserIds };
     }
 }

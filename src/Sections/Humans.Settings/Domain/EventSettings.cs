@@ -7,7 +7,6 @@ internal sealed class EventSettings : IEventSettingsInfo
 {
     public Guid Id { get; init; }
 
-    /// <summary>E.g. "Elsewhere 2026".</summary>
     public string EventName { get; set; } = string.Empty;
 
     /// <summary>Always <see cref="GateOpeningDate"/>'s year, derived on save; the form has no Year field.</summary>
@@ -32,21 +31,10 @@ internal sealed class EventSettings : IEventSettingsInfo
     public int? EarlyEntryStartOffset { get; set; }
 
     /// <summary>
-    /// Admin-set "cycle is wrapped" switch: the member dashboard drops its in-season cards. Set by hand until the
-    /// settings revamp derives it. Nullable because a new column on an existing table must be; null reads as false.
+    /// Admin-set "cycle is wrapped" switch: the member dashboard drops its in-season cards. Nullable because a new
+    /// column on an existing table must be; null reads as false.
     /// </summary>
     public bool? IsOffSeason { get; set; }
-
-    // Build sub-periods: Shifts owns them now (its own event_settings columns). These are only Shifts' fallback
-    // until the shifts.build-sub-periods data migration has copied them; nothing edits them any more.
-
-    public int FirstCrewStartOffset { get; set; } = -25;
-
-    public int SetupWeekStartOffset { get; set; } = -16;
-
-    public int PreEventWeekStartOffset { get; set; } = -9;
-
-    public int FinishingWeekendStartOffset { get; set; } = -4;
 
     /// <summary>Step function: DayOffset → cumulative EE headcount allowed from that day.</summary>
     public Dictionary<int, int> EarlyEntryCapacity { get; set; } = new();
