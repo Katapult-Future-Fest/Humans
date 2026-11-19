@@ -8,6 +8,7 @@ using Humans.Base.Authorization;
 using Humans.Store.Authorization;
 using Humans.Store.Models;
 using Humans.Base.Controllers;
+using Humans.Base.Extensions;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Localization;
@@ -76,20 +77,30 @@ internal sealed class StoreController(
         var canDeleteAuth = (await authService.AuthorizeAsync(User, order, OrderOperationRequirement.Delete)).Succeeded;
         var canIssueAuth = (await authService.AuthorizeAsync(User, order, OrderOperationRequirement.IssueInvoice)).Succeeded;
         var canRecordPayment = (await authService.AuthorizeAsync(User, order, OrderOperationRequirement.RecordPayment)).Succeeded;
-        var canRefund = canRecordPayment
-            && (await authService.AuthorizeAsync(User, order, OrderOperationRequirement.Refund)).Succeeded;
+        var canRecordFinancePayment = canRecordPayment
+            && (await authService.AuthorizeAsync(User, order, OrderOperationRequirement.RecordFinancePayment)).Succeeded;
         var canDeletePayment = (await authService.AuthorizeAsync(User, order, OrderOperationRequirement.DeletePayment)).Succeeded;
         var pageData = await storeService.GetOrderPageDataAsync(order, canEdit, canPay, ct);
         var (catalog, removableLineIds) = await FilterLineEditAffordancesAsync(order, pageData.Catalog, canEdit, ct);
-        return View(OrderViewModel.FromPageData(
+        var model = OrderViewModel.FromPageData(
             pageData,
             canDeleteAuth && order.IsDeletable,
             canIssueAuth && order.IsInvoiceIssuable,
             canRecordPayment,
-            canRefund,
+            canRecordFinancePayment,
             canDeletePayment,
             catalog.OrderBy(p => p.Name, StringComparer.Ordinal).ToList(),
-            removableLineIds));
+            removableLineIds);
+        if (canRecordFinancePayment)
+        {
+            model.StripeRefundLinks = order.Payments
+                .Where(p => p.Method == PaymentMethod.Stripe && p.Status == PaymentStatus.Paid && p.StripePaymentIntentId is not null)
+                .OrderBy(p => p.ReceivedAt)
+                .Select(p => new StripeRefundLink(p.StripePaymentIntentId!, p.AmountEur,
+                    storeService.StripePaymentDashboardUrl(p.StripePaymentIntentId!)))
+                .ToList();
+        }
+        return View(model);
     }
 
     private async Task<(IActionResult? Error, UserInfo User, OrderDto Order)> RequireOrderAsync(
@@ -200,20 +211,54 @@ internal sealed class StoreController(
     [HttpPost("Order/{id:guid}/RecordPayment")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> RecordPayment(
-        Guid id, PaymentMethod method, decimal amountEur, string? externalRef, string? notes, CancellationToken ct)
+        Guid id, PaymentMethod method, decimal amountEur, string? externalRef, string? notes, LocalDate? valueDate,
+        CancellationToken ct)
     {
         var (errorResult, user, order) = await RequireOrderAsync(id, ct);
         if (errorResult is not null) return errorResult;
 
         var auth = await authService.AuthorizeAsync(User, order, OrderOperationRequirement.RecordPayment);
         if (!auth.Succeeded) return Forbid();
-        if (method == PaymentMethod.Refund
-            && !(await authService.AuthorizeAsync(User, order, OrderOperationRequirement.Refund)).Succeeded)
+        if (method is PaymentMethod.Refund or PaymentMethod.BankTransfer
+            && !(await authService.AuthorizeAsync(User, order, OrderOperationRequirement.RecordFinancePayment)).Succeeded)
             return Forbid();
 
-        var result = await storeService.RecordAdminPaymentAsync(id, method, amountEur, externalRef, notes, user.Id, CancellationToken.None);
+        var result = await storeService.RecordAdminPaymentAsync(
+            id, method, amountEur, externalRef, notes, valueDate, user.Id, CancellationToken.None);
         if (result.Succeeded) SetSuccess(localizer["Store_PaymentRecorded"].Value);
         else SetError(result.Refusal!);
+        return RedirectToAction(nameof(Order), new { id });
+    }
+
+    [HttpPost("Order/{id:guid}/CheckStripeRefunds")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> CheckStripeRefunds(Guid id, CancellationToken ct)
+    {
+        var (errorResult, user, order) = await RequireOrderAsync(id, ct);
+        if (errorResult is not null) return errorResult;
+
+        if (!(await authService.AuthorizeAsync(User, order, OrderOperationRequirement.RecordPayment)).Succeeded
+            || !(await authService.AuthorizeAsync(User, order, OrderOperationRequirement.RecordFinancePayment)).Succeeded)
+            return Forbid();
+
+        // FinanceAdmin-only control: plain strings, exempt from localization.
+        var result = await storeService.RecordStripeRefundsAsync(id, user.Id, CancellationToken.None);
+        if (result.Refusal is { } refusal)
+            SetError(refusal);
+        else
+        {
+            var parts = new List<string>();
+            if (result.RecordedCount > 0)
+                parts.Add($"Recorded {result.RecordedCount} Stripe refund(s) totalling {result.TotalEur.ToEuro()}"
+                    + (result.PendingCount > 0 ? $", {result.PendingCount} still pending in Stripe." : "."));
+            if (result.SettledCount > 0)
+                parts.Add($"{result.SettledCount} pending refund(s) completed.");
+            if (result.CancelledCount > 0)
+                parts.Add($"{result.CancelledCount} refund(s) failed or were cancelled in Stripe and no longer count.");
+            var message = parts.Count == 0 ? "No new Stripe refunds to record." : string.Join(" ", parts);
+            if (result.CancelledCount > 0) SetError(message);
+            else SetSuccess(message);
+        }
         return RedirectToAction(nameof(Order), new { id });
     }
 
