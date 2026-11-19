@@ -1,3 +1,0 @@
-<Project>
-  <!-- Stops the repo-root props (analyzers, warnings-as-errors) applying to this standalone tool. -->
-</Project>

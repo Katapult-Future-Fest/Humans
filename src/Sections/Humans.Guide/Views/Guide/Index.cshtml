@@ -1,8 +1,0 @@
-@model GuideViewModel
-@{
-    ViewData["Title"] = Model.Title;
-}
-
-<page-header title="@Model.Title" />
-
-@await Html.PartialAsync("_GuideLayout", Model)

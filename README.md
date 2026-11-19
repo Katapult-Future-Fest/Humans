@@ -177,3 +177,5 @@ See [CONTRIBUTING.md](.github/CONTRIBUTING.md) for workflow and guidelines.
 ## License
 
 AGPL-3.0
+
+**Server start (thrivbe-4):** run `./deploy.sh` (resolves 1Password refs via `oprun`); a plain `docker compose up` breaks email.
