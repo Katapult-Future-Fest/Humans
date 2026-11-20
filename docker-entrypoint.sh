@@ -25,4 +25,14 @@ if [ -n "$PR_ID" ] && [ -n "$DB_PASSWORD" ]; then
   fi
 fi
 
+# Refuse to start with an unresolved 1Password reference: a plain `docker compose up`
+# (without oprun) passes literal op:// strings, and every SMTP login then fails with 535.
+# Prints the variable name only, never the value.
+for name in $(compgen -e); do
+  if [[ "${!name}" == op://* ]]; then
+    echo "ERROR: env var ${name} is an unresolved 1Password reference (op://...). Start via ./deploy.sh (oprun)." >&2
+    exit 1
+  fi
+done
+
 exec dotnet Humans.Web.dll
