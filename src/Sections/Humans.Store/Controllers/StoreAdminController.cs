@@ -23,7 +23,7 @@ internal sealed class StoreAdminController(
     [HttpGet("Catalog")]
     public async Task<IActionResult> Catalog(CancellationToken ct)
     {
-        var year = await storeService.GetCurrentEventYearAsync(ct);
+        var year = storeService.GetCurrentEventYear();
         var products = (await storeService.GetAllProductsForYearAsync(year, ct))
             .OrderByDescending(p => p.IsActive)
             .ThenBy(p => p.Name, StringComparer.Ordinal)
@@ -34,7 +34,7 @@ internal sealed class StoreAdminController(
     [HttpGet("Summary")]
     public async Task<IActionResult> Summary(int? year, CancellationToken ct)
     {
-        var defaultYear = await storeService.GetCurrentEventYearAsync(ct);
+        var defaultYear = storeService.GetCurrentEventYear();
         var selectedYear = year ?? defaultYear;
 
         var summary = await storeService.GetStoreSummaryAsync(selectedYear, ct);
@@ -51,6 +51,35 @@ internal sealed class StoreAdminController(
             .ThenByDescending(r => r.CreatedAt)
             .ToList();
         return View(new PaymentsReconciliationViewModel { Report = report, Rows = rows });
+    }
+
+    [HttpGet("Transfers")]
+    public async Task<IActionResult> Transfers(
+        int? year, [FromServices] StoreTransferBooking transferBooking, CancellationToken ct)
+    {
+        var selectedYear = year ?? storeService.GetCurrentEventYear();
+        return View(await transferBooking.GetPlanAsync(selectedYear, ct));
+    }
+
+    [HttpPost("Transfers/Book")]
+    [Authorize(Policy = StorePolicies.Manage)]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> BookTransfers(
+        int year, [FromServices] StoreTransferBooking transferBooking, CancellationToken ct)
+    {
+        var (errorResult, user) = await RequireCurrentUserAsync(ct);
+        if (errorResult is not null) return errorResult;
+
+        var (lines, refused) = await transferBooking.BookAsync(year, user.Id, ct);
+        var posted = lines.Count(l => l.Outcome != TransferOutcome.Failed);
+        var failed = lines.Where(l => l.Outcome == TransferOutcome.Failed).ToList();
+        if (refused is not null) SetError(refused + (lines.Count > 0 ? $" {posted} entr(ies) posted first." : ""));
+        else if (failed.Count > 0)
+            SetError($"Posted {posted}; {failed.Count} failed: "
+                + string.Join("; ", failed.Select(f => $"{f.Row.TeamName} / {f.Row.ProductName}: {f.Error}")));
+        else if (posted > 0) SetSuccess($"Posted {posted} transfer entr(ies) to Holded.");
+        else SetInfo("Nothing was ready to book.");
+        return RedirectToAction(nameof(Transfers), new { year });
     }
 
     [HttpGet("OrderYears")]
@@ -119,13 +148,14 @@ internal sealed class StoreAdminController(
     [Authorize(Policy = StorePolicies.Manage)]
     public async Task<IActionResult> Edit(CancellationToken ct)
     {
-        var year = await storeService.GetCurrentEventYearAsync(ct);
+        var year = storeService.GetCurrentEventYear();
         var model = new ProductInputModel
         {
             Year = year,
             VatRatePercent = SpanishStandardVatRatePercent,
             OrderableUntil = $"{year}-12-31",
-            IsActive = true
+            IsActive = true,
+            AccountChoices = await storeService.GetAccountChoicesAsync(ct)
         };
         return View("CatalogEdit", model);
     }
@@ -147,8 +177,11 @@ internal sealed class StoreAdminController(
             VatRatePercent = p.VatRatePercent,
             DepositAmountEur = p.DepositAmountEur,
             HoldedRevenueAccountNum = p.HoldedRevenueAccountNum,
+            HoldedExpenseAccountNum = p.HoldedExpenseAccountNum,
+            HoldedTransferAccountNum = p.HoldedTransferAccountNum,
             OrderableUntil = LocalDatePattern.Iso.Format(p.OrderableUntil),
-            IsActive = p.IsActive
+            IsActive = p.IsActive,
+            AccountChoices = await storeService.GetAccountChoicesAsync(ct)
         };
         return View("CatalogEdit", model);
     }
@@ -161,6 +194,7 @@ internal sealed class StoreAdminController(
         var (errorResult, user) = await RequireCurrentUserAsync(ct);
         if (errorResult is not null) return errorResult;
 
+        input.AccountChoices = await storeService.GetAccountChoicesAsync(ct);
         if (!ModelState.IsValid)
             return View("CatalogEdit", input);
 
@@ -175,7 +209,9 @@ internal sealed class StoreAdminController(
                 input.DepositAmountEur,
                 input.OrderableUntil,
                 input.IsActive,
-                input.HoldedRevenueAccountNum),
+                input.HoldedRevenueAccountNum,
+                input.HoldedExpenseAccountNum,
+                input.HoldedTransferAccountNum),
             user.Id,
             ct);
 
@@ -187,6 +223,53 @@ internal sealed class StoreAdminController(
 
         SetSuccess(result.Created ? "Product created." : "Product updated.");
         return RedirectToAction(nameof(Catalog));
+    }
+
+    [HttpGet("Catalog/Accounts")]
+    [Authorize(Policy = StorePolicies.Manage)]
+    public async Task<IActionResult> Accounts(int? year, CancellationToken ct)
+    {
+        var selectedYear = year ?? storeService.GetCurrentEventYear();
+        return View("CatalogAccounts", await BuildAccountsViewAsync(selectedYear, posted: null, ct));
+    }
+
+    [HttpPost("Catalog/Accounts")]
+    [Authorize(Policy = StorePolicies.Manage)]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> SaveAccounts(int year, List<CatalogAccountsInput> rows, CancellationToken ct)
+    {
+        var (errorResult, user) = await RequireCurrentUserAsync(ct);
+        if (errorResult is not null) return errorResult;
+
+        var result = await storeService.SaveProductAccountsAsync(
+            year, rows.Select(r => new ProductAccounts(r.ProductId, r.Income, r.Cost, r.TeamUsage)).ToList(), user.Id, ct);
+        if (!result.Succeeded)
+        {
+            ModelState.AddModelError(string.Empty, result.Refusal!);
+            return View("CatalogAccounts", await BuildAccountsViewAsync(year, rows, ct));
+        }
+
+        SetSuccess("Accounts saved.");
+        return RedirectToAction(nameof(Accounts), new { year });
+    }
+
+    private async Task<CatalogAccountsViewModel> BuildAccountsViewAsync(
+        int year, IReadOnlyList<CatalogAccountsInput>? posted, CancellationToken ct)
+    {
+        var products = (await storeService.GetAllProductsForYearAsync(year, ct))
+            .OrderByDescending(p => p.IsActive)
+            .ThenBy(p => p.Name, StringComparer.Ordinal)
+            .ToList();
+        var postedById = (posted ?? []).GroupBy(r => r.ProductId).ToDictionary(g => g.Key, g => g.First());
+        return new CatalogAccountsViewModel
+        {
+            Year = year,
+            Choices = await storeService.GetAccountChoicesAsync(ct),
+            Rows = products.Select((p, i) => postedById.TryGetValue(p.Id, out var r)
+                    ? new CatalogAccountsRow(i, p, r.Income, r.Cost, r.TeamUsage)
+                    : new CatalogAccountsRow(i, p, p.HoldedRevenueAccountNum, p.HoldedExpenseAccountNum, p.HoldedTransferAccountNum))
+                .ToList()
+        };
     }
 
     [HttpPost("Catalog/Deactivate/{id:guid}")]

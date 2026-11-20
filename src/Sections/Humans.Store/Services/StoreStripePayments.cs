@@ -22,7 +22,8 @@ internal sealed class StoreStripePayments(
 {
     private static readonly ResourceManager Resources = new(typeof(StoreResource));
 
-    private static readonly TrackedLock StripePaymentLock = new("Store.StripePayments");
+    internal static readonly TrackedLock StripePaymentLock = new("Store.StripePayments");
+    internal const decimal MaximumCheckoutAmountEur = 999_999.99m;
 
     [ExternalWrite]
     public async Task<CheckoutSessionResult> CreateStripeCheckoutSessionAsync(
@@ -46,7 +47,12 @@ internal sealed class StoreStripePayments(
             errorKey = "Store_PaymentAboveBalance";
             maximumAmount = order.BalanceEur;
         }
-        else if (order.Payments.Any(p => p.Status == PaymentStatus.Pending))
+        else if (amountEur > MaximumCheckoutAmountEur)
+        {
+            errorKey = "Store_PaymentAboveCheckoutLimit";
+            maximumAmount = MaximumCheckoutAmountEur;
+        }
+        else if (order.Payments.Any(p => p.Status == PaymentStatus.Pending && p.AmountEur > 0))
             errorKey = "Store_PaymentPending";
 
         if (errorKey is not null)
@@ -172,6 +178,117 @@ internal sealed class StoreStripePayments(
         }
 
         return new StripeReconciliationResult(count, total);
+    }
+
+    /// <summary>
+    /// Books every Stripe refund on the order's paid Stripe payments that no <see cref="PaymentMethod.Refund"/> row cites
+    /// yet, as a negative refund carrying the Stripe refund id: <see cref="PaymentStatus.Pending"/> while Stripe is still
+    /// sending it, so the amount owed drops at once, and moves booked ones to Paid or Failed as Stripe settles them. Read only on the Stripe side: the refund itself
+    /// is issued by a person on the Stripe dashboard. Running it again books nothing new.
+    /// </summary>
+    public async Task<StripeRefundCheckResult> RecordStripeRefundsAsync(
+        Guid orderId, Guid actorUserId, CancellationToken ct = default)
+    {
+        var order = await repo.GetOrderWithLinesAndPaymentsAsync(orderId, ct);
+        if (order is null) return RefuseRefundCheck(orderId, "Order not found.");
+        if (order.TeamId is not null) return RefuseRefundCheck(orderId, "Team orders are non-billable.");
+
+        var paymentIntents = order.Payments
+            .Where(p => p.Method == PaymentMethod.Stripe && p.Status == PaymentStatus.Paid && p.StripePaymentIntentId is not null)
+            .Select(p => p.StripePaymentIntentId!)
+            .ToList();
+        if (paymentIntents.Count == 0)
+            return RefuseRefundCheck(orderId, "This order has no paid Stripe payments to check.");
+
+        var refunds = new List<StoreRefundData>();
+        foreach (var pi in paymentIntents)
+        {
+            var listed = await stripeService.ListStoreRefundsAsync(pi, ct);
+            if (listed is null)
+                return RefuseRefundCheck(orderId,
+                    "Couldn't read refunds from Stripe: the Store account's read key is missing or lacks refund read access.");
+            refunds.AddRange(listed);
+        }
+
+        using var mutation = await StripePaymentLock.AcquireAsync(logger, ct);
+        // Reread under the lock so a concurrent check can't book the same refund twice.
+        order = await repo.GetOrderWithLinesAndPaymentsAsync(orderId, ct);
+        if (order is null) return RefuseRefundCheck(orderId, "Order not found.");
+        var booked = order.Payments
+            .Where(p => p.Method == PaymentMethod.Refund && p.ExternalRef is not null)
+            .GroupBy(p => p.ExternalRef!, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
+
+        var recorded = 0;
+        var total = 0m;
+        var pending = 0;
+        var settled = 0;
+        var cancelled = 0;
+        foreach (var refund in refunds.OrderBy(r => r.CreatedAt))
+        {
+            var status = RefundStatusOf(refund.Status);
+            if (booked.TryGetValue(refund.RefundId, out var existing))
+            {
+                // Only forward moves: Pending → Paid/Failed, or a refund Stripe later reverses → Failed.
+                if (existing.Status == status || existing.Status == PaymentStatus.Failed
+                    || (existing.Status == PaymentStatus.Paid && status == PaymentStatus.Pending))
+                    continue;
+                await repo.UpdatePaymentStatusAsync(existing.Id, status, ct);
+                var (action, verb) = status == PaymentStatus.Paid
+                    ? (StoreAuditActions.StorePaymentSettled, "completed")
+                    : (StoreAuditActions.StorePaymentFailed, $"{refund.Status} in Stripe, no longer counted");
+                await audit.LogAsync(action, AuditEntityTypes.Payment, existing.Id,
+                    $"Stripe refund {refund.RefundId} of EUR {existing.AmountEur:0.00} on order {orderId} {verb}",
+                    actorUserId, orderId, AuditEntityTypes.Order);
+                if (status == PaymentStatus.Paid) settled++;
+                else cancelled++;
+                continue;
+            }
+
+            // A refund that never went through moves no money; nothing to book.
+            if (status == PaymentStatus.Failed) continue;
+
+            var payment = new Payment
+            {
+                Id = Guid.NewGuid(),
+                OrderId = orderId,
+                AmountEur = -refund.AmountEur,
+                Method = PaymentMethod.Refund,
+                MethodName = PaymentMethod.Refund,
+                Status = status,
+                ExternalRef = refund.RefundId,
+                Notes = $"Stripe refund of {refund.PaymentIntentId}",
+                ReceivedAt = refund.CreatedAt,
+                RecordedByUserId = actorUserId,
+            };
+            await repo.AddPaymentAsync(payment, ct);
+            await audit.LogAsync(
+                StoreAuditActions.StorePaymentRecorded, AuditEntityTypes.Payment, payment.Id,
+                $"Recorded {(status == PaymentStatus.Pending ? "pending " : "")}Stripe refund {refund.RefundId} of EUR {payment.AmountEur:0.00} on order {orderId} (PI {refund.PaymentIntentId})",
+                actorUserId, orderId, AuditEntityTypes.Order);
+            recorded++;
+            total += refund.AmountEur;
+            if (status == PaymentStatus.Pending) pending++;
+        }
+
+        return new StripeRefundCheckResult(recorded, total, pending, settled, cancelled);
+    }
+
+    /// <summary>Stripe's <c>pending</c> and <c>requires_action</c> are money on its way out; <c>failed</c> and
+    /// <c>canceled</c> are money that never left or came back.</summary>
+    private static PaymentStatus RefundStatusOf(string stripeStatus) => stripeStatus switch
+    {
+        "succeeded" => PaymentStatus.Paid,
+        "failed" or "canceled" => PaymentStatus.Failed,
+        _ => PaymentStatus.Pending,
+    };
+
+    public string DashboardUrl(string paymentIntentId) => stripeService.StorePaymentDashboardUrl(paymentIntentId);
+
+    private StripeRefundCheckResult RefuseRefundCheck(Guid orderId, string reason)
+    {
+        logger.LogWarning("Stripe refund check refused for order {OrderId}: {Reason}", orderId, reason);
+        return new StripeRefundCheckResult(0, 0m, 0, 0, 0, reason);
     }
 
     /// <summary>
